@@ -51,11 +51,29 @@ builds:
     env:
       - CGO_ENABLED=0
 
+  - id: bough-plugin-postgres
+    main: ./cmd/bough-plugin-postgres
+    binary: bough-plugin-postgres
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s
+      - -w
+    env:
+      - CGO_ENABLED=0
+
 archives:
   - id: default
     ids:
       - bough
       - bough-plugin-mysql
+      - bough-plugin-postgres
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     formats:
