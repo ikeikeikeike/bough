@@ -1,0 +1,58 @@
+schema_version: 1
+
+monorepo_root: "."
+
+repositories:
+  - name: demo-api
+    branch_strategy: develop
+    direnv: true
+    env_local:
+      DEMO_API_DSN: "root:@tcp(127.0.0.1:{{ .Mysql.Port }})/demo?parseTime=true&loc=UTC"
+      DEMO_API_URI: "grpc://0.0.0.0:{{ .Ports.Api }}"
+      DEMO_API_GATEWAY_PORT: "{{ .Ports.Gateway }}"
+      DEMO_API_DISABLE_PORT_FALLBACK: "true"
+
+  - name: demo-dbmigration
+    branch_strategy: develop
+    direnv: true
+    role: db-provider
+    env_local:
+      DEMO_DBM_DBPORT: "{{ .Mysql.Port }}"
+      DEMO_DBM_DBHOST: "127.0.0.1"
+      DEMO_DBM_DBNAME: "demo"
+    post_create:
+      - "nix develop -c make create-database"
+      - "nix develop -c make migrate"
+
+  - name: demo-proto
+    branch_strategy: develop
+    direnv: true
+
+databases:
+  - kind: mysql
+    version: "8.4"
+    port_range: [42000, 44999]
+    socket_dir: "/tmp"
+    initial_databases: ["demo"]
+    extras:
+      character_set_server: utf8mb4
+      default_time_zone: "+00:00"
+
+ports:
+  api:
+    range: [45000, 47999]
+  gateway:
+    range: [48000, 50099]
+
+registry:
+  path: ".worktree-ports.json"
+  backup_dir: "~/.claude/backups"
+
+teardown:
+  remove_branch: true
+  remove_datadir: true
+  graceful_timeout_sec: 10
+
+mcp:
+  enabled: false
+  source_of_truth: "~/.claude/mcp-servers-source.json"
