@@ -1,0 +1,26 @@
+# Go
+/vendor/
+*.exe
+*.test
+*.out
+coverage.out
+coverage.txt
+dist/
+
+# Nix
+.direnv/
+result
+result-*
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local development
+.local/
+*.local
+
+# Plugin sockets
+/tmp/bough-plugin-*.sock
