@@ -156,13 +156,6 @@ bough/
 └── .github/workflows/               ci.yml + release.yml
 ```
 
-## Why "bough"
-
-A bough is a large branch of a tree — the same metaphor as a git
-worktree hanging off a parent repository. Pronounced /baʊ/. Short,
-unique on GitHub / Homebrew, no clash with existing Go / Python / Rust
-packages.
-
 ## Contributing
 
 Bug reports and pull requests welcome — please run `make test`,
