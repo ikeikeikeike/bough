@@ -1,0 +1,321 @@
+//go:build darwin || linux
+
+// Docker backend for the Redis plugin. Same shape as the mysql /
+// postgres backends; redis is the simplest of the four because the
+// official image is env-less, the cold start is ~1-2s and the
+// readiness signal is unambiguous (`redis-cli ping` → `PONG`).
+//
+// Patterns lifted from:
+//
+//   - testcontainers-go modules/redis (`wait.ForListeningPort` +
+//     `wait.ForLog("* Ready to accept connections")`, both verbatim)
+//   - Docker Hub `redis` official image
+//     (`--save 60 1 --loglevel warning --appendonly yes` is the
+//     documented persistence-enabled invocation; 127.0.0.1 binding
+//     is mandated by the image's own security note)
+//
+// Engine-specific choices:
+//
+//   * Default image is `redis:7-alpine` (≈5 MB) — Docker Hub recommends
+//     alpine for footprint reasons and the bough use-case does not
+//     need glibc-only Redis modules.
+//   * `--appendonly yes` flips AOF on so a SIGKILL on the container
+//     loses ≤1 s of writes instead of the full save-window (60s).
+//   * `--bind 0.0.0.0` is intentional — the redis-server defaults to
+//     bind 127.0.0.1 which is the container's loopback, unreachable
+//     from the host. We rely on Docker's `-p 127.0.0.1:<host>:6379`
+//     publish to keep external access shut.
+package redis
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"strings"
+	"time"
+
+	api "github.com/ikeikeikeike/bough/plugins/db/api"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/client"
+	"github.com/docker/go-connections/nat"
+)
+
+const (
+	dockerDefaultImage   = "redis:7-alpine"
+	dockerInternalPort   = "6379/tcp"
+	dockerDataDir        = "/data"
+	dockerStopTimeoutSec = 5
+	dockerReadyPollMS    = 300
+)
+
+func pickDockerImage(req api.UpReq) string {
+	if v := req.Extras["docker.image"]; v != "" {
+		return v
+	}
+	if v := req.Extras["version"]; v != "" {
+		return fmt.Sprintf("redis:%s-alpine", v)
+	}
+	return dockerDefaultImage
+}
+
+func dockerContainerName(port int) string {
+	return fmt.Sprintf("bough-redis-%d", port)
+}
+
+func dockerLabels(imageRef string, port int) map[string]string {
+	return map[string]string{
+		"com.bough.managed":   "true",
+		"com.bough.engine":    "redis",
+		"com.bough.image":     imageRef,
+		"com.bough.host-port": fmt.Sprintf("%d", port),
+	}
+}
+
+func newDockerClient() (*client.Client, error) {
+	cli, err := client.NewClientWithOpts(
+		client.FromEnv,
+		client.WithAPIVersionNegotiation(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("docker client: %w", err)
+	}
+	return cli, nil
+}
+
+func pullIfMissing(ctx context.Context, cli *client.Client, ref string) error {
+	if _, err := cli.ImageInspect(ctx, ref); err == nil {
+		return nil
+	}
+	rc, err := cli.ImagePull(ctx, ref, image.PullOptions{})
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	if _, err := io.Copy(io.Discard, rc); err != nil {
+		return fmt.Errorf("drain pull stream: %w", err)
+	}
+	return nil
+}
+
+func removeIfExists(ctx context.Context, cli *client.Client, name string) error {
+	id, err := lookupByName(ctx, cli, name)
+	if err != nil {
+		return err
+	}
+	if id == "" {
+		return nil
+	}
+	return cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true, RemoveVolumes: false})
+}
+
+func lookupByName(ctx context.Context, cli *client.Client, name string) (string, error) {
+	args := filters.NewArgs()
+	args.Add("name", "^/"+name+"$")
+	list, err := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: args})
+	if err != nil {
+		return "", err
+	}
+	for _, c := range list {
+		for _, n := range c.Names {
+			if strings.TrimPrefix(n, "/") == name {
+				return c.ID, nil
+			}
+		}
+	}
+	return "", nil
+}
+
+func usingDockerBackend(ctx context.Context, port int) bool {
+	if port <= 0 {
+		return false
+	}
+	cli, err := newDockerClient()
+	if err != nil {
+		return false
+	}
+	defer cli.Close()
+	id, err := lookupByName(ctx, cli, dockerContainerName(port))
+	if err != nil {
+		return false
+	}
+	return id != ""
+}
+
+func (p *Provider) dockerUp(ctx context.Context, req api.UpReq) error {
+	if req.Port <= 0 {
+		return fmt.Errorf("redis docker: invalid port %d", req.Port)
+	}
+	if req.Datadir == "" {
+		return errors.New("redis docker: datadir is required")
+	}
+
+	cli, err := newDockerClient()
+	if err != nil {
+		return err
+	}
+	defer cli.Close()
+
+	imageRef := pickDockerImage(req)
+	name := dockerContainerName(req.Port)
+
+	if err := pullIfMissing(ctx, cli, imageRef); err != nil {
+		return fmt.Errorf("redis docker: pull %s: %w", imageRef, err)
+	}
+	if err := removeIfExists(ctx, cli, name); err != nil {
+		return fmt.Errorf("redis docker: remove stale %s: %w", name, err)
+	}
+
+	hostPort := fmt.Sprintf("%d", req.Port)
+	portBindings := nat.PortMap{
+		nat.Port(dockerInternalPort): []nat.PortBinding{
+			{HostIP: "127.0.0.1", HostPort: hostPort},
+		},
+	}
+	exposed := nat.PortSet{
+		nat.Port(dockerInternalPort): struct{}{},
+	}
+
+	// `--bind 0.0.0.0` lets redis accept connections forwarded from the
+	// container's loopback proxy (= host 127.0.0.1:<host-port> via
+	// Docker port publish). The publish target above is 127.0.0.1, so
+	// the redis socket is still not externally reachable.
+	cmd := []string{
+		"redis-server",
+		"--bind", "0.0.0.0",
+		"--save", "60", "1",
+		"--loglevel", "warning",
+		"--appendonly", "yes",
+	}
+	if pw := req.Extras["redis.password"]; pw != "" {
+		cmd = append(cmd, "--requirepass", pw)
+	}
+
+	cfg := &container.Config{
+		Image:        imageRef,
+		Labels:       dockerLabels(imageRef, req.Port),
+		ExposedPorts: exposed,
+		Cmd:          cmd,
+	}
+	hostCfg := &container.HostConfig{
+		Binds:         []string{req.Datadir + ":" + dockerDataDir},
+		PortBindings:  portBindings,
+		RestartPolicy: container.RestartPolicy{Name: "no"},
+	}
+
+	resp, err := cli.ContainerCreate(ctx, cfg, hostCfg, nil, nil, name)
+	if err != nil {
+		return fmt.Errorf("redis docker: create: %w", err)
+	}
+	if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		return fmt.Errorf("redis docker: start %s: %w", resp.ID, err)
+	}
+	return nil
+}
+
+// dockerReadyCheck polls a TCP dial against the host-side port, then
+// runs `redis-cli ping` inside the container to confirm the server has
+// finished AOF loading and replies `PONG`.
+func (p *Provider) dockerReadyCheck(ctx context.Context, port, timeoutSec int) (bool, error) {
+	if timeoutSec <= 0 {
+		timeoutSec = 600
+	}
+	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
+
+	cli, err := newDockerClient()
+	if err != nil {
+		return false, err
+	}
+	defer cli.Close()
+	name := dockerContainerName(port)
+
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		default:
+		}
+		conn, dialErr := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if dialErr != nil {
+			time.Sleep(dockerReadyPollMS * time.Millisecond)
+			continue
+		}
+		_ = conn.Close()
+		if redisPing(ctx, cli, name) == nil {
+			return true, nil
+		}
+		time.Sleep(dockerReadyPollMS * time.Millisecond)
+	}
+	return false, fmt.Errorf("redis docker: not ready on port %d within %ds", port, timeoutSec)
+}
+
+// redisPing runs `redis-cli ping` inside the container. Exit 0 +
+// stdout `PONG` means the server has finished loading any persistence
+// snapshot and is accepting commands.
+func redisPing(ctx context.Context, cli *client.Client, name string) error {
+	id, err := lookupByName(ctx, cli, name)
+	if err != nil {
+		return err
+	}
+	if id == "" {
+		return fmt.Errorf("container %s not found", name)
+	}
+	exec, err := cli.ContainerExecCreate(ctx, id, container.ExecOptions{
+		Cmd:          []string{"redis-cli", "ping"},
+		AttachStdout: true,
+		AttachStderr: true,
+	})
+	if err != nil {
+		return err
+	}
+	if err := cli.ContainerExecStart(ctx, exec.ID, container.ExecStartOptions{}); err != nil {
+		return err
+	}
+	insp, err := cli.ContainerExecInspect(ctx, exec.ID)
+	if err != nil {
+		return err
+	}
+	if insp.Running {
+		time.Sleep(150 * time.Millisecond)
+		insp, _ = cli.ContainerExecInspect(ctx, exec.ID)
+	}
+	if insp.ExitCode != 0 {
+		return fmt.Errorf("redis-cli ping exit %d", insp.ExitCode)
+	}
+	return nil
+}
+
+func (p *Provider) dockerDown(ctx context.Context, req api.DownReq) error {
+	cli, err := newDockerClient()
+	if err != nil {
+		return err
+	}
+	defer cli.Close()
+	name := dockerContainerName(req.Port)
+	id, err := lookupByName(ctx, cli, name)
+	if err != nil {
+		return err
+	}
+	if id == "" {
+		return nil
+	}
+	timeout := dockerStopTimeoutSec
+	if req.GracefulTimeoutSec > 0 {
+		timeout = req.GracefulTimeoutSec
+	}
+	_ = cli.ContainerStop(ctx, id, container.StopOptions{Timeout: &timeout})
+	return cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true, RemoveVolumes: false})
+}
+
+func (p *Provider) dockerCleanup(_ context.Context, datadir string, _ int) error {
+	if datadir == "" {
+		return errors.New("redis docker: Cleanup: datadir is required")
+	}
+	return os.RemoveAll(datadir)
+}

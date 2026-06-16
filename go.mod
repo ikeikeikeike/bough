@@ -6,6 +6,7 @@ require (
 	github.com/Masterminds/sprig/v3 v3.3.0
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/docker/go-connections v0.7.0
+	github.com/docker/go-units v0.5.0
 	github.com/go-playground/validator/v10 v10.30.3
 	github.com/hashicorp/go-plugin v1.8.0
 	github.com/spf13/cobra v1.10.2
@@ -24,7 +25,6 @@ require (
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
-	github.com/docker/go-units v0.5.0 // indirect
 	github.com/fatih/color v1.13.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.13 // indirect

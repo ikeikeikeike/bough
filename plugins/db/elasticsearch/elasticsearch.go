@@ -75,7 +75,13 @@ const (
 // Up extracts the embedded flake and launches Elasticsearch via
 // process-compose, detached so the WorktreeCreate hook returns before
 // the JVM has finished warming up. ReadyCheck is the host's gate.
+//
+// When `req.Extras["backend"] == "docker"` the Docker code path
+// (docker.go) is used instead.
 func (p *Provider) Up(ctx context.Context, req api.UpReq) error {
+	if req.Extras["backend"] == "docker" {
+		return p.dockerUp(ctx, req)
+	}
 	if req.WorktreeRoot == "" {
 		return errors.New("elasticsearch: Up: WorktreeRoot is required")
 	}
@@ -128,9 +134,15 @@ func (p *Provider) Up(ctx context.Context, req api.UpReq) error {
 // — the JVM listens on the port before the cluster has finished
 // forming, and an early-bird client query returns 503. The
 // cluster-health endpoint is the canonical liveness probe.
+//
+// Backend detection: a container named `bough-elasticsearch-<port>` →
+// docker path; otherwise the nix path.
 func (p *Provider) ReadyCheck(ctx context.Context, port, timeoutSec int) (bool, error) {
 	if port <= 0 {
 		return false, fmt.Errorf("elasticsearch: ReadyCheck: invalid port %d", port)
+	}
+	if usingDockerBackend(ctx, port) {
+		return p.dockerReadyCheck(ctx, port, timeoutSec)
 	}
 	if timeoutSec <= 0 {
 		timeoutSec = 600
@@ -172,7 +184,12 @@ func (p *Provider) ReadyCheck(ctx context.Context, port, timeoutSec int) (bool, 
 // Down attempts a graceful `nix run … -- down`, then reaps any PID
 // still listening on `Port`, then kills stray process-compose
 // supervisors whose cwd lives under the worktree.
+//
+// Backend detection mirrors ReadyCheck.
 func (p *Provider) Down(ctx context.Context, req api.DownReq) error {
+	if usingDockerBackend(ctx, req.Port) {
+		return p.dockerDown(ctx, req)
+	}
 	if req.WorktreeRoot == "" {
 		return errors.New("elasticsearch: Down: WorktreeRoot is required")
 	}

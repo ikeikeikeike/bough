@@ -74,7 +74,13 @@ const (
 // Up extracts the embedded services-flake wrapper into the worktree
 // and launches `nix run --impure '.#postgres' -- up --tui=false` as a
 // detached subprocess.
+//
+// When `req.Extras["backend"] == "docker"` the Docker code path is
+// used (docker.go) instead, bypassing the nix flake entirely.
 func (p *Provider) Up(ctx context.Context, req api.UpReq) error {
+	if req.Extras["backend"] == "docker" {
+		return p.dockerUp(ctx, req)
+	}
 	if req.WorktreeRoot == "" {
 		return errors.New("postgres: Up: WorktreeRoot is required")
 	}
@@ -122,9 +128,15 @@ func (p *Provider) Up(ctx context.Context, req api.UpReq) error {
 // `pg_isready` (ships with services-flake's postgresql package) and
 // fall back to a raw TCP probe so the host doesn't need psql on PATH
 // for the readiness gate.
+//
+// Backend detection: a container named `bough-postgres-<port>` →
+// docker path; otherwise the nix path.
 func (p *Provider) ReadyCheck(ctx context.Context, port, timeoutSec int) (bool, error) {
 	if port <= 0 {
 		return false, fmt.Errorf("postgres: ReadyCheck: invalid port %d", port)
+	}
+	if usingDockerBackend(ctx, port) {
+		return p.dockerReadyCheck(ctx, port, timeoutSec)
 	}
 	if timeoutSec <= 0 {
 		timeoutSec = 600
@@ -161,7 +173,12 @@ func (p *Provider) ReadyCheck(ctx context.Context, port, timeoutSec int) (bool, 
 // still listening on `Port` via lsof + SIGTERM/SIGKILL, then kills
 // stray process-compose supervisors whose cwd lives under the
 // worktree.
+//
+// Backend detection mirrors ReadyCheck.
 func (p *Provider) Down(ctx context.Context, req api.DownReq) error {
+	if usingDockerBackend(ctx, req.Port) {
+		return p.dockerDown(ctx, req)
+	}
 	if req.WorktreeRoot == "" {
 		return errors.New("postgres: Down: WorktreeRoot is required")
 	}

@@ -68,7 +68,13 @@ const (
 // Up extracts the embedded services-flake wrapper into the worktree
 // and launches `nix run --impure '.#redis' -- up --tui=false` as a
 // detached subprocess.
+//
+// When `req.Extras["backend"] == "docker"` the Docker code path
+// (docker.go) is used instead.
 func (p *Provider) Up(ctx context.Context, req api.UpReq) error {
+	if req.Extras["backend"] == "docker" {
+		return p.dockerUp(ctx, req)
+	}
 	if req.WorktreeRoot == "" {
 		return errors.New("redis: Up: WorktreeRoot is required")
 	}
@@ -114,9 +120,15 @@ func (p *Provider) Up(ctx context.Context, req api.UpReq) error {
 // ReadyCheck prefers `redis-cli PING` (the canonical liveness probe)
 // and falls back to a raw TCP probe so the host doesn't need
 // redis-cli on PATH for the readiness gate.
+//
+// Backend detection: a container named `bough-redis-<port>` → docker
+// path; otherwise the nix path.
 func (p *Provider) ReadyCheck(ctx context.Context, port, timeoutSec int) (bool, error) {
 	if port <= 0 {
 		return false, fmt.Errorf("redis: ReadyCheck: invalid port %d", port)
+	}
+	if usingDockerBackend(ctx, port) {
+		return p.dockerReadyCheck(ctx, port, timeoutSec)
 	}
 	if timeoutSec <= 0 {
 		timeoutSec = 600
@@ -153,7 +165,12 @@ func (p *Provider) ReadyCheck(ctx context.Context, port, timeoutSec int) (bool, 
 // Down attempts a graceful `nix run … -- down`, then reaps any PID
 // still listening on `Port`, then kills stray process-compose
 // supervisors whose cwd lives under the worktree.
+//
+// Backend detection mirrors ReadyCheck.
 func (p *Provider) Down(ctx context.Context, req api.DownReq) error {
+	if usingDockerBackend(ctx, req.Port) {
+		return p.dockerDown(ctx, req)
+	}
 	if req.WorktreeRoot == "" {
 		return errors.New("redis: Down: WorktreeRoot is required")
 	}
