@@ -135,7 +135,7 @@ func (p *Provider) ReadyCheck(ctx context.Context, port, timeoutSec int) (bool, 
 		return false, fmt.Errorf("mysql: ReadyCheck: invalid port %d", port)
 	}
 	if timeoutSec <= 0 {
-		timeoutSec = 120
+		timeoutSec = 600
 	}
 	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
 	for time.Now().Before(deadline) {

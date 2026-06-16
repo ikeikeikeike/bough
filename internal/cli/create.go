@@ -128,7 +128,7 @@ func runCreate(ctx context.Context, stderr, stdout interface{ Write([]byte) (int
 		}); err != nil {
 			return fmt.Errorf("%s Up: %w", dbCfg.Kind, err)
 		}
-		ready, err := prov.ReadyCheck(ctx, port, 120)
+		ready, err := prov.ReadyCheck(ctx, port, dbCfg.ReadyTimeoutSec)
 		if err != nil || !ready {
 			return fmt.Errorf("%s ReadyCheck: %w", dbCfg.Kind, err)
 		}
