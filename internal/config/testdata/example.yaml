@@ -34,6 +34,7 @@ databases:
     port_range: [42000, 44999]
     socket_dir: "/tmp"
     initial_databases: ["demo"]
+    ready_timeout_sec: 900
     extras:
       character_set_server: utf8mb4
       default_time_zone: "+00:00"

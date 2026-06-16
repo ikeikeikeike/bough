@@ -73,7 +73,12 @@ type Database struct {
 	PortRange        [2]int            `yaml:"port_range" validate:"required"`
 	SocketDir        string            `yaml:"socket_dir"`
 	InitialDatabases []string          `yaml:"initial_databases"`
-	Extras           map[string]string `yaml:"extras"`
+	// ReadyTimeoutSec caps how long the host waits for the plugin's
+	// ReadyCheck loop to report ready. Zero means use the plugin's own
+	// default (600s — generous enough for a nix cold path that resolves
+	// flake inputs + builds the engine derivation on a cold store).
+	ReadyTimeoutSec int               `yaml:"ready_timeout_sec" validate:"omitempty,min=1"`
+	Extras          map[string]string `yaml:"extras"`
 }
 
 // PortRange covers all non-DB port kinds (api / gateway / view / ...).

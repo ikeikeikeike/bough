@@ -26,7 +26,7 @@
 //
 // Cold-start budget is ~30-60s (JVM + index recovery on a fresh data
 // directory); warm-start is ~10-20s. Operators should run the host's
-// ReadyCheck with timeoutSec >= 120 for cold scenarios.
+// ReadyCheck with timeoutSec >= 600 for cold scenarios.
 package elasticsearch
 
 import (
@@ -133,7 +133,7 @@ func (p *Provider) ReadyCheck(ctx context.Context, port, timeoutSec int) (bool, 
 		return false, fmt.Errorf("elasticsearch: ReadyCheck: invalid port %d", port)
 	}
 	if timeoutSec <= 0 {
-		timeoutSec = 120
+		timeoutSec = 600
 	}
 	url := fmt.Sprintf("http://127.0.0.1:%d/_cluster/health?wait_for_status=yellow&timeout=5s", port)
 	httpClient := &http.Client{Timeout: 6 * time.Second}

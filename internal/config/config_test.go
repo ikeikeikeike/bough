@@ -35,6 +35,9 @@ func TestLoad_validExample(t *testing.T) {
 	if got, want := c.Databases[0].PortRange, [2]int{42000, 44999}; got != want {
 		t.Errorf("Database.PortRange: got %v want %v", got, want)
 	}
+	if got, want := c.Databases[0].ReadyTimeoutSec, 900; got != want {
+		t.Errorf("Database.ReadyTimeoutSec: got %d want %d", got, want)
+	}
 }
 
 // Each entry exercises one of the validateSemantic / struct-tag failure
@@ -109,6 +112,18 @@ repositories:
 registry: {path: .worktree-ports.json}
 `,
 			wantInErr: "Role",
+		},
+		{
+			name: "negative ready_timeout_sec",
+			yaml: `schema_version: 1
+monorepo_root: "."
+repositories:
+  - {name: a, branch_strategy: develop, role: db-provider}
+databases:
+  - {kind: mysql, version: "8.4", port_range: [42000, 44999], ready_timeout_sec: -1}
+registry: {path: .worktree-ports.json}
+`,
+			wantInErr: "ReadyTimeoutSec",
 		},
 		{
 			name: "unknown top-level field (strict mode)",
