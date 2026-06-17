@@ -80,7 +80,11 @@
           '';
         };
 
-        # Default devShell — adds editor / Nix language server tooling on top of CI.
+        # Default devShell — CI toolchain plus the editor + LSP / debugger
+        # / search utilities a `direnv allow` + neovim session needs. None
+        # of these land in the release tarballs (GoReleaser builds outside
+        # the devShell), so adding them here only costs the local
+        # contributor's `nix develop` warmup.
         devShells.default = pkgs.mkShellNoCC {
           inputsFrom = [ (pkgs.mkShellNoCC { }) ];
           packages = [
@@ -94,6 +98,17 @@
             pkgs.actionlint
             pkgs.nil
             pkgs.goreleaser
+
+            # Editor + Go LSP / debugger / search — pinned via nixpkgs
+            # so a fresh checkout reproduces the same toolchain a long-
+            # term contributor already runs locally.
+            pkgs.neovim
+            pkgs.gopls
+            pkgs.delve
+            pkgs.gotools         # goimports / godoc / stringer / etc.
+            pkgs.ripgrep
+            pkgs.fd
+
             formatter
           ];
 
