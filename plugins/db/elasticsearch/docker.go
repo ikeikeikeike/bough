@@ -169,20 +169,33 @@ func (p *Provider) dockerUp(ctx context.Context, req api.UpReq) error {
 		return fmt.Errorf("elasticsearch docker: pull %s: %w", imageRef, err)
 	}
 
-	// Pre-create + chown the bind-mounted datadir to UID:GID 1000:0 so
-	// the elasticsearch process (which runs as uid 1000 in the official
-	// image) can write to it. Without this the container exits with
-	// `AccessDeniedException` on its first index.create.
+	// Pre-create the bind-mounted datadir and align permissions so the
+	// elasticsearch process (which runs as uid 1000 in the official
+	// image) can write to it.
+	//
+	// Three ownership cases the plugin handles:
+	//
+	//   - macOS Docker Desktop: VirtioFS hides the uid mismatch, plain
+	//     0o755 works.
+	//   - Linux + bough running as root: chown to 1000:0 succeeds and
+	//     the directory is owned by the in-container user.
+	//   - Linux + bough running as a non-root user (CI runners, most
+	//     dev laptops): chown to 1000:0 fails with EPERM. Without a
+	//     fallback the container exits with `AccessDeniedException`
+	//     on its first index.create — the failure mode the bough
+	//     conformance matrix surfaced on ubuntu-24.04 runners.
+	//
+	// The fallback flips the mode to 0o777 so the container can write
+	// regardless of uid mismatch. This is wider than ideal for a
+	// shared host, but per-worktree datadirs already live under a
+	// user-private dir on a developer laptop; the trade-off is acceptable.
 	if err := os.MkdirAll(req.Datadir, 0o755); err != nil {
 		return fmt.Errorf("elasticsearch docker: mkdir datadir: %w", err)
 	}
 	if err := chownDatadirIfPossible(req.Datadir); err != nil {
-		// Soft-fail: macOS Docker Desktop hides the host uid via the
-		// VirtioFS proxy, so chown is unnecessary there. Linux users
-		// without root cannot chown to 1000:0 — they need to either
-		// run bough with sudo or set the datadir owner manually.
-		// Log the soft-fail via a stderr-style annotation but proceed.
-		_ = err
+		if cerr := os.Chmod(req.Datadir, 0o777); cerr != nil {
+			return fmt.Errorf("elasticsearch docker: chmod datadir to 0o777 fallback: %w", cerr)
+		}
 	}
 
 	heap := pickHeap(req)
