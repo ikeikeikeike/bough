@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/ikeikeikeike/bough/internal/allocator"
 	"github.com/ikeikeikeike/bough/internal/backend"
@@ -264,15 +265,25 @@ func runCreate(ctx context.Context, stderr, stdout interface{ Write([]byte) (int
 	// reported to stderr but does not unwind the entire create — the
 	// operator usually wants the worktree materialised even when seed
 	// data is missing.
+	//
+	// Each script runs with the parsed .env.local entries merged into
+	// the inherited process env, so the YAML author can `${VAR}` the
+	// bough-injected port / DSN / URL values without having to
+	// `source .env.local` from bash. Sourcing was the original idiom
+	// but breaks the moment a value contains `(` / `?` / `&` — bash
+	// interprets those as shell metacharacters at source time and
+	// silently aborts the rest of the file, leaving `${VAR}` empty.
 	for _, repo := range cfg.Repositories {
 		if len(repo.PostCreate) == 0 {
 			continue
 		}
 		repoDst := filepath.Join(worktreeRoot, repo.Name)
+		fileEnv := parseEnvLocal(filepath.Join(repoDst, ".env.local"))
 		for _, line := range repo.PostCreate {
 			logf(stderr, "[bough] %s post_create: %s", repo.Name, line)
 			c := exec.CommandContext(ctx, "bash", "-c", line)
 			c.Dir = repoDst
+			c.Env = append(os.Environ(), fileEnv...)
 			c.Stdout = stderr
 			c.Stderr = stderr
 			if err := c.Run(); err != nil {
@@ -346,6 +357,44 @@ func dbContextFor(kind string, dbs []dbInstance) envwriter.DBCtx {
 		}
 	}
 	return envwriter.DBCtx{Host: "127.0.0.1"}
+}
+
+// parseEnvLocal reads a `.env.local` file and returns its `KEY=VALUE`
+// lines verbatim so the caller can pass them through to a child
+// process's exec.Cmd.Env. Comments (`#`-prefixed) and blank lines are
+// skipped; lines without an `=` are silently dropped.
+//
+// IMPORTANT: this parser does NOT do shell unquoting / interpolation
+// of values. The bough envwriter emits raw values without surrounding
+// quotes (matching the historical direnv `dotenv_if_exists .env.local`
+// idiom) and bash `source` would choke on the `(`, `&`, `?` chars
+// many DSNs / URLs contain — that exact failure mode is the bug this
+// helper exists to bypass. A raw `KEY=VALUE` slice handed to
+// exec.Cmd.Env hits the runtime's `extendEnviron` path which is plain
+// string-passing, not shell parsing, so any byte sequence in VALUE is
+// preserved as-is.
+//
+// A nil-returning path (file missing / unreadable / empty) is normal
+// — the caller wants the post_create env to degrade to os.Environ()
+// in that case.
+func parseEnvLocal(path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var env []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq <= 0 {
+			continue
+		}
+		env = append(env, line)
+	}
+	return env
 }
 
 func logf(w interface{ Write([]byte) (int, error) }, format string, a ...any) {
