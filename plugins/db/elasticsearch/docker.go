@@ -82,6 +82,31 @@ func pickHeap(req api.UpReq) string {
 	return "1g"
 }
 
+// buildDockerEnv assembles the env slice passed to the elasticsearch
+// container. Extracted from dockerUp so the regression-guard tests can
+// assert the publish_host / publish_port lines are present without
+// having to start a real Docker daemon.
+//
+// Without `network.publish_host=127.0.0.1` + `http.publish_port=<host>`
+// ES advertises its container-internal bridge IP (e.g.
+// 172.17.0.4:9200) via `_nodes/http`. Any sniffing client
+// (olivere/elastic, the official low-level clients with sniff=true,
+// …) then dials 172.17.0.4 from the host and errors with `no
+// Elasticsearch node available`. Pinning the publish host to the
+// loopback the operator already hits, and overriding the HTTP publish
+// port to the bough-allocated host port, makes sniff results
+// host-reachable on a multi-worktree machine.
+func buildDockerEnv(heap, hostPort string) []string {
+	return []string{
+		"discovery.type=single-node",
+		"xpack.security.enabled=false",
+		"cluster.routing.allocation.disk.threshold_enabled=false",
+		"ES_JAVA_OPTS=-Xms" + heap + " -Xmx" + heap,
+		"network.publish_host=127.0.0.1",
+		"http.publish_port=" + hostPort,
+	}
+}
+
 func dockerContainerName(port int) string {
 	return fmt.Sprintf("bough-elasticsearch-%d", port)
 }
@@ -152,14 +177,8 @@ func (p *Provider) dockerUp(ctx context.Context, req api.UpReq) error {
 	}
 
 	heap := pickHeap(req)
-	env := []string{
-		"discovery.type=single-node",
-		"xpack.security.enabled=false",
-		"cluster.routing.allocation.disk.threshold_enabled=false",
-		"ES_JAVA_OPTS=-Xms" + heap + " -Xmx" + heap,
-	}
-
 	hostPort := fmt.Sprintf("%d", req.Port)
+	env := buildDockerEnv(heap, hostPort)
 	portBindings := nat.PortMap{
 		nat.Port(dockerInternalHTTP): []nat.PortBinding{
 			{HostIP: "127.0.0.1", HostPort: hostPort},
