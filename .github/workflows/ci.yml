@@ -94,3 +94,16 @@ jobs:
         run: |
           nix develop .#ci -c go test -tags=conformance -race -timeout=15m -v \
             ./plugins/db/${{ matrix.plugin }}/...
+
+      - name: Diagnostic — dump bough container logs (on failure)
+        if: failure()
+        run: |
+          echo "=== docker ps -a ==="
+          docker ps -a
+          echo ""
+          for c in $(docker ps -aq --filter name=bough-); do
+            echo "=== inspect $c ==="
+            docker inspect "$c" --format '{{.Name}} {{.State.Status}} ExitCode={{.State.ExitCode}} Error={{.State.Error}} OOMKilled={{.State.OOMKilled}}'
+            echo "=== logs --tail 200 $c ==="
+            docker logs --tail 200 "$c" 2>&1 || true
+          done
