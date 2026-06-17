@@ -1,13 +1,17 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/ikeikeikeike/bough/internal/backend"
+	"github.com/ikeikeikeike/bough/internal/config"
 	"github.com/ikeikeikeike/bough/internal/registry"
 	"github.com/spf13/cobra"
 )
@@ -30,15 +34,20 @@ func newStatusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			status := buildStatus(reg)
+			status := buildStatus(reg, cfg)
 			if asJSON {
 				enc := json.NewEncoder(cmd.OutOrStdout())
 				enc.SetIndent("", "  ")
 				return enc.Encode(status)
 			}
 			for _, s := range status {
-				fmt.Fprintf(cmd.OutOrStdout(), "%s/%s :: port=%d, listening=%v, pid=%d\n",
-					s.Name, s.Kind, s.Port, s.Listening, s.PID)
+				if s.Backend != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "%s/%s :: port=%d, listening=%v, pid=%d, backend=%s\n",
+						s.Name, s.Kind, s.Port, s.Listening, s.PID, s.Backend)
+				} else {
+					fmt.Fprintf(cmd.OutOrStdout(), "%s/%s :: port=%d, listening=%v, pid=%d\n",
+						s.Name, s.Kind, s.Port, s.Listening, s.PID)
+				}
 			}
 			return nil
 		},
@@ -53,9 +62,18 @@ type statusEntry struct {
 	Port      int    `json:"port"`
 	Listening bool   `json:"listening"`
 	PID       int    `json:"pid,omitempty"`
+	// Backend is the lifecycle runtime for DB engine kinds (mysql /
+	// postgres / redis / elasticsearch). Empty for the non-DB port
+	// kinds the host allocates alongside (api / gateway / ...).
+	// The value is the user-supplied `backend:` from the YAML, or a
+	// `<detected> (auto)` annotation when the YAML left it empty —
+	// matches the same Detect() the create path runs, so operators
+	// can spot-check without re-running `bough create`.
+	Backend string `json:"backend,omitempty"`
 }
 
-func buildStatus(reg registry.Registry) []statusEntry {
+func buildStatus(reg registry.Registry, cfg *config.Config) []statusEntry {
+	dbBackend := computeDBBackends(cfg)
 	var out []statusEntry
 	for name, kinds := range reg {
 		for kind, port := range kinds {
@@ -63,7 +81,51 @@ func buildStatus(reg registry.Registry) []statusEntry {
 			out = append(out, statusEntry{
 				Name: name, Kind: kind, Port: port,
 				Listening: pid > 0, PID: pid,
+				Backend: dbBackend[kind],
 			})
+		}
+	}
+	return out
+}
+
+// computeDBBackends returns a map from DB engine kind ("mysql",
+// "postgres", ...) to the backend that would be selected by the create
+// path for that engine (the YAML override, or the auto-detect result
+// annotated `<backend> (auto)`). Non-DB ports are absent from the map
+// so the caller leaves their Backend field empty.
+//
+// Detect() is called at most once per status invocation; if no engine
+// in the YAML leaves backend empty, Detect is skipped entirely.
+func computeDBBackends(cfg *config.Config) map[string]string {
+	if cfg == nil {
+		return nil
+	}
+	needsDetect := false
+	for _, db := range cfg.Databases {
+		if db.Backend == "" {
+			needsDetect = true
+			break
+		}
+	}
+	var detected string
+	if needsDetect {
+		// 3s cap so an unresponsive nix/docker daemon does not stall
+		// `bough status`; on timeout we leave detected empty and the
+		// affected entries get the "unresolved" placeholder.
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if v, err := backend.Detect(ctx); err == nil {
+			detected = v
+		}
+	}
+	out := make(map[string]string, len(cfg.Databases))
+	for _, db := range cfg.Databases {
+		if db.Backend != "" {
+			out[db.Kind] = db.Backend
+		} else if detected != "" {
+			out[db.Kind] = detected + " (auto)"
+		} else {
+			out[db.Kind] = "unresolved"
 		}
 	}
 	return out
