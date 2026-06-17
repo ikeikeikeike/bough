@@ -33,6 +33,16 @@ func Discover(kind string) (api.DBProvider, func(), error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("pluginhost: %s not found on PATH: %w", binName, err)
 	}
+	return DiscoverFromBinary(binPath)
+}
+
+// DiscoverFromBinary spawns the plugin binary at `binPath` under
+// go-plugin's gRPC protocol and returns a typed DBProvider client.
+// Same contract as Discover but skips PATH lookup, so the caller can
+// pin an exact binary (used by the conformance suite, by acceptance
+// tests in the release pipeline, and by anything else that needs to
+// verify a specific build instead of "whatever is on PATH").
+func DiscoverFromBinary(binPath string) (api.DBProvider, func(), error) {
 	client := plugin.NewClient(&plugin.ClientConfig{
 		HandshakeConfig:  api.Handshake,
 		Plugins:          api.PluginMap,
@@ -42,17 +52,17 @@ func Discover(kind string) (api.DBProvider, func(), error) {
 	rpc, err := client.Client()
 	if err != nil {
 		client.Kill()
-		return nil, nil, fmt.Errorf("pluginhost: %s gRPC dial: %w", binName, err)
+		return nil, nil, fmt.Errorf("pluginhost: %s gRPC dial: %w", binPath, err)
 	}
 	raw, err := rpc.Dispense(api.DBProviderPluginKey)
 	if err != nil {
 		client.Kill()
-		return nil, nil, fmt.Errorf("pluginhost: %s dispense %q: %w", binName, api.DBProviderPluginKey, err)
+		return nil, nil, fmt.Errorf("pluginhost: %s dispense %q: %w", binPath, api.DBProviderPluginKey, err)
 	}
 	prov, ok := raw.(api.DBProvider)
 	if !ok {
 		client.Kill()
-		return nil, nil, fmt.Errorf("pluginhost: %s did not return a DBProvider (got %T)", binName, raw)
+		return nil, nil, fmt.Errorf("pluginhost: %s did not return a DBProvider (got %T)", binPath, raw)
 	}
 	return prov, func() { client.Kill() }, nil
 }
