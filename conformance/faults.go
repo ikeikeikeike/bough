@@ -124,10 +124,11 @@ func runFaultImagePullFailure(t *testing.T, cfg Config) {
 	prov, cleanup, port := spawnFreshAndPickPort(t, cfg)
 	defer cleanup()
 
-	extras := make(map[string]string, len(cfg.Extras)+1)
-	for k, v := range cfg.Extras {
-		extras[k] = v
-	}
+	// Start from mergeExtras so `backend=docker` is forced — without it
+	// the plugin (with nix on PATH from a devShell) would take the
+	// services-flake path and never touch the bogus image, leaving
+	// Up returning nil and the contract-check vacuous.
+	extras := mergeExtras(cfg)
 	// Force the plugin onto an image ref that cannot resolve.
 	// We use a registry-prefix that the docker registry will reject
 	// as "manifest unknown" rather than a random string that might
