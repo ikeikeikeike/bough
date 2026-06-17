@@ -1,0 +1,40 @@
+name: Plugin conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  conformance:
+    name: Conformance (real Docker)
+    strategy:
+      fail-fast: false
+      matrix:
+        # Hosted ubuntu runners come with the Docker daemon pre-installed
+        # on both amd64 and arm64. Hosted darwin runners cannot, so we
+        # do not include them here.
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Pre-pull container image
+        # TODO: replace with your engine's image ref.
+        run: docker pull myengine:1.0
+
+      - name: Build plugin binary
+        run: |
+          mkdir -p bin
+          go build -o bin/bough-plugin-myplugin ./cmd/bough-plugin-myplugin
+
+      - name: Run conformance suite
+        env:
+          BOUGH_CONFORMANCE_PLUGIN_BIN: ${{ github.workspace }}/bin/bough-plugin-myplugin
+        run: |
+          go test -tags=conformance -race -timeout=15m -v ./...
