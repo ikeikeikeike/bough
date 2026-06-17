@@ -38,10 +38,35 @@ fmt:  ## gofumpt + gci.
 
 
 .PHONY: build
-build:  ## Build host + plugins under dist/.
+build:  ## Build host + all DB plugins under dist/.
 	mkdir -p dist
 	go build -o dist/bough ./cmd/bough
 	go build -o dist/bough-plugin-mysql ./cmd/bough-plugin-mysql
+	go build -o dist/bough-plugin-postgres ./cmd/bough-plugin-postgres
+	go build -o dist/bough-plugin-redis ./cmd/bough-plugin-redis
+	go build -o dist/bough-plugin-elasticsearch ./cmd/bough-plugin-elasticsearch
+
+
+# PLUGIN is the engine kind: mysql / postgres / redis / elasticsearch.
+# CI does the same pre-pull + build + run per matrix cell; this target
+# is what plugin authors (internal or external) run on their laptop
+# before opening a PR.
+PLUGIN ?= mysql
+
+.PHONY: conformance-local
+conformance-local: build  ## Run the conformance suite locally against PLUGIN=<kind>.
+	BOUGH_CONFORMANCE_PLUGIN_BIN=$(CURDIR)/dist/bough-plugin-$(PLUGIN) \
+		go test -tags=conformance -race -timeout=15m -v ./plugins/db/$(PLUGIN)/...
+
+
+.PHONY: conformance-all
+conformance-all: build  ## Run conformance against all four bough-internal plugins.
+	@for kind in mysql postgres redis elasticsearch; do \
+		echo "=== conformance: $$kind ==="; \
+		BOUGH_CONFORMANCE_PLUGIN_BIN=$(CURDIR)/dist/bough-plugin-$$kind \
+			go test -tags=conformance -race -timeout=15m -v \
+				./plugins/db/$$kind/... || exit 1; \
+	done
 
 
 .PHONY: clean
