@@ -3,24 +3,24 @@
 > Per-worktree isolation orchestrator for monorepos.
 
 `bough` brings up an isolated dev environment per git worktree (per
-feature branch): a deterministically-allocated port triplet, an
+feature branch): a deterministically-allocated port set, an
 auto-generated `.env.local` in every sub-repo, and a worktree-local
-instance of every declared database engine — all driven by one
-`.worktree-isolation.yaml` at the monorepo root.
+instance of every declared engine — all driven by one `.bough.yaml`
+at the monorepo root.
 
-bough itself is a small Go CLI plus four database plugins
+bough itself is a small Go CLI plus four engine plugins
 (`bough-plugin-{mysql,postgres,redis,elasticsearch}`), wired together
 via Hashicorp go-plugin (gRPC over Unix socket). Each plugin defers
-the actual database lifecycle (`up` / `ready check` / `down`) to a
-backend you choose: today that's [services-flake][services-flake] on
-top of Nix; a Docker backend is planned for v0.2 (see
-[Roadmap](#roadmap)).
+the actual lifecycle (`up` / `ready check` / `down`) to a backend you
+choose: today that's [services-flake][services-flake] on top of Nix
+or a direct Docker SDK backend; the host's auto-detect picks one
+based on what's on the runner.
 
 The "what to isolate" is fully declarative — pick which repositories
-appear under `.worktrees/<name>/` and which database engines spawn per
-worktree via a single YAML at the monorepo root. Database engines are
-loaded as gRPC plugins, so adding a new engine never requires editing
-the host binary.
+appear under `.worktrees/<name>/` and which engines spawn per worktree
+via a single YAML at the monorepo root. Engines are loaded as gRPC
+plugins, so adding a new engine (rabbitmq, kafka, nats, minio, …) never
+requires editing the host binary.
 
 [services-flake]: https://github.com/juspay/services-flake
 
@@ -82,12 +82,13 @@ use the tarball or `go install` if you are on v0.1.0-alpha.
 
 ## Quick start
 
-Drop a `.worktree-isolation.yaml` at the monorepo root that declares
-which sub-repos hang off `.worktrees/<name>/` and which database
-engines start per worktree:
+Drop a `.bough.yaml` at the monorepo root that declares which sub-repos
+hang off `.worktrees/<name>/` and which engines start per worktree
+(v0.3.x `.worktree-isolation.yaml` is auto-read with a deprecation
+warning — see [`docs/MIGRATION-v0.3-to-v0.4.md`](./docs/MIGRATION-v0.3-to-v0.4.md)):
 
 ```yaml
-schema_version: 1
+schema_version: 2
 
 monorepo_root: "."
 
@@ -102,7 +103,7 @@ repositories:
   - name: demo-dbmigration
     branch_strategy: develop
     direnv: true
-    role: db-provider
+    role: engine-provider
     env_local:
       DEMO_DBM_PORT: "{{ .Mysql.Port }}"
     post_create:
@@ -110,21 +111,32 @@ repositories:
       # bough only runs the command, it does not assume Nix here.
       - "make migrate"
 
-databases:
+engines:
   - kind: mysql           # plugin discovery key (matches bough-plugin-mysql)
     version: "8.4"
-    port_range: [42000, 44999]
+    port_ranges:
+      main: [42000, 44999]
     socket_dir: "/tmp"
-    initial_databases: ["demo"]
+    initial_resources:
+      - { type: database, name: demo }
     # backend: nix        # optional; auto-detects nix-with-flakes / docker when omitted
     # ready_timeout_sec: 600  # v0.1.1+; default 600s for nix cold paths
+
+  # Multi-port engine example — plugin lands in v0.5+; schema is ready in v0.4.
+  # - kind: rabbitmq
+  #   version: "3-management"
+  #   port_ranges:
+  #     amqp:       [60000, 60499]
+  #     management: [60500, 60999]
+  #   initial_resources:
+  #     - { type: vhost, name: dev }
 
 ports:
   api:    { range: [45000, 47999] }
 
 registry:
-  path: ".worktree-ports.json"
-  backup_dir: "~/.claude/backups"
+  path: ".bough-ports.json"
+  backup_dir: "~/.bough/backups"
 
 teardown:
   remove_branch: true
@@ -188,15 +200,15 @@ bough/
 │   ├── cli/                                cobra subcommands
 │   ├── config/                             YAML schema (validator/v10)
 │   ├── allocator/                          crc32 + linear-probing port allocator
-│   ├── registry/                           .worktree-ports.json atomic R/W
+│   ├── registry/                           .bough-ports.json atomic R/W (legacy .worktree-ports.json read on fallback)
 │   ├── gitwt/                              `git worktree` wrapper
 │   ├── envwriter/                          text/template + Sprig .env.local generator
 │   ├── hooks/                              post_create / pre_remove hook runner
 │   ├── mcp/                                ~/.claude.json projects upsert
 │   └── pluginhost/                         go-plugin discovery + lifecycle
 ├── plugins/
-│   └── db/
-│       ├── api/                            gRPC contract + Go interface
+│   └── engine/
+│       ├── api/                            gRPC EngineProvider contract + Go interface
 │       ├── mysql/                          MySQL 8.4 provider + embedded services-flake
 │       ├── postgres/                       PostgreSQL 16 provider + embedded services-flake
 │       ├── redis/                          Redis 7 provider + embedded services-flake
@@ -229,8 +241,9 @@ integration-test-only as of v0.1.x. Docker backend lands in v0.2.
 
 The Coastfile-shaped competitor [`coast-guard/coasts`][coasts] solves an
 adjacent problem (Coastfile = 1 git repo + application services); bough
-differs in scope (`.worktree-isolation.yaml` = N independent git repos +
-engine-level DB declarations + deterministic-per-branch port allocation).
+differs in scope (`.bough.yaml` = N independent git repos +
+engine-level declarations + deterministic-per-branch port allocation
+across single- and multi-port engines).
 Both are MIT, both target laptops, both can coexist.
 
 [coasts]: https://github.com/coast-guard/coasts
@@ -261,7 +274,7 @@ make conformance-all                       # all four
 ```
 
 See [`docs/PLUGIN_AUTHOR_GUIDE.md`](./docs/PLUGIN_AUTHOR_GUIDE.md)
-for the walkthrough, [`plugins/db/api/CONTRACT.md`](./plugins/db/api/CONTRACT.md)
+for the walkthrough, [`plugins/engine/api/CONTRACT.md`](./plugins/engine/api/CONTRACT.md)
 for the prose contract every assertion traces back to, and
 [`examples/plugin-template/`](./examples/plugin-template) for a
 copy-this skeleton with TODO markers.

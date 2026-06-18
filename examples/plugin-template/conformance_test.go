@@ -11,7 +11,7 @@
 // go-plugin, drives the full lifecycle (PortRangeDefault → Up →
 // ReadyCheck → EnvVars → Down → Cleanup × IdempotentCount), and
 // asserts the contract invariants documented in
-// plugins/db/api/CONTRACT.md.
+// plugins/engine/api/CONTRACT.md.
 //
 // CI invokes this with:
 //
@@ -54,5 +54,14 @@ func TestMyPluginConformance(t *testing.T) {
 		// write to it itself from the host process). Most database
 		// engines do — the container is what writes there.
 		SkipDatadirPermission: true,
+		// TODO (multi-port engines only): the role the fault tests
+		// should target. Single-port engines (one role from
+		// PortRangeDefault) leave this empty and the suite defaults
+		// to "main". Multi-port engines (rabbitmq amqp+management,
+		// kafka broker+controller, NATS client+monitor+cluster)
+		// override with one of the declared role names. The lifecycle
+		// still exercises every role regardless.
+		//
+		//   MainPortRole: "amqp",
 	})
 }
