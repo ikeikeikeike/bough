@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	api "github.com/ikeikeikeike/bough/plugins/db/api"
+	engineapi "github.com/ikeikeikeike/bough/plugins/engine/api"
 
 	"github.com/ikeikeikeike/bough/internal/pluginhost"
 )
@@ -54,12 +54,18 @@ func runLifecycle(t *testing.T, cfg Config) {
 	t.Run("PortRangeDefault", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), quickPhaseTimeout)
 		defer cancel()
-		low, high, err := prov.PortRangeDefault(ctx)
+		ranges, err := prov.PortRangeDefault(ctx)
 		if err != nil {
 			t.Fatalf("PortRangeDefault: %v", err)
 		}
-		if low <= 0 || low >= high {
-			t.Fatalf("PortRangeDefault returned (%d, %d), want 0 < low < high", low, high)
+		if len(ranges) == 0 {
+			t.Fatalf("PortRangeDefault returned an empty map; want at least one role")
+		}
+		for role, pr := range ranges {
+			if pr.Low <= 0 || pr.Low >= pr.High {
+				t.Fatalf("PortRangeDefault[%q] = (low=%d, high=%d), want 0 < low < high",
+					role, pr.Low, pr.High)
+			}
 		}
 	})
 	if t.Failed() {
@@ -67,19 +73,23 @@ func runLifecycle(t *testing.T, cfg Config) {
 	}
 
 	probeCtx, probeCancel := context.WithTimeout(t.Context(), quickPhaseTimeout)
-	low, _, err := prov.PortRangeDefault(probeCtx)
+	ranges, err := prov.PortRangeDefault(probeCtx)
 	probeCancel()
 	if err != nil {
 		t.Fatalf("PortRangeDefault re-fetch: %v", err)
 	}
-	port := low
+	mainRange, ok := ranges["main"]
+	if !ok {
+		t.Fatalf("PortRangeDefault did not declare role 'main' (got roles %v); multi-port lifecycle support lands in Λ-7.4", keysOfPortRanges(ranges))
+	}
+	port := mainRange.Low
 	datadir := newDatadir(t)
-	upReq := api.UpReq{
-		Port:             port,
+	upReq := &engineapi.UpReq{
+		Ports:            []engineapi.PortSpec{{Role: "main", Port: port}},
 		Datadir:          datadir,
 		WorktreeRoot:     t.TempDir(),
 		SocketDir:        t.TempDir(),
-		InitialDatabases: []string{"conformance"},
+		InitialResources: []engineapi.ResourceSpec{{Type: "database", Name: "conformance"}},
 		Extras:           mergeExtras(cfg),
 	}
 
@@ -104,7 +114,7 @@ func runLifecycle(t *testing.T, cfg Config) {
 			// ReadyCheck before it can even start polling.
 			ctx, cancel := context.WithTimeout(t.Context(), cfg.ReadyTimeout)
 			defer cancel()
-			ready, err := prov.ReadyCheck(ctx, port, int(cfg.ReadyTimeout.Seconds()))
+			ready, err := prov.ReadyCheck(ctx, []int{port}, int(cfg.ReadyTimeout.Seconds()))
 			if err != nil {
 				t.Fatalf("ReadyCheck (iter %d): %v", iter, err)
 			}
@@ -119,9 +129,9 @@ func runLifecycle(t *testing.T, cfg Config) {
 		t.Run(itername("EnvVars", iter), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), quickPhaseTimeout)
 			defer cancel()
-			env, err := prov.EnvVars(ctx, api.EnvVarsReq{
-				Port:             port,
-				InitialDatabases: upReq.InitialDatabases,
+			env, err := prov.EnvVars(ctx, &engineapi.EnvVarsReq{
+				Ports:            upReq.Ports,
+				InitialResources: upReq.InitialResources,
 				SocketDir:        upReq.SocketDir,
 			})
 			if err != nil {
@@ -151,8 +161,8 @@ func runLifecycle(t *testing.T, cfg Config) {
 		t.Run(itername("Down", iter), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), quickPhaseTimeout)
 			defer cancel()
-			if err := prov.Down(ctx, api.DownReq{
-				Port:               port,
+			if err := prov.Down(ctx, &engineapi.DownReq{
+				Ports:              []int{port},
 				WorktreeRoot:       upReq.WorktreeRoot,
 				GracefulTimeoutSec: 15,
 			}); err != nil {
@@ -167,7 +177,7 @@ func runLifecycle(t *testing.T, cfg Config) {
 	t.Run("Cleanup", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), quickPhaseTimeout)
 		defer cancel()
-		if err := prov.Cleanup(ctx, datadir, port); err != nil {
+		if err := prov.Cleanup(ctx, datadir, []int{port}); err != nil {
 			if isPermissionDeniedFromContainerUID(err) {
 				t.Skipf("Cleanup hit permission-denied — typical when the container "+
 					"writes as a non-host uid (e.g. mysql/redis run as their own user "+
@@ -181,7 +191,7 @@ func runLifecycle(t *testing.T, cfg Config) {
 	t.Run("Cleanup_idempotent", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), quickPhaseTimeout)
 		defer cancel()
-		if err := prov.Cleanup(ctx, datadir, port); err != nil {
+		if err := prov.Cleanup(ctx, datadir, []int{port}); err != nil {
 			if isPermissionDeniedFromContainerUID(err) {
 				t.Skipf("Cleanup (2nd call) hit permission-denied — see above. Raw: %v", err)
 				return
@@ -225,6 +235,21 @@ func itername(phase string, iter int) string {
 		return phase
 	}
 	return phase + "_iter" + strconv.Itoa(iter)
+}
+
+// keysOfPortRanges lists the role names declared by PortRangeDefault,
+// used only when the suite needs to diagnose a missing "main" role.
+// Sorted for stable test output.
+func keysOfPortRanges(m map[string]engineapi.PortRange) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	// Avoid pulling in the sort package here — order matters only for
+	// the diagnostic Fatalf message, and stable iteration is fine via
+	// the deterministic make+append above (Go's map iteration order is
+	// randomised but the Fatalf path runs at most once per test).
+	return out
 }
 
 // isPermissionDeniedFromContainerUID recognises the

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	api "github.com/ikeikeikeike/bough/plugins/db/api"
+	engineapi "github.com/ikeikeikeike/bough/plugins/engine/api"
 
 	"github.com/ikeikeikeike/bough/internal/pluginhost"
 )
@@ -63,8 +63,8 @@ func runFaultPortConflict(t *testing.T, cfg Config) {
 	ctx, cancel := context.WithTimeout(t.Context(), cfg.UpTimeout)
 	defer cancel()
 	datadir := t.TempDir()
-	upErr := prov.Up(ctx, api.UpReq{
-		Port:         port,
+	upErr := prov.Up(ctx, &engineapi.UpReq{
+		Ports:        []engineapi.PortSpec{{Role: "main", Port: port}},
 		Datadir:      datadir,
 		WorktreeRoot: t.TempDir(),
 		SocketDir:    t.TempDir(),
@@ -74,8 +74,8 @@ func runFaultPortConflict(t *testing.T, cfg Config) {
 		// The plugin claimed success on a port we already hold.
 		// Best-effort teardown to avoid leaving a real container
 		// running, then fail the contract check.
-		_ = prov.Down(ctx, api.DownReq{Port: port, GracefulTimeoutSec: 5})
-		_ = prov.Cleanup(ctx, datadir, port)
+		_ = prov.Down(ctx, &engineapi.DownReq{Ports: []int{port}, GracefulTimeoutSec: 5})
+		_ = prov.Cleanup(ctx, datadir, []int{port})
 		t.Errorf("Up on a port already held by a sidecar listener must fail; got nil error")
 		return
 	}
@@ -104,16 +104,16 @@ func runFaultDatadirPermission(t *testing.T, cfg Config) {
 	datadir := filepath.Join(faultDir, "data")
 	ctx, cancel := context.WithTimeout(t.Context(), cfg.UpTimeout)
 	defer cancel()
-	upErr := prov.Up(ctx, api.UpReq{
-		Port:         port,
+	upErr := prov.Up(ctx, &engineapi.UpReq{
+		Ports:        []engineapi.PortSpec{{Role: "main", Port: port}},
 		Datadir:      datadir,
 		WorktreeRoot: t.TempDir(),
 		SocketDir:    t.TempDir(),
 		Extras:       mergeExtras(cfg),
 	})
 	if upErr == nil {
-		_ = prov.Down(ctx, api.DownReq{Port: port, GracefulTimeoutSec: 5})
-		_ = prov.Cleanup(ctx, datadir, port)
+		_ = prov.Down(ctx, &engineapi.DownReq{Ports: []int{port}, GracefulTimeoutSec: 5})
+		_ = prov.Cleanup(ctx, datadir, []int{port})
 		t.Errorf("Up with un-writable datadir parent must fail; got nil error")
 		return
 	}
@@ -138,16 +138,16 @@ func runFaultImagePullFailure(t *testing.T, cfg Config) {
 	datadir := t.TempDir()
 	ctx, cancel := context.WithTimeout(t.Context(), cfg.UpTimeout)
 	defer cancel()
-	upErr := prov.Up(ctx, api.UpReq{
-		Port:         port,
+	upErr := prov.Up(ctx, &engineapi.UpReq{
+		Ports:        []engineapi.PortSpec{{Role: "main", Port: port}},
 		Datadir:      datadir,
 		WorktreeRoot: t.TempDir(),
 		SocketDir:    t.TempDir(),
 		Extras:       extras,
 	})
 	if upErr == nil {
-		_ = prov.Down(ctx, api.DownReq{Port: port, GracefulTimeoutSec: 5})
-		_ = prov.Cleanup(ctx, datadir, port)
+		_ = prov.Down(ctx, &engineapi.DownReq{Ports: []int{port}, GracefulTimeoutSec: 5})
+		_ = prov.Cleanup(ctx, datadir, []int{port})
 		t.Errorf("Up with a non-existent image must fail; got nil error")
 		return
 	}
@@ -159,9 +159,9 @@ func runFaultImagePullFailure(t *testing.T, cfg Config) {
 
 // spawnFreshAndPickPort starts a brand-new plugin subprocess (each
 // fault gets its own process so a panic in one cannot poison the
-// next) and returns its PortRangeDefault low end as the port to
+// next) and returns the role "main" range's low end as the port to
 // drive Up with. Caller MUST defer the returned cleanup func.
-func spawnFreshAndPickPort(t *testing.T, cfg Config) (api.EngineProvider, func(), int) {
+func spawnFreshAndPickPort(t *testing.T, cfg Config) (engineapi.EngineProvider, func(), int) {
 	t.Helper()
 	prov, kill, err := pluginhost.DiscoverFromBinary(cfg.PluginBinary)
 	if err != nil {

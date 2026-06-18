@@ -34,14 +34,14 @@ func newVerifyCmd() *cobra.Command {
 //
 //   - the worktree directory exists,
 //   - the registry has an entry for this name,
-//   - every kind in `databases:` + `ports:` is registered AND inside the
-//     declared range,
+//   - every (engine, role) pair from `engines:` + every kind from
+//     `ports:` is registered AND inside the declared range,
 //   - every repository that declares `env_local` actually owns the
 //     rendered `.env.local`.
 //
-// We don't run lsof against api / gateway here — those engines have no
+// We don't run lsof against api / gateway here — those kinds have no
 // plugin we can ask for the per-process check, so a "drifted" report
-// against an unbooted api server would be misleading. The mysql case
+// against an unbooted api server would be misleading. The engine case
 // goes through `bough status`.
 func runVerify(stderr, stdout io.Writer, cfg *config.Config, monorepoRoot, name string) error {
 	worktreePath := filepath.Join(monorepoRoot, ".worktrees", name)
@@ -61,14 +61,17 @@ func runVerify(stderr, stdout io.Writer, cfg *config.Config, monorepoRoot, name 
 		return fmt.Errorf("no registry entry for %q", name)
 	}
 	var probs []string
-	for _, db := range cfg.Databases {
-		port, ok := entry[db.Kind]
-		if !ok {
-			probs = append(probs, fmt.Sprintf("registry missing %s entry", db.Kind))
-			continue
-		}
-		if port < db.PortRange[0] || port > db.PortRange[1] {
-			probs = append(probs, fmt.Sprintf("%s port %d outside range %v", db.Kind, port, db.PortRange))
+	for _, eng := range cfg.Engines {
+		for role, portRange := range eng.PortRanges {
+			key := eng.Kind + "." + role
+			port, ok := entry[key]
+			if !ok {
+				probs = append(probs, fmt.Sprintf("registry missing %s entry", key))
+				continue
+			}
+			if port < portRange[0] || port > portRange[1] {
+				probs = append(probs, fmt.Sprintf("%s port %d outside range %v", key, port, portRange))
+			}
 		}
 	}
 	for kind, pr := range cfg.Ports {

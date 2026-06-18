@@ -62,18 +62,18 @@ type statusEntry struct {
 	Port      int    `json:"port"`
 	Listening bool   `json:"listening"`
 	PID       int    `json:"pid,omitempty"`
-	// Backend is the lifecycle runtime for DB engine kinds (mysql /
-	// postgres / redis / elasticsearch). Empty for the non-DB port
-	// kinds the host allocates alongside (api / gateway / ...).
-	// The value is the user-supplied `backend:` from the YAML, or a
-	// `<detected> (auto)` annotation when the YAML left it empty —
-	// matches the same Detect() the create path runs, so operators
-	// can spot-check without re-running `bough create`.
+	// Backend is the lifecycle runtime for engine kinds (mysql /
+	// postgres / redis / elasticsearch / rabbitmq / ...). Empty for the
+	// non-engine port kinds the host allocates alongside (api /
+	// gateway / ...). The value is the user-supplied `backend:` from
+	// the YAML, or a `<detected> (auto)` annotation when the YAML left
+	// it empty — matches the same Detect() the create path runs, so
+	// operators can spot-check without re-running `bough create`.
 	Backend string `json:"backend,omitempty"`
 }
 
 func buildStatus(reg registry.Registry, cfg *config.Config) []statusEntry {
-	dbBackend := computeDBBackends(cfg)
+	engineBackend := computeEngineBackends(cfg)
 	var out []statusEntry
 	for name, kinds := range reg {
 		for kind, port := range kinds {
@@ -81,28 +81,44 @@ func buildStatus(reg registry.Registry, cfg *config.Config) []statusEntry {
 			out = append(out, statusEntry{
 				Name: name, Kind: kind, Port: port,
 				Listening: pid > 0, PID: pid,
-				Backend: dbBackend[kind],
+				// Registry stores engine entries under composite keys
+				// `<kind>.<role>` (e.g. `mysql.main`), so split on the
+				// first dot before looking up the backend keyed by raw
+				// engine kind. Non-engine kinds (api / gateway) have no
+				// dot and pass through unchanged.
+				Backend: engineBackend[engineKindFromRegistryKey(kind)],
 			})
 		}
 	}
 	return out
 }
 
-// computeDBBackends returns a map from DB engine kind ("mysql",
-// "postgres", ...) to the backend that would be selected by the create
-// path for that engine (the YAML override, or the auto-detect result
-// annotated `<backend> (auto)`). Non-DB ports are absent from the map
-// so the caller leaves their Backend field empty.
+// engineKindFromRegistryKey extracts the engine kind from a registry
+// composite key. v0.4 registry keys engine entries as `<kind>.<role>`;
+// non-engine port kinds (api / gateway / view / ...) carry no role
+// suffix. Legacy v0.3 keys (no dot) pass through.
+func engineKindFromRegistryKey(key string) string {
+	if i := strings.IndexByte(key, '.'); i >= 0 {
+		return key[:i]
+	}
+	return key
+}
+
+// computeEngineBackends returns a map from engine kind ("mysql",
+// "postgres", "rabbitmq", ...) to the backend that would be selected
+// by the create path for that engine (the YAML override, or the auto-
+// detect result annotated `<backend> (auto)`). Non-engine ports are
+// absent from the map so the caller leaves their Backend field empty.
 //
 // Detect() is called at most once per status invocation; if no engine
 // in the YAML leaves backend empty, Detect is skipped entirely.
-func computeDBBackends(cfg *config.Config) map[string]string {
+func computeEngineBackends(cfg *config.Config) map[string]string {
 	if cfg == nil {
 		return nil
 	}
 	needsDetect := false
-	for _, db := range cfg.Databases {
-		if db.Backend == "" {
+	for _, eng := range cfg.Engines {
+		if eng.Backend == "" {
 			needsDetect = true
 			break
 		}
@@ -118,14 +134,14 @@ func computeDBBackends(cfg *config.Config) map[string]string {
 			detected = v
 		}
 	}
-	out := make(map[string]string, len(cfg.Databases))
-	for _, db := range cfg.Databases {
-		if db.Backend != "" {
-			out[db.Kind] = db.Backend
+	out := make(map[string]string, len(cfg.Engines))
+	for _, eng := range cfg.Engines {
+		if eng.Backend != "" {
+			out[eng.Kind] = eng.Backend
 		} else if detected != "" {
-			out[db.Kind] = detected + " (auto)"
+			out[eng.Kind] = detected + " (auto)"
 		} else {
-			out[db.Kind] = "unresolved"
+			out[eng.Kind] = "unresolved"
 		}
 	}
 	return out
