@@ -239,15 +239,6 @@ battle-tested in a real Go + Rails + Remix multi-sub-repo monorepo
 (MySQL 8.4 LTS + Redis 7 + Elasticsearch 7), the Postgres plugin is
 integration-test-only as of v0.1.x. Docker backend lands in v0.2.
 
-The Coastfile-shaped competitor [`coast-guard/coasts`][coasts] solves an
-adjacent problem (Coastfile = 1 git repo + application services); bough
-differs in scope (`.bough.yaml` = N independent git repos +
-engine-level declarations + deterministic-per-branch port allocation
-across single- and multi-port engines).
-Both are MIT, both target laptops, both can coexist.
-
-[coasts]: https://github.com/coast-guard/coasts
-
 ## Plugin conformance
 
 Every PR's CI runs the [`bough/conformance`](./conformance) suite
