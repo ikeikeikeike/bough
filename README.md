@@ -28,15 +28,23 @@ requires editing the host binary.
 
 bough binaries themselves are static Go executables (darwin / linux,
 arm64 / amd64) — `bough` never installs Nix or Docker for you. The
-host auto-detects which backend each plugin uses (nix-with-flakes on
-`PATH` → `nix`, else docker daemon reachable → `docker`); an explicit
-`backend: nix | docker` per engine in `.bough.yaml` always overrides.
-What the user needs depends on which backend is selected:
+host auto-detects which backend each plugin uses with a v0.1.x-compat
+preference for `nix` (so monorepos that adopted bough when nix was
+the only option do not silently flip to docker on upgrade):
 
-| Backend  | User must provide                                                |
-|----------|------------------------------------------------------------------|
-| `nix`    | Nix with flakes enabled + network access to flakehub.com / github.com on first invocation |
-| `docker` | A Docker-compatible daemon (Docker Desktop / OrbStack / Colima / podman with the docker socket) |
+  1. nix-with-flakes on `PATH` → `nix`
+  2. else docker daemon reachable → `docker`
+  3. else: actionable error pointing at the `engines[].backend` YAML knob
+
+In practice that means **nix users** (= those who already installed
+Nix before adopting bough) get `nix`; **everyone else (the typical
+install)** gets `docker`. An explicit `backend: nix | docker` per
+engine in `.bough.yaml` always overrides auto-detect.
+
+| Backend  | When auto-detect picks it                            | User must provide |
+|----------|------------------------------------------------------|-------------------|
+| `docker` | nix-with-flakes not on PATH, docker daemon reachable (= typical install) | A Docker-compatible daemon (Docker Desktop / OrbStack / Colima / podman with the docker socket) |
+| `nix`    | nix-with-flakes on PATH                              | Nix with flakes enabled + network access to flakehub.com / github.com on first invocation |
 
 Cold-start cost (first `bough create` invocation on a fresh machine):
 
