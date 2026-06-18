@@ -93,7 +93,7 @@ jobs:
           BOUGH_CONFORMANCE_PLUGIN_BIN: ${{ github.workspace }}/bin/bough-plugin-${{ matrix.plugin }}
         run: |
           nix develop .#ci -c go test -tags=conformance -race -timeout=15m -v \
-            ./plugins/db/${{ matrix.plugin }}/...
+            ./plugins/engine/${{ matrix.plugin }}/...
 
       - name: Diagnostic — dump bough container logs (on failure)
         if: failure()

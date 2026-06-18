@@ -1,14 +1,22 @@
 .DEFAULT_GOAL := help
 
-PROTO_DIR := plugins/db/api/proto
+PROTO_DIR_ENGINE := plugins/engine/api/proto
+PROTO_DIR_DB := plugins/db/api/proto
 
 
 .PHONY: proto
-proto:  ## Regenerate gRPC stubs from plugins/db/api/proto/db.proto.
-	protoc -I $(PROTO_DIR) \
-		--go_out=$(PROTO_DIR) --go_opt=paths=source_relative \
-		--go-grpc_out=$(PROTO_DIR) --go-grpc_opt=paths=source_relative \
-		$(PROTO_DIR)/db.proto
+proto:  ## Regenerate gRPC stubs from plugins/engine/api/proto/engine.proto.
+	protoc -I $(PROTO_DIR_ENGINE) \
+		--go_out=$(PROTO_DIR_ENGINE) --go_opt=paths=source_relative \
+		--go-grpc_out=$(PROTO_DIR_ENGINE) --go-grpc_opt=paths=source_relative \
+		$(PROTO_DIR_ENGINE)/engine.proto
+	# v0.4.0 transition: regenerate the legacy db.proto too while the
+	# old plugins/db/ tree still exists (deleted in Λ-7.1). After that
+	# this line goes away.
+	protoc -I $(PROTO_DIR_DB) \
+		--go_out=$(PROTO_DIR_DB) --go_opt=paths=source_relative \
+		--go-grpc_out=$(PROTO_DIR_DB) --go-grpc_opt=paths=source_relative \
+		$(PROTO_DIR_DB)/db.proto
 
 
 .PHONY: test
@@ -38,7 +46,7 @@ fmt:  ## gofumpt + gci.
 
 
 .PHONY: build
-build:  ## Build host + all DB plugins under dist/.
+build:  ## Build host + all engine plugins under dist/.
 	mkdir -p dist
 	go build -o dist/bough ./cmd/bough
 	go build -o dist/bough-plugin-mysql ./cmd/bough-plugin-mysql
@@ -56,7 +64,7 @@ PLUGIN ?= mysql
 .PHONY: conformance-local
 conformance-local: build  ## Run the conformance suite locally against PLUGIN=<kind>.
 	BOUGH_CONFORMANCE_PLUGIN_BIN=$(CURDIR)/dist/bough-plugin-$(PLUGIN) \
-		go test -tags=conformance -race -timeout=15m -v ./plugins/db/$(PLUGIN)/...
+		go test -tags=conformance -race -timeout=15m -v ./plugins/engine/$(PLUGIN)/...
 
 
 .PHONY: conformance-all
@@ -65,7 +73,7 @@ conformance-all: build  ## Run conformance against all four bough-internal plugi
 		echo "=== conformance: $$kind ==="; \
 		BOUGH_CONFORMANCE_PLUGIN_BIN=$(CURDIR)/dist/bough-plugin-$$kind \
 			go test -tags=conformance -race -timeout=15m -v \
-				./plugins/db/$$kind/... || exit 1; \
+				./plugins/engine/$$kind/... || exit 1; \
 	done
 
 
