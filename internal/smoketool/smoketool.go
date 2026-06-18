@@ -83,7 +83,7 @@ func Run(prov api.EngineProvider, cfg Config) error {
 	overall := time.Now()
 
 	if err := phase("Up", func() error { return prov.Up(ctx, upReq) }); err != nil {
-		return fmt.Errorf("Up: %w", err)
+		return fmt.Errorf("up: %w", err)
 	}
 
 	readyLabel := fmt.Sprintf("ReadyCheck (timeout %ds)", cfg.ReadyTimeoutSec)
@@ -113,10 +113,10 @@ func Run(prov api.EngineProvider, cfg Config) error {
 	}
 
 	if err := phase("Down", func() error { return prov.Down(ctx, downReq) }); err != nil {
-		return fmt.Errorf("Down: %w", err)
+		return fmt.Errorf("down: %w", err)
 	}
 	if err := phase("Cleanup", func() error { return prov.Cleanup(ctx, datadir, ports) }); err != nil {
-		return fmt.Errorf("Cleanup: %w", err)
+		return fmt.Errorf("cleanup: %w", err)
 	}
 
 	log.Printf("*** TOTAL CYCLE: %s ***", time.Since(overall))
