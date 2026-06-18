@@ -25,19 +25,17 @@ const quickPhaseTimeout = 60 * time.Second
 
 // runLifecycle drives the contract-defined phases against a freshly
 // spawned plugin binary. It is the heart of Run: every phase below
-// corresponds to a contract statement in plugins/db/api/CONTRACT.md
-// (added in Λ-6.6); a phase failure here is a contract violation.
+// corresponds to a clause in plugins/engine/api/CONTRACT.md; a phase
+// failure here is a contract violation.
 //
 // The phases:
 //
-//  1. PortRangeDefault — must return low > 0 && low < high.
-//  2. Up → ReadyCheck → EnvVars (IdempotentCount times)
-//     Each iteration must succeed; running Up again on already-up
-//     state is up-or-reuse (no error). Each EnvVars map is checked
-//     for non-empty values (the Λ-6.1 floor); the full reachable /
-//     shell-safe / native-probe battery lands in Λ-6.2.
-//  3. Down — must return without error after each iteration.
-//  4. Cleanup — called twice. The second call must be a no-op (not
+//  1. PortRangeDefault — every role's range has 0 < Low < High.
+//  2. Up → ReadyCheck → EnvVars → Down (IdempotentCount times).
+//     Running Up again on already-up state is up-or-reuse (no error);
+//     each EnvVars map is checked for non-empty / reachable / shell-
+//     safe values, plus an optional NativeProbe round-trip.
+//  3. Cleanup — called twice. The second call must be a no-op (not
 //     an error), enforcing the idempotency clause of the contract.
 //
 // A single t.Fatalf at any phase aborts the rest — there is no value
@@ -51,32 +49,9 @@ func runLifecycle(t *testing.T, cfg Config) {
 	}
 	t.Cleanup(cleanup)
 
-	t.Run("PortRangeDefault", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(t.Context(), quickPhaseTimeout)
-		defer cancel()
-		ranges, err := prov.PortRangeDefault(ctx)
-		if err != nil {
-			t.Fatalf("PortRangeDefault: %v", err)
-		}
-		if len(ranges) == 0 {
-			t.Fatalf("PortRangeDefault returned an empty map; want at least one role")
-		}
-		for role, pr := range ranges {
-			if pr.Low <= 0 || pr.Low >= pr.High {
-				t.Fatalf("PortRangeDefault[%q] = (low=%d, high=%d), want 0 < low < high",
-					role, pr.Low, pr.High)
-			}
-		}
-	})
+	ranges := assertPortRangeDefault(t, prov)
 	if t.Failed() {
 		return
-	}
-
-	probeCtx, probeCancel := context.WithTimeout(t.Context(), quickPhaseTimeout)
-	ranges, err := prov.PortRangeDefault(probeCtx)
-	probeCancel()
-	if err != nil {
-		t.Fatalf("PortRangeDefault re-fetch: %v", err)
 	}
 	if _, ok := ranges[cfg.MainPortRole]; !ok {
 		t.Fatalf("PortRangeDefault did not declare the configured main role %q (got roles %v); "+
@@ -84,10 +59,9 @@ func runLifecycle(t *testing.T, cfg Config) {
 			cfg.MainPortRole, keysOfPortRanges(ranges))
 	}
 
-	// Build one PortSpec per declared role, allocating each role's
-	// Low end. Multi-port engines (rabbitmq amqp+management, etc.)
-	// thus get every role bound; single-port engines see exactly one
-	// PortSpec with Role="main", matching the v0.3 shape.
+	// One PortSpec per declared role, each allocated the role's Low
+	// port. Multi-port engines get every role bound; single-port
+	// engines see exactly one PortSpec with Role="main".
 	ports, portInts, mainPort := allocateRoles(ranges, cfg.MainPortRole)
 
 	datadir := newDatadir(t)
@@ -101,118 +75,194 @@ func runLifecycle(t *testing.T, cfg Config) {
 	}
 
 	for iter := 1; iter <= cfg.IdempotentCount; iter++ {
-		iter := iter
-		t.Run(itername("Up", iter), func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(t.Context(), cfg.UpTimeout)
-			defer cancel()
-			if err := prov.Up(ctx, upReq); err != nil {
-				t.Fatalf("Up (iter %d): %v", iter, err)
-			}
-		})
-		if t.Failed() {
-			return
-		}
-
-		t.Run(itername("ReadyCheck", iter), func(t *testing.T) {
-			// ReadyCheck owns its own deadline (cfg.ReadyTimeout) — the
-			// reason Up and ReadyCheck do NOT share a context: ES JVM
-			// cold-start takes 3-5 min on a CI runner while Up itself
-			// returns in seconds, and a single Up-sized ctx wedges
-			// ReadyCheck before it can even start polling.
-			ctx, cancel := context.WithTimeout(t.Context(), cfg.ReadyTimeout)
-			defer cancel()
-			ready, err := prov.ReadyCheck(ctx, portInts, int(cfg.ReadyTimeout.Seconds()))
-			if err != nil {
-				t.Fatalf("ReadyCheck (iter %d): %v", iter, err)
-			}
-			if !ready {
-				t.Fatalf("ReadyCheck (iter %d): plugin returned not-ready within %s (main port %d)",
-					iter, cfg.ReadyTimeout, mainPort)
-			}
-		})
-		if t.Failed() {
-			return
-		}
-
-		t.Run(itername("EnvVars", iter), func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(t.Context(), quickPhaseTimeout)
-			defer cancel()
-			env, err := prov.EnvVars(ctx, &engineapi.EnvVarsReq{
-				Ports:            upReq.Ports,
-				InitialResources: upReq.InitialResources,
-				SocketDir:        upReq.SocketDir,
-			})
-			if err != nil {
-				t.Fatalf("EnvVars (iter %d): %v", iter, err)
-			}
-			AssertNonEmpty(t, env)
-			AssertReachable(t, env)
-			AssertShellSafe(t, env, cfg.AllowShellMetachars)
-			if cfg.NativeProbe != nil {
-				addrs := extractDialableAddrs(env)
-				if len(addrs) == 0 {
-					t.Errorf("NativeProbe configured but EnvVars did not advertise a dialable host:port")
-				}
-				probeCtx, probeCancel := context.WithTimeout(t.Context(), cfg.ReadyTimeout)
-				defer probeCancel()
-				for _, addr := range addrs {
-					if err := cfg.NativeProbe(probeCtx, addr); err != nil {
-						t.Errorf("NativeProbe against %s: %v", addr, err)
-					}
-				}
-			}
-		})
-		if t.Failed() {
-			return
-		}
-
-		t.Run(itername("Down", iter), func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(t.Context(), quickPhaseTimeout)
-			defer cancel()
-			if err := prov.Down(ctx, &engineapi.DownReq{
-				Ports:              portInts,
-				WorktreeRoot:       upReq.WorktreeRoot,
-				GracefulTimeoutSec: 15,
-			}); err != nil {
-				t.Fatalf("Down (iter %d): %v", iter, err)
-			}
-		})
-		if t.Failed() {
+		if !runOneIteration(t, prov, upReq, portInts, mainPort, cfg, iter) {
 			return
 		}
 	}
 
-	t.Run("Cleanup", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(t.Context(), quickPhaseTimeout)
-		defer cancel()
-		if err := prov.Cleanup(ctx, datadir, portInts); err != nil {
-			if isPermissionDeniedFromContainerUID(err) {
-				t.Skipf("Cleanup hit permission-denied — typical when the container "+
-					"writes as a non-host uid (e.g. mysql/redis run as their own user "+
-					"and host non-root cannot rm -rf the result). Not a contract "+
-					"violation per se; tracked as a plugin-side follow-up. Raw: %v", err)
-				return
-			}
-			t.Fatalf("Cleanup: %v", err)
-		}
-	})
-	t.Run("Cleanup_idempotent", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(t.Context(), quickPhaseTimeout)
-		defer cancel()
-		if err := prov.Cleanup(ctx, datadir, portInts); err != nil {
-			if isPermissionDeniedFromContainerUID(err) {
-				t.Skipf("Cleanup (2nd call) hit permission-denied — see above. Raw: %v", err)
-				return
-			}
-			t.Fatalf("Cleanup (2nd call): contract requires idempotency, got: %v", err)
-		}
-	})
+	assertCleanup(t, prov, datadir, portInts)
 
 	// Faults run in their own freshly-spawned plugin processes so a
 	// panic in one cannot poison the next; each fault is gated by a
-	// Skip* knob plugin authors can flip when the fault is not
-	// simulable for their backend.
+	// Skip* knob plugin authors flip when the fault is not simulable.
 	runFaults(t, cfg)
+}
+
+// assertPortRangeDefault runs the PortRangeDefault sub-test and
+// returns the role→range map for the caller to use downstream.
+func assertPortRangeDefault(t *testing.T, prov engineapi.EngineProvider) map[string]engineapi.PortRange {
+	t.Helper()
+	var ranges map[string]engineapi.PortRange
+	t.Run("PortRangeDefault", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), quickPhaseTimeout)
+		defer cancel()
+		r, err := prov.PortRangeDefault(ctx)
+		if err != nil {
+			t.Fatalf("PortRangeDefault: %v", err)
+		}
+		if len(r) == 0 {
+			t.Fatalf("PortRangeDefault returned an empty map; want at least one role")
+		}
+		for role, pr := range r {
+			if pr.Low <= 0 || pr.Low >= pr.High {
+				t.Fatalf("PortRangeDefault[%q] = (low=%d, high=%d), want 0 < low < high",
+					role, pr.Low, pr.High)
+			}
+		}
+		ranges = r
+	})
+	return ranges
+}
+
+// runOneIteration drives Up → ReadyCheck → EnvVars → Down once.
+// Returns false on a fatal sub-test failure so runLifecycle can stop
+// the loop without dragging the operator through phases that cannot
+// pass on a never-up plugin.
+func runOneIteration(
+	t *testing.T,
+	prov engineapi.EngineProvider,
+	upReq *engineapi.UpReq,
+	portInts []int,
+	mainPort int,
+	cfg Config,
+	iter int,
+) bool {
+	t.Helper()
+	t.Run(itername("Up", iter), func(t *testing.T) { runUpPhase(t, prov, upReq, cfg, iter) })
+	if t.Failed() {
+		return false
+	}
+	t.Run(itername("ReadyCheck", iter), func(t *testing.T) {
+		runReadyCheckPhase(t, prov, portInts, mainPort, cfg, iter)
+	})
+	if t.Failed() {
+		return false
+	}
+	t.Run(itername("EnvVars", iter), func(t *testing.T) { runEnvVarsPhase(t, prov, upReq, cfg, iter) })
+	if t.Failed() {
+		return false
+	}
+	t.Run(itername("Down", iter), func(t *testing.T) { runDownPhase(t, prov, upReq.WorktreeRoot, portInts, iter) })
+	return !t.Failed()
+}
+
+func runUpPhase(t *testing.T, prov engineapi.EngineProvider, upReq *engineapi.UpReq, cfg Config, iter int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), cfg.UpTimeout)
+	defer cancel()
+	if err := prov.Up(ctx, upReq); err != nil {
+		t.Fatalf("Up (iter %d): %v", iter, err)
+	}
+}
+
+func runReadyCheckPhase(t *testing.T, prov engineapi.EngineProvider, ports []int, mainPort int, cfg Config, iter int) {
+	t.Helper()
+	// ReadyCheck owns its own deadline (cfg.ReadyTimeout) — the reason
+	// Up and ReadyCheck do NOT share a context: ES JVM cold-start
+	// takes 3-5 min on a CI runner while Up itself returns in seconds,
+	// and a single Up-sized ctx wedges ReadyCheck before it can even
+	// start polling.
+	ctx, cancel := context.WithTimeout(t.Context(), cfg.ReadyTimeout)
+	defer cancel()
+	ready, err := prov.ReadyCheck(ctx, ports, int(cfg.ReadyTimeout.Seconds()))
+	if err != nil {
+		t.Fatalf("ReadyCheck (iter %d): %v", iter, err)
+	}
+	if !ready {
+		t.Fatalf("ReadyCheck (iter %d): plugin returned not-ready within %s (main port %d)",
+			iter, cfg.ReadyTimeout, mainPort)
+	}
+}
+
+func runEnvVarsPhase(t *testing.T, prov engineapi.EngineProvider, upReq *engineapi.UpReq, cfg Config, iter int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), quickPhaseTimeout)
+	defer cancel()
+	env, err := prov.EnvVars(ctx, &engineapi.EnvVarsReq{
+		Ports:            upReq.Ports,
+		InitialResources: upReq.InitialResources,
+		SocketDir:        upReq.SocketDir,
+	})
+	if err != nil {
+		t.Fatalf("EnvVars (iter %d): %v", iter, err)
+	}
+	AssertNonEmpty(t, env)
+	AssertReachable(t, env)
+	AssertShellSafe(t, env, cfg.AllowShellMetachars)
+	runNativeProbeIfConfigured(t, env, cfg)
+}
+
+// runNativeProbeIfConfigured dispatches every dialable addr in env
+// through cfg.NativeProbe and surfaces protocol-level reachability
+// failures. Silent when cfg.NativeProbe is nil — the v0.2.6 guard
+// only matters when the plugin author wires it up.
+func runNativeProbeIfConfigured(t *testing.T, env map[string]string, cfg Config) {
+	t.Helper()
+	if cfg.NativeProbe == nil {
+		return
+	}
+	addrs := extractDialableAddrs(env)
+	if len(addrs) == 0 {
+		t.Errorf("NativeProbe configured but EnvVars did not advertise a dialable host:port")
+		return
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), cfg.ReadyTimeout)
+	defer cancel()
+	for _, addr := range addrs {
+		if err := cfg.NativeProbe(ctx, addr); err != nil {
+			t.Errorf("NativeProbe against %s: %v", addr, err)
+		}
+	}
+}
+
+func runDownPhase(t *testing.T, prov engineapi.EngineProvider, worktreeRoot string, ports []int, iter int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), quickPhaseTimeout)
+	defer cancel()
+	err := prov.Down(ctx, &engineapi.DownReq{
+		Ports:              ports,
+		WorktreeRoot:       worktreeRoot,
+		GracefulTimeoutSec: 15,
+	})
+	if err != nil {
+		t.Fatalf("Down (iter %d): %v", iter, err)
+	}
+}
+
+// assertCleanup runs the two terminal Cleanup sub-tests (initial +
+// idempotent). The container-uid permission case is a Skip, not a
+// Fail, because the underlying chown follow-up is plugin-side.
+func assertCleanup(t *testing.T, prov engineapi.EngineProvider, datadir string, ports []int) {
+	t.Helper()
+	t.Run("Cleanup", func(t *testing.T) {
+		runCleanupCall(t, prov, datadir, ports, "Cleanup",
+			"Cleanup hit permission-denied — typical when the container "+
+				"writes as a non-host uid (e.g. mysql/redis run as their own user "+
+				"and host non-root cannot rm -rf the result). Not a contract "+
+				"violation per se; tracked as a plugin-side follow-up. Raw: %v")
+	})
+	t.Run("Cleanup_idempotent", func(t *testing.T) {
+		runCleanupCall(t, prov, datadir, ports, "Cleanup (2nd call)",
+			"Cleanup (2nd call) hit permission-denied — see above. Raw: %v")
+	})
+}
+
+func runCleanupCall(t *testing.T, prov engineapi.EngineProvider, datadir string, ports []int, label, skipFmt string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), quickPhaseTimeout)
+	defer cancel()
+	err := prov.Cleanup(ctx, datadir, ports)
+	if err == nil {
+		return
+	}
+	if isPermissionDeniedFromContainerUID(err) {
+		t.Skipf(skipFmt, err)
+		return
+	}
+	if label == "Cleanup (2nd call)" {
+		t.Fatalf("%s: contract requires idempotency, got: %v", label, err)
+	}
+	t.Fatalf("%s: %v", label, err)
 }
 
 // mergeExtras lifts cfg.Extras and stamps in `backend=docker` plus
@@ -246,22 +296,17 @@ func itername(phase string, iter int) string {
 }
 
 // keysOfPortRanges lists the role names declared by PortRangeDefault,
-// used only when the suite needs to diagnose a missing "main" role.
-// Sorted for stable test output.
+// used only when the suite needs to diagnose a missing main role.
 func keysOfPortRanges(m map[string]engineapi.PortRange) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
 	}
-	// Avoid pulling in the sort package here — order matters only for
-	// the diagnostic Fatalf message, and stable iteration is fine via
-	// the deterministic make+append above (Go's map iteration order is
-	// randomised but the Fatalf path runs at most once per test).
 	return out
 }
 
-// allocateRoles converts a PortRangeDefault map into the three
-// shapes the lifecycle test needs downstream:
+// allocateRoles converts a PortRangeDefault map into the three shapes
+// the lifecycle test needs downstream:
 //
 //   - `ports []PortSpec`  → passed to Up / EnvVars verbatim, one
 //     entry per declared role.
