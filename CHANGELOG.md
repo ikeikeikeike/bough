@@ -1,5 +1,78 @@
 # Changelog
 
+## v0.4.1
+
+Docs / user-visible-string cleanup follow-up to v0.4.0. No
+behaviour change. Most strings that still read like v0.3 were
+updated; v0.3 references in CHANGELOG history, MIGRATION docs,
+fallback impl, and the legacy migrateLegacy() test fixture stay
+intentional.
+
+### Changed (docs / strings only)
+
+- **cobra help text** (`bough --help`, `bough config --help`,
+  `bough plugins --help`, `bough backfill --help`, `bough list --help`):
+  now points at `.bough.yaml` / `.bough-ports.json` / `~/.bough/backups/`
+  with a one-clause "v0.3 ... accepted on fallback" note. `bough plugins`
+  reads "List engine plugins discoverable on PATH" (was "List DB
+  plugins").
+- **Rendered `.env.local` footer** is now `# Do not commit. Manage via
+  '.bough.yaml' at the monorepo root.` (every freshly-created worktree
+  picks up the new wording on the next `bough create`).
+- **`backend.Detect` error message** now points at `engines[].backend`
+  in `.bough.yaml` instead of `databases[].backend` in
+  `.worktree-isolation.yaml`.
+- **Doc comments** in `internal/backend/`, `internal/envwriter/`,
+  `internal/gitwt/` updated to v0.4 canonical names.
+- **`tests/integration/e2e_mysql_test.go`** fixture bumped to v0.4
+  canonical (`schema_version: 2` / `engines:` / `port_ranges:` /
+  `initial_resources:` / `role: engine-provider` / `.bough.yaml` /
+  `.bough-ports.json` / registry key `mysql.main`). The v0.3 →
+  v0.4 migrateLegacy() path stays covered by the existing
+  `config_test.go` unit tests.
+
+### Docs
+
+- **README.md** Quick start uses `.bough.yaml` + schema_version 2 +
+  `engines:` + `port_ranges:` + `initial_resources:`. Status section
+  reflects v0.4.0 reality. Prerequisites now spells out the auto-detect
+  order (nix → docker, deliberate v0.1.x compat preference) and the
+  table puts docker first (= typical install).
+- **`docs/PLUGIN_AUTHOR_GUIDE.md`** gains a Multi-port engines section
+  (rabbitmq AMQP+Management, kafka broker+controller, NATS
+  client+monitor+cluster) with the rabbitmq author's view of
+  `PortRangeDefault` / `Up` / `EnvVars` / `Config.MainPortRole`.
+- **`docs/MIGRATION-v0.3-to-v0.4.md`** past-tenses "v0.4.0 will keep
+  working" → "keeps working" now that v0.4.0 has shipped.
+- **`examples/plugin-template/`** README + conformance_test.go gain a
+  Multi-port section pointing at the PLUGIN_AUTHOR_GUIDE walkthrough
+  and a `MainPortRole` TODO marker.
+- **`plugins/db/api/CONTRACT.md`** deleted — superseded by
+  `plugins/engine/api/CONTRACT.md`. The legacy Go fallback files
+  stay for v0.3.x plugin binary compat.
+
+### Refactor (developer-only)
+
+- **`internal/smoketool/`** extracts the shared Up → ReadyCheck → Down →
+  Cleanup lifecycle so the four `cmd/_smoke-docker-<kind>/` binaries
+  shrink to ~15-line `main()` calls that only spell out their plugin
+  and per-engine tunables.
+- **`conformance/lifecycle.go::runLifecycle`** 172 → 50 lines via per-
+  phase helpers (`runUpPhase` / `runReadyCheckPhase` / `runEnvVarsPhase`
+  / `runDownPhase` / `runOneIteration` / `assertCleanup`).
+- **`internal/cli/create.go::runCreate`** 211 → 70 lines via
+  `allocateAllPorts` / `startEngines` / `materializeRepositories` /
+  `renderEnvLocals` / `runPostCreateHooks` / `detectBackendIfNeeded`.
+  The awkward `interface{ Write([]byte) (int, error) }` parameter type
+  is replaced with `io.Writer`.
+
+### CI
+
+- `.github/workflows/ci.yml` conformance matrix points at
+  `./plugins/engine/<plugin>/...` (was missed when `plugins/db/` was
+  renamed to `plugins/engine/` in v0.4.0; the previous post-v0.4.0
+  matrix runs against ad-hoc PRs would not have caught this).
+
 ## v0.4.0
 
 bough generalises from "DB plugin orchestrator" to "engine plugin
