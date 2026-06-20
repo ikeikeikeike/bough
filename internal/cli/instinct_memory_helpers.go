@@ -99,6 +99,62 @@ func discoverMemoryBackend(cfg *config.Config) (memapi.MemoryBackend, func(), st
 	return backend, func() { client.Kill() }, role, nil
 }
 
+// discoverFallbackSQLite is the v0.6 Ν-1.1f counterpart to
+// discoverMemoryBackend: it always spawns the SQLite reference-
+// fallback regardless of cfg.Instinct.DefaultMemoryBackend so the
+// coordinator's Query path can replay against a local store when
+// the primary backend (mem0 / Graphiti / ...) errors. Round 4
+// AI #1 + #2 mandated this split — Read fallback must hit a real
+// second process so a primary outage degrades to "stale but
+// available" rather than "no memory at all".
+//
+// The SQLite database path is read from the `kind: sqlite` entry
+// in memory_backends; if none is declared we fall through to the
+// plugin binary's own default. The function never reads
+// cfg.Instinct.FallbackOnError — that gate lives at the call site
+// (loadInstinctCoordinator) so the fallback subprocess only spawns
+// when an operator wired the feature flag on.
+func discoverFallbackSQLite(cfg *config.Config) (memapi.MemoryBackend, func(), error) {
+	dbPath := ""
+	for _, b := range cfg.MemoryBackends {
+		if b.Kind == "sqlite" {
+			dbPath = b.Path
+			break
+		}
+	}
+	binName := "bough-plugin-memory-sqlite"
+	binPath, err := exec.LookPath(binName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s not found on PATH for fallback: %w", binName, err)
+	}
+	cmd := exec.Command(binPath)
+	if dbPath != "" {
+		cmd.Env = append(cmd.Environ(), "BOUGH_MEMORY_SQLITE_PATH="+dbPath)
+	}
+	client := plugin.NewClient(&plugin.ClientConfig{
+		HandshakeConfig:  memapi.Handshake,
+		Plugins:          memapi.PluginMap,
+		Cmd:              cmd,
+		AllowedProtocols: []plugin.Protocol{plugin.ProtocolGRPC},
+	})
+	rpc, err := client.Client()
+	if err != nil {
+		client.Kill()
+		return nil, nil, fmt.Errorf("gRPC dial fallback sqlite: %w", err)
+	}
+	raw, err := rpc.Dispense(memapi.MemoryBackendPluginKey)
+	if err != nil {
+		client.Kill()
+		return nil, nil, fmt.Errorf("dispense fallback sqlite: %w", err)
+	}
+	backend, ok := raw.(memapi.MemoryBackend)
+	if !ok {
+		client.Kill()
+		return nil, nil, fmt.Errorf("fallback sqlite plugin returned %T, not MemoryBackend", raw)
+	}
+	return backend, func() { client.Kill() }, nil
+}
+
 // loadInstinctCoordinator does the heavy lifting both instinct and
 // memory subcommands need: load .bough.yaml, discover the backend,
 // construct the coordinator. The returned close func disposes
@@ -134,20 +190,45 @@ func loadInstinctCoordinator(cmd *cobra.Command) (*instinct.Coordinator, func(),
 	if !filepath.IsAbs(eventsPath) {
 		eventsPath = filepath.Join(root, eventsPath)
 	}
-	// v0.5.1 MEDIUM #15: the reference-fallback backend would be
-	// spawned here when the primary backend is *not* SQLite (e.g.
-	// v0.6 mem0). v0.5 only ships SQLite, so the fallback is the
-	// same binary as the primary and we keep it nil — coordinator
-	// short-circuits the fallback path when this slot is empty.
-	var fallback memapi.MemoryBackend
+	// v0.6 Ν-1.1f: spawn the SQLite reference-fallback as a
+	// secondary backend when the primary is something else (= mem0
+	// in v0.6, Graphiti once that plugin lands) and the operator
+	// opted into fallback_on_error. v0.5 only shipped SQLite so the
+	// primary was already the fallback; v0.5.1 wired the coordinator
+	// slot but always passed nil. Keeping the SQLite-as-primary path
+	// nil avoids spawning a second copy of the same binary against
+	// the same DB file.
+	var (
+		fallback     memapi.MemoryBackend
+		killFallback func()
+	)
+	primaryKind := cfg.Instinct.DefaultMemoryBackend
+	if primaryKind == "" {
+		primaryKind = "sqlite"
+	}
+	if cfg.Instinct.FallbackOnError && primaryKind != "sqlite" {
+		fb, kf, ferr := discoverFallbackSQLite(cfg)
+		if ferr != nil {
+			killBackend()
+			return nil, nil, fmt.Errorf("fallback sqlite: %w", ferr)
+		}
+		fallback = fb
+		killFallback = kf
+	}
 	coord, err := instinct.New(cfg, backend, filepath.Clean(eventsPath), fallback)
 	if err != nil {
 		killBackend()
+		if killFallback != nil {
+			killFallback()
+		}
 		return nil, nil, err
 	}
 	close := func() {
 		_ = coord.Close()
 		killBackend()
+		if killFallback != nil {
+			killFallback()
+		}
 	}
 	return coord, close, nil
 }
