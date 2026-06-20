@@ -45,7 +45,7 @@ func runConcurrency(t *testing.T, b memapi.MemoryBackend, cfg Config) {
 				SourceEventID: fmt.Sprintf("evt-conc-%02d", i),
 			})
 			if err != nil {
-				errs <- fmt.Errorf("Store#%d: %w", i, err)
+				errs <- fmt.Errorf("store#%d: %w", i, err)
 			}
 		}(i)
 
@@ -62,7 +62,7 @@ func runConcurrency(t *testing.T, b memapi.MemoryBackend, cfg Config) {
 					MaxTokens:  100000,
 				})
 				if err != nil {
-					errs <- fmt.Errorf("Query: %w", err)
+					errs <- fmt.Errorf("query: %w", err)
 				}
 			}()
 		}

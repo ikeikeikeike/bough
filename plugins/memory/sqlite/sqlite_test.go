@@ -14,7 +14,7 @@ import (
 // required for safe concurrency.
 func TestWALMode(t *testing.T) {
 	p := openTemp(t)
-	defer p.Close()
+	defer func() { _ = p.Close() }()
 	var mode string
 	if err := p.db.QueryRowContext(context.Background(), "PRAGMA journal_mode").Scan(&mode); err != nil {
 		t.Fatalf("PRAGMA journal_mode: %v", err)
@@ -26,7 +26,7 @@ func TestWALMode(t *testing.T) {
 
 func TestStore_Upsert_DedupeKeyMatch(t *testing.T) {
 	p := openTemp(t)
-	defer p.Close()
+	defer func() { _ = p.Close() }()
 	ctx := context.Background()
 	scope := memapi.Scope{Level: "worktree", WorktreeID: "F-test", RepoName: "auba"}
 	inst := memapi.Instinct{
@@ -63,7 +63,7 @@ func TestStore_Upsert_DedupeKeyMatch(t *testing.T) {
 
 func TestStore_SourceEventIDIdempotency(t *testing.T) {
 	p := openTemp(t)
-	defer p.Close()
+	defer func() { _ = p.Close() }()
 	ctx := context.Background()
 	scope := memapi.Scope{Level: "worktree", WorktreeID: "F-idemp", RepoName: "auba"}
 	inst := memapi.Instinct{
@@ -87,7 +87,7 @@ func TestStore_SourceEventIDIdempotency(t *testing.T) {
 
 func TestQuery_FTS_Match(t *testing.T) {
 	p := openTemp(t)
-	defer p.Close()
+	defer func() { _ = p.Close() }()
 	ctx := context.Background()
 	scope := memapi.Scope{Level: "worktree", WorktreeID: "F-fts", RepoName: "auba"}
 	for i, rule := range []string{

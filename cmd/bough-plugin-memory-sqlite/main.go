@@ -48,7 +48,7 @@ func main() {
 		_, _ = os.Stderr.WriteString("bough-plugin-memory-sqlite: cannot open DB: " + err.Error() + "\n")
 		os.Exit(1)
 	}
-	defer prov.Close()
+	defer func() { _ = prov.Close() }()
 
 	plugin.Serve(&plugin.ServeConfig{
 		HandshakeConfig: memapi.Handshake,

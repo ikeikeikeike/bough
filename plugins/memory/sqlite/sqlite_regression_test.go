@@ -15,7 +15,7 @@ import (
 // UpsertSemantics. We now reject the call explicitly.
 func TestStore_DedupeWithoutUpsertReturnsError(t *testing.T) {
 	p := openTemp(t)
-	defer p.Close()
+	defer func() { _ = p.Close() }()
 	ctx := context.Background()
 	scope := memapi.Scope{Level: "worktree", WorktreeID: "F-rev", RepoName: "auba"}
 	inst := memapi.Instinct{
@@ -47,7 +47,7 @@ func TestStore_DedupeWithoutUpsertReturnsError(t *testing.T) {
 // same Store RPC.
 func TestStore_UpsertUpdatesState(t *testing.T) {
 	p := openTemp(t)
-	defer p.Close()
+	defer func() { _ = p.Close() }()
 	ctx := context.Background()
 	scope := memapi.Scope{Level: "worktree", WorktreeID: "F-rev", RepoName: "auba"}
 	inst := memapi.Instinct{
@@ -122,7 +122,7 @@ func TestQuery_FTSNormalisation(t *testing.T) {
 // runningTok past the cap.
 func TestQuery_MaxTokensDoesNotExceedCap(t *testing.T) {
 	p := openTemp(t)
-	defer p.Close()
+	defer func() { _ = p.Close() }()
 	ctx := context.Background()
 	scope := memapi.Scope{Level: "worktree", WorktreeID: "F-cap", RepoName: "auba"}
 	for i := 0; i < 10; i++ {

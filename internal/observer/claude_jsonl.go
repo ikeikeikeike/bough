@@ -60,7 +60,7 @@ func FileWatch(ctx context.Context, coord *instinct.Coordinator, opts FileWatchO
 	if err != nil {
 		return 0, fmt.Errorf("file_watch: %w", err)
 	}
-	defer watcher.Close()
+	defer func() { _ = watcher.Close() }()
 
 	if err := watcher.Add(opts.Path); err != nil {
 		return 0, fmt.Errorf("file_watch: %s: %w", opts.Path, err)

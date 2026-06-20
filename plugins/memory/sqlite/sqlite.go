@@ -85,7 +85,7 @@ func New(path string) (*Provider, error) {
 	db.SetMaxIdleConns(2)
 
 	if _, err := db.Exec(migrationInit); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("sqlite migration init: %w", err)
 	}
 	return &Provider{db: db, path: path}, nil
@@ -279,7 +279,7 @@ LIMIT ?5`,
 	if err != nil {
 		return nil, fmt.Errorf("sqlite Query: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var (
 		results    []memapi.QueryResult
@@ -328,7 +328,7 @@ LIMIT ?4`,
 	if err != nil {
 		return nil, fmt.Errorf("sqlite Query: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var (
 		results    []memapi.QueryResult
 		runningTok int
@@ -416,7 +416,7 @@ ORDER BY created_at`,
 	if err != nil {
 		return nil, fmt.Errorf("sqlite Export: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var b strings.Builder
 	for rows.Next() {
 		var (
