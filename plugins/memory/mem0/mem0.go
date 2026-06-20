@@ -47,12 +47,15 @@ const Version = "v0.6.0-dev"
 
 // Provider is the bough-side handle to a mem0 instance. The HTTP
 // client is configurable so tests can swap in an httptest.Server.
+// cache is the Ν-1.1e read-through Query cache; see cache.go for
+// its bounds and invalidation contract.
 type Provider struct {
 	client    *http.Client
 	endpoint  string        // mem0 base URL, e.g. https://api.mem0.ai
 	apiKey    string        // mem0 organisation / API key, empty for self-hosted
 	namespace string        // optional prefix injected into every user_id (multi-tenant routing)
 	timeout   time.Duration // HTTP request timeout
+	cache     *queryCache   // TTL + LRU cache for Query; Store / Forget / Import invalidate
 }
 
 // Config carries the values the plugin entry binary reads from
@@ -84,6 +87,7 @@ func New(cfg Config) (*Provider, error) {
 		apiKey:    cfg.APIKey,
 		namespace: cfg.Namespace,
 		timeout:   cfg.Timeout,
+		cache:     newQueryCache(),
 	}, nil
 }
 
@@ -172,6 +176,9 @@ func (p *Provider) Store(ctx context.Context, req *memapi.StoreReq) (*memapi.Sto
 			wasUpsert = true
 		}
 	}
+	// Round 4 AI #1 + #2: drop every cached Query that targeted the
+	// scope we just wrote so the next Query hits mem0 fresh.
+	p.cache.invalidateScope(req.Instinct.Scope)
 	return &memapi.StoreResp{StoredID: storedID, WasUpsert: wasUpsert}, nil
 }
 
@@ -182,6 +189,10 @@ func (p *Provider) Store(ctx context.Context, req *memapi.StoreReq) (*memapi.Sto
 // aggregator never sees them; MaxResults caps the upstream call so
 // we do not pay for unused rows.
 func (p *Provider) Query(ctx context.Context, req *memapi.QueryReq) (*memapi.QueryResp, error) {
+	cacheK := cacheKeyForQueryReq(req)
+	if cached, ok := p.cache.get(cacheK); ok {
+		return cached, nil
+	}
 	k := p.scopeToMem0(req.Scope)
 	body := mem0SearchReq{
 		Query:     req.Term,
@@ -205,7 +216,9 @@ func (p *Provider) Query(ctx context.Context, req *memapi.QueryReq) (*memapi.Que
 			EstimatedTokens: estimateTokens(inst.Rule, inst.Why, inst.HowToApply),
 		})
 	}
-	return &memapi.QueryResp{Results: results}, nil
+	resp := &memapi.QueryResp{Results: results}
+	p.cache.put(cacheK, resp)
+	return resp, nil
 }
 
 // Forget deletes the named memory from mem0. The capabilities
@@ -219,6 +232,9 @@ func (p *Provider) Forget(ctx context.Context, req *memapi.ForgetReq) (*memapi.F
 	if err := p.doJSON(ctx, http.MethodDelete, "/api/v1/memories/"+url.PathEscape(req.ID)+"/", nil, nil); err != nil {
 		return nil, fmt.Errorf("mem0 Forget: %w (id=%s)", err, req.ID)
 	}
+	// Round 4 AI #1 + #2: forget on this scope invalidates the cache
+	// so a follow-up Query never returns the freshly removed row.
+	p.cache.invalidateScope(req.Scope)
 	return &memapi.ForgetResp{}, nil
 }
 
