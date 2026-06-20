@@ -115,6 +115,128 @@ func TestQuery_FTSNormalisation(t *testing.T) {
 	}
 }
 
+// TestImport_RestoresRows_YAML is the v0.5.1 MEDIUM #17 regression:
+// the previous Import implementation walked the YAML payload but
+// never re-Stored the parsed rows, so an Import after Forget left
+// the table empty even though ImportedCount > 0. We seed a row,
+// soft-delete it, Export, Forget it again to be sure, then Import
+// the YAML payload and verify the row is actually queryable.
+func TestImport_RestoresRows_YAML(t *testing.T) {
+	p := openTemp(t)
+	defer func() { _ = p.Close() }()
+	ctx := context.Background()
+	scope := memapi.Scope{Level: "worktree", WorktreeID: "F-imp", RepoName: "auba"}
+	inst := memapi.Instinct{
+		ID:         "imp-1",
+		Rule:       "prefer early returns",
+		Scope:      scope,
+		Source:     "explicit_user_feedback",
+		Confidence: 0.7,
+		State:      "active",
+		CreatedAt:  time.Now().UTC(),
+	}
+	if _, err := p.Store(ctx, &memapi.StoreReq{Instinct: inst, DedupeKey: "dk-imp-1"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	exp, err := p.Export(ctx, &memapi.ExportReq{Format: "yaml", Scope: scope})
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	// Wipe the row so we can prove Import actually re-created it.
+	if _, err := p.Forget(ctx, &memapi.ForgetReq{ID: "imp-1"}); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+	imp, err := p.Import(ctx, &memapi.ImportReq{
+		Format:            "yaml",
+		Payload:           exp.Payload,
+		OverwriteExisting: true,
+	})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if (imp.ImportedCount + imp.UpsertedCount) == 0 {
+		t.Fatalf("Import counted zero rows: %+v", imp)
+	}
+	// The round-trip must have re-created a row that Query can find.
+	qr, err := p.Query(ctx, &memapi.QueryReq{Term: "", Scope: scope, MaxResults: 10, MaxTokens: 1000})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	found := false
+	for _, r := range qr.Results {
+		if r.Instinct.ID == "imp-1" {
+			found = true
+			if r.Instinct.Rule != "prefer early returns" {
+				t.Errorf("rule not restored: got %q", r.Instinct.Rule)
+			}
+			if r.Instinct.Scope.Level != "worktree" || r.Instinct.Scope.WorktreeID != "F-imp" || r.Instinct.Scope.RepoName != "auba" {
+				t.Errorf("scope not restored: got %+v", r.Instinct.Scope)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("imp-1 row not found after Import; round-trip is broken (%d results)", len(qr.Results))
+	}
+}
+
+// TestImport_RestoresRows_JSONL mirrors TestImport_RestoresRows_YAML
+// for the JSONL emit/parse pair so the regression test covers both
+// supported formats.
+func TestImport_RestoresRows_JSONL(t *testing.T) {
+	p := openTemp(t)
+	defer func() { _ = p.Close() }()
+	ctx := context.Background()
+	scope := memapi.Scope{Level: "repo", RepoName: "auba"}
+	inst := memapi.Instinct{
+		ID:         "imp-jsonl-1",
+		Rule:       "use parameterised queries",
+		Scope:      scope,
+		Source:     "test_failure",
+		Confidence: 0.6,
+		State:      "active",
+		CreatedAt:  time.Now().UTC(),
+	}
+	if _, err := p.Store(ctx, &memapi.StoreReq{Instinct: inst, DedupeKey: "dk-imp-jsonl-1"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	exp, err := p.Export(ctx, &memapi.ExportReq{Format: "jsonl", Scope: scope})
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if _, err := p.Forget(ctx, &memapi.ForgetReq{ID: "imp-jsonl-1"}); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+	imp, err := p.Import(ctx, &memapi.ImportReq{
+		Format:            "jsonl",
+		Payload:           exp.Payload,
+		OverwriteExisting: true,
+	})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if (imp.ImportedCount + imp.UpsertedCount) == 0 {
+		t.Fatalf("Import counted zero rows: %+v", imp)
+	}
+	qr, err := p.Query(ctx, &memapi.QueryReq{Term: "", Scope: scope, MaxResults: 10, MaxTokens: 1000})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	found := false
+	for _, r := range qr.Results {
+		if r.Instinct.ID == "imp-jsonl-1" {
+			found = true
+			if r.Instinct.Scope.Level != "repo" || r.Instinct.Scope.RepoName != "auba" {
+				t.Errorf("scope not restored: got %+v", r.Instinct.Scope)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("imp-jsonl-1 row not found after JSONL Import (%d results)", len(qr.Results))
+	}
+}
+
 // TestQuery_MaxTokensDoesNotExceedCap is the HIGH #7 regression:
 // when MaxTokens would be breached by the next result, the backend
 // stops iteration WITHOUT including that result. The previous

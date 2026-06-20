@@ -1,5 +1,45 @@
 # Changelog
 
+## v0.5.1
+
+Drop-in patch on top of v0.5.0 — no schema, plugin contract, or
+binary-API changes. Existing plugins and `.bough.yaml` files keep
+working unmodified. Three follow-up fixes from the round 3 review
+are now live.
+
+### Fixed
+
+- **`instinct.fallback_on_error` is now consumed** (MEDIUM #15). The
+  coordinator's `Query` path takes a primary backend error,
+  optionally replays the same `QueryReq` against a reference-
+  fallback backend, and emits a `query_fallback` audit event. The
+  flag was previously schema-only; this wire-up lets a v0.6 mem0
+  primary fall back to SQLite without operator intervention.
+- **`bough instinct import` / `bough memory import` actually
+  restore rows** (MEDIUM #17). The SQLite Import path used to walk
+  the YAML / JSONL payload and increment counters without re-
+  Storing the rows, so an Import after Forget left the table
+  empty. v0.5.1 parses the export shapes into `memapi.Instinct`
+  records and routes each through the same Store path the host
+  uses for fresh ingest. The CLI also reports
+  `imported / upserted / skipped` counts so an operator can
+  confirm the round-trip.
+- **events.jsonl path must be absolute** (LOW #18).
+  `instinct.NewEventWriter` now rejects relative paths up front,
+  and `loadInstinctCoordinator` anchors the default
+  `.bough/memory/events.jsonl` against the monorepo root that
+  `loadConfigAndRoot` resolves. This stops two worktrees (or a CI
+  step + a dev shell) from racing on cwd-relative files.
+
+### Notes
+
+- v0.5.0 → v0.5.1 is a drop-in upgrade; no migration steps. The
+  MemoryBackend interface is unchanged.
+- `internal/instinct.New` gained a fourth parameter (`fallback
+  memapi.MemoryBackend`). Callers outside the bough repo (= none
+  expected, the package is internal) should pass `nil` for the
+  no-op default.
+
 ## v0.5.0
 
 The "instinct primitive" release. v0.5 introduces a per-worktree
