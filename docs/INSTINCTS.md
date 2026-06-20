@@ -116,6 +116,22 @@ instinct:
       debounce_ms: 100
 ```
 
+## Audit log (events.jsonl)
+
+Every coordinator action (mint, approve, store, query, forget, promote, decay, import) appends one line to `events.jsonl`. The file is bough's source of truth when an external backend disagrees with the local mirror — replay it to reconstruct what *should* have happened.
+
+The path is **always absolute**: bough resolves a relative `memory_backends[].events_log` against the `loadConfigAndRoot` monorepo root, and `NewEventWriter` rejects relative paths up front (round 3 LOW #18). This is what stops two worktrees, or a CI step + a dev shell, from racing on different cwd-relative files.
+
+Default location: `<monorepo-root>/.bough/memory/events.jsonl`. Override via the backend block:
+
+```yaml
+memory_backends:
+  - kind: sqlite
+    role: reference-fallback
+    path: ".bough/memory/reference.db"      # relative → resolved against monorepo root
+    events_log: ".bough/memory/events.jsonl" # same — or supply an absolute path
+```
+
 ## See also
 
 - [BACKENDS.md](BACKENDS.md) — choosing a memory backend.
