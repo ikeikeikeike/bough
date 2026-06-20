@@ -125,6 +125,46 @@ builds:
     env:
       - CGO_ENABLED=0
 
+  # v0.6 external memory: official mem0 adapter. HTTP REST client +
+  # 30 s TTL cache + namespace mapping. Same cross-compile matrix as
+  # every other bough plugin.
+  - id: bough-plugin-memory-mem0
+    main: ./cmd/bough-plugin-memory-mem0
+    binary: bough-plugin-memory-mem0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s
+      - -w
+    env:
+      - CGO_ENABLED=0
+
+  # v0.6 MCP server: stdio JSON-RPC companion binary. Spawns
+  # bough-plugin-memory-sqlite as the backing store so it ships in
+  # the same release archive.
+  - id: bough-mcp-server
+    main: ./cmd/bough-mcp-server
+    binary: bough-mcp-server
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s
+      - -w
+    env:
+      - CGO_ENABLED=0
+
 archives:
   - id: default
     ids:
@@ -134,6 +174,8 @@ archives:
       - bough-plugin-redis
       - bough-plugin-elasticsearch
       - bough-plugin-memory-sqlite
+      - bough-plugin-memory-mem0
+      - bough-mcp-server
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     formats:
@@ -147,6 +189,31 @@ archives:
 
 checksum:
   name_template: 'checksums.txt'
+
+# v0.6 supply chain (round 4 priority A9): Sigstore cosign keyless
+# signing of the release artifacts via GitHub Actions OIDC. The
+# release workflow exports COSIGN_EXPERIMENTAL=1 and runs with
+# id-token: write so cosign can retrieve the Fulcio cert without a
+# pre-provisioned private key.
+#
+# Skipped on snapshot builds — local `goreleaser release --snapshot`
+# does not have the OIDC context.
+signs:
+  - id: cosign-keyless
+    cmd: cosign
+    args:
+      - sign-blob
+      - "--yes"
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "${artifact}"
+    artifacts: archive
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    output: true
+    env:
+      - COSIGN_EXPERIMENTAL=1
+    if: "{{ not .IsSnapshot }}"
 
 snapshot:
   version_template: '{{ incpatch .Version }}-next'
