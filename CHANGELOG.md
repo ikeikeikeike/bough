@@ -1,5 +1,90 @@
 # Changelog
 
+## v0.6.0
+
+Round 4 external review (June 2026) scoped v0.6.0 to mem0 first-
+class + capability compile + read-only MCP + signing scaffolding;
+Graphiti is deferred to v0.6.x as a separate GoReleaser archive
+(round 4 AI #2).
+
+### Added
+
+- **mem0 official plugin** (`bough-plugin-memory-mem0`): full
+  HTTP REST adapter against mem0's v1 API, 30 s TTL LRU 512
+  Query cache (Query-only, evicted on Store / Forget / Import),
+  namespace mapping that splits user_id (repo identity) +
+  session_id (worktree identity) per round 4 AI #2's mem0-layered
+  refinement.
+- **Read fallback wire** (round 4 AI #1 + #2 split-brain Blocker
+  1): when `instinct.fallback_on_error: true` and the primary
+  backend is non-SQLite, the host spawns SQLite as a secondary
+  process and Coordinator.Query replays primary failures against
+  it. Store / Forget / Import never fall back — they fail loud so
+  mem0 + SQLite cannot diverge.
+- **MemoryBackend.Capabilities widened to 17 fields**
+  (round 4 priority A12): adds `temporal_query`,
+  `metadata_filter`, `namespace_isolation`, `soft_delete`,
+  `bulk_import`, `dedupe_key`, `source_event_id`, `ttl`,
+  `eventual_consistency`, `max_batch_size`, `max_query_tokens`.
+  Wire is additive; v0.5 plugins continue to advertise only the
+  original 5 flags.
+- **Graphiti skeleton** (`examples/memory-plugin-graphiti-
+  skeleton/`): adapter guide + docker-compose snippet bringing up
+  Neo4j 5.13 + getzep/graphiti:latest. The binary lands in v0.6.x
+  as a separate GoReleaser archive.
+- **CapabilityArtifact + 7 group metadata** (round 4 priority A3
+  + round 3 priority B): Target / Invocation / Contract /
+  Validation / Provenance groups land alongside the v0.5 fields
+  + a sha256 Checksum the CLI uses to short-circuit no-op
+  compiles. Wire proto stays at v0.5; the groups round-trip
+  through Payload until v0.7's MemoryBackend v2 bump.
+- **CapabilityCompiler** orchestrator in `internal/capability/`
+  with the registry + dispatch loop. Walks instincts × kinds ×
+  targets, stamps Checksum, dispatches through the Emitter
+  registry, gathers Artifacts + Emissions.
+- **Three builtin emitters** in `internal/export/`: `agent-
+  skill` (default — gh skill style markdown + provenance frontmatter),
+  `claude-skill` (Anthropic SKILL.md), `mcp` (tool / resource /
+  prompt, MCP 2025-11-25). Emitter interface lives in
+  `plugins/capability/api/emitter.go` so v0.6.x can graduate
+  emitters into plugin slots without rewriting the registry
+  (round 4 priority A13).
+- **`bough capability compile`** CLI with subcommands compile /
+  list / preview / install / lint. `--to <format>` picks an
+  emitter; `--profile <host>` selects the runtime layout;
+  `--out-dir` persists, otherwise prints to stdout.
+- **`bough-mcp-server`** companion binary: stdio JSON-RPC 2.0,
+  MCP spec_version 2025-11-25 pinned. Read-only first per round
+  4 AI #2 — memory.query is the only tool; state-changing tool
+  names refuse with codeWriteForbidden until v0.6.x.
+- **Plugin signing scaffolding** (round 4 priority A9 + A10 +
+  A11): `InstinctPluginSecurity.AcceptedSignatureSchemes`
+  defaults to `["cosign", "minisign"]`. `bough plugins verify
+  <binary> [--scheme cosign|minisign]` runs the configured
+  verifier; v0.6.0 is fail-open when the verifier tool is missing,
+  v0.6.x adds strict mode.
+- **Conformance suites** for capability + mcp:
+  `conformance/capability/Run(t, cfg)` drives the dispatch loop;
+  `conformance/mcp/Run(t, cfg)` walks initialize / tools/list /
+  tools/call / resources/list / shutdown across an in-process
+  pipe.
+- **Documentation**: `docs/CAPABILITY_COMPILER.md`,
+  `docs/MCP_SERVER.md`, `docs/SIGNING.md`. EXTERNAL_MEMORY_
+  BACKENDS.md gains the mem0 split-brain operational caveat +
+  cache + namespace mapping detail.
+
+### Notes
+
+- MemoryBackend wire contract (proto + 7 RPCs) is unchanged from
+  v0.5.1; plugin binaries built against v0.5 continue to work.
+  The 11 new Capabilities flags default to zero, which v0.6 hosts
+  treat as "feature not supported".
+- `bough capability compile install` and `lint` are stubs that
+  surface a "lands in v0.6.x" message.
+- Round 4 priority B / C items (= MEDIUM follow-ups, Evolver
+  interface, OpenAI Function Calling emitter, MemoryBackend v2)
+  are explicitly deferred — see docs/ROADMAP.md for the timing.
+
 ## v0.5.1
 
 Drop-in patch on top of v0.5.0 — no schema, plugin contract, or

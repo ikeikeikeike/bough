@@ -273,6 +273,43 @@ for wiring mem0 / Graphiti, [docs/SECURITY.md](docs/SECURITY.md)
 for plugin trust, and [docs/ROADMAP.md](docs/ROADMAP.md) for
 v0.6 / v0.7+.
 
+## Capability compiler + MCP (v0.6+)
+
+v0.6 turns the v0.5 instinct subsystem into a publishing surface.
+Approved instincts compile into Anthropic Agent Skills, GitHub
+Agent Skills, or MCP tool / resource / prompt entries, and the
+companion `bough-mcp-server` binary exposes the memory backend
+read-only to MCP clients (Claude Desktop, Cursor, etc.).
+
+```sh
+# Compile every active instinct into agent-skill markdown.
+bough capability compile --out-dir ./skills
+
+# Same, but render Claude-compatible SKILL.md.
+bough capability compile --to claude-skill --profile claude-code \
+    --out-dir ~/.claude/skills/bough
+
+# Render MCP tool definitions.
+bough capability compile --to mcp --out-dir ./mcp-tools
+```
+
+`agent-skill` is the v0.6 default because bough is a host-neutral
+OSS layer. The MCP server ships read-only first — write tools
+(`memory.store`, `memory.forget`, `memory.promote`) land in v0.6.x
+behind an `--allow-write` flag, and the server's capabilities
+advertise the policy so clients can probe it before the first tool
+call.
+
+Real-mem0 support arrives in v0.6.0 with the official
+`bough-plugin-memory-mem0` adapter; Graphiti is deferred to v0.6.x
+as a separate GoReleaser archive (`examples/memory-plugin-
+graphiti-skeleton/` covers the bring-up today).
+
+See
+[docs/CAPABILITY_COMPILER.md](docs/CAPABILITY_COMPILER.md),
+[docs/MCP_SERVER.md](docs/MCP_SERVER.md), and
+[docs/SIGNING.md](docs/SIGNING.md) for the v0.6 contracts.
+
 ## Roadmap
 
 | Milestone | Headline                                                                                    |

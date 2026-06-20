@@ -28,12 +28,38 @@ Drop-in patch on top of v0.5.0; no schema, plugin contract, or binary-API change
 
 ## v0.6.0 — External memory + capability compilation
 
-- mem0 official plugin (`bough-plugin-memory-mem0`) with namespace mapping
-- Graphiti optional plugin (separate release artifact)
-- `CapabilityCompiler` materialised: `bough capability compile --from instinct --to skill|command|tool|...`
-- Claude Skills / Agent Skills / MCP export formats (round 3 AI #3: tools/resources/prompts split)
-- `bough-mcp-server` companion binary so bough's memory is reachable over the Model Context Protocol (round 3 AI #4)
-- Plugin signing enforcement option (v0.5 is warn-only)
+Round 4 external review (June 2026) scoped v0.6.0 to mem0 first-
+class + capability compile + read-only MCP + signing scaffolding;
+Graphiti is deferred to v0.6.x as a separate GoReleaser archive.
+
+- ✅ mem0 official plugin (`bough-plugin-memory-mem0`) with
+  namespace mapping + 30s TTL Query cache + Read-only fallback to
+  the SQLite reference-fallback (round 4 AI #1 + #2 split-brain
+  Blocker 1 mitigation)
+- ✅ MemoryBackend.Capabilities advertise widened to 17 fields
+  (semantic / vector / graph / temporal / namespace / metadata /
+  soft_delete / ttl / dedupe_key / source_event_id / bulk_import /
+  bulk_export / eventual_consistency / max_batch_size /
+  max_query_tokens, round 4 priority A12)
+- ✅ `CapabilityCompiler` materialised with deterministic Checksum
+  + Target / Invocation / Contract / Validation / Provenance
+  metadata groups (round 4 priority A3)
+- ✅ `bough capability compile --to <agent-skill|claude-skill|mcp>
+  --profile <host>` — agent-skill is the v0.6 default (round 4
+  priority A2: bough is a host-neutral OSS layer)
+- ✅ Three builtin emitters (`agent-skill`, `claude-skill`,
+  `mcp`) with the Emitter interface lifted into
+  `plugins/capability/api/` so v0.6.x can graduate them into
+  plugin slots (round 4 priority A13)
+- ✅ `bough-mcp-server` companion binary with read-only first
+  surface, MCP spec_version pin 2025-11-25, and the round 4 AI #1
+  stdin-EOF zombie guard
+- ✅ Plugin signing scaffolding: cosign + minisign acceptance,
+  `bough plugins verify`, GoReleaser keyless integration
+  (full enforcement timeline in docs/SIGNING.md)
+- ✅ Graphiti skeleton + docker-compose snippet (binary in v0.6.x)
+- ✅ docs/CAPABILITY_COMPILER.md, docs/MCP_SERVER.md,
+  docs/SIGNING.md ship alongside the binaries
 
 ## v0.6.x — Experimental compilers
 
