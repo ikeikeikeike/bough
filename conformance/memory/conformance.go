@@ -30,7 +30,10 @@ package memory
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -85,34 +88,58 @@ func Run(t *testing.T, cfg Config) {
 	cfg.applyDefaults()
 
 	t.Run("Lifecycle", func(t *testing.T) {
-		client, cleanup := spawn(t, cfg.PluginBinary)
+		client, cleanup := spawn(t, cfg.PluginBinary, perTestDB(t, cfg, "lifecycle"))
 		defer cleanup()
 		runLifecycle(t, client, cfg)
 	})
 
 	t.Run("Bloat", func(t *testing.T) {
-		client, cleanup := spawn(t, cfg.PluginBinary)
+		client, cleanup := spawn(t, cfg.PluginBinary, perTestDB(t, cfg, "bloat"))
 		defer cleanup()
 		runBloat(t, client, cfg)
 	})
 
 	t.Run("Concurrency", func(t *testing.T) {
-		client, cleanup := spawn(t, cfg.PluginBinary)
+		client, cleanup := spawn(t, cfg.PluginBinary, perTestDB(t, cfg, "concurrency"))
 		defer cleanup()
 		runConcurrency(t, client, cfg)
 	})
+}
+
+// perTestDB allocates a unique SQLite-style DB path inside cfg.Datadir
+// per sub-test so the conformance suite never sees state bled in from
+// the previous sub-test or the previous test session. Memory plugins
+// read the path through BOUGH_MEMORY_SQLITE_PATH; other backend kinds
+// either ignore the variable (mem0 talks to a remote) or document a
+// similar convention in their plugin author guide.
+func perTestDB(t *testing.T, cfg Config, label string) string {
+	t.Helper()
+	if cfg.Datadir == "" {
+		return ""
+	}
+	return filepath.Join(cfg.Datadir, fmt.Sprintf("%s.db", label))
 }
 
 // spawn launches the plugin binary under go-plugin and returns a
 // MemoryBackend client plus the cleanup func that kills the
 // subprocess. The suite's t.Helper() promise keeps the line numbers
 // on failure pointing at the call site, not into spawn.
-func spawn(t *testing.T, binPath string) (memapi.MemoryBackend, func()) {
+//
+// dbPath, when non-empty, is exported into the plugin process as
+// BOUGH_MEMORY_SQLITE_PATH so the SQLite reference-fallback (and
+// any community plugin that respects the env convention) gets its
+// per-sub-test datadir. Backends that ignore the variable
+// (e.g. mem0 talking to a remote) just see an unused env entry.
+func spawn(t *testing.T, binPath string, dbPath string) (memapi.MemoryBackend, func()) {
 	t.Helper()
+	cmd := exec.Command(binPath)
+	if dbPath != "" {
+		cmd.Env = append(os.Environ(), "BOUGH_MEMORY_SQLITE_PATH="+dbPath)
+	}
 	client := plugin.NewClient(&plugin.ClientConfig{
 		HandshakeConfig:  memapi.Handshake,
 		Plugins:          memapi.PluginMap,
-		Cmd:              exec.Command(binPath),
+		Cmd:              cmd,
 		AllowedProtocols: []plugin.Protocol{plugin.ProtocolGRPC},
 	})
 	rpc, err := client.Client()
