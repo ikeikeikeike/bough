@@ -33,7 +33,20 @@ type EventWriter struct {
 
 // NewEventWriter opens or creates the events.jsonl at path. The
 // parent directory is created if missing. Caller invokes Close().
+//
+// Round 3 LOW #18: path MUST be absolute. A relative path opens the
+// file under whatever cwd the bough CLI process happened to inherit,
+// which races whenever two worktrees (or a CI step + dev shell) run
+// under different working directories but the same .bough.yaml.
+// Callers are expected to derive the absolute path from the resolved
+// monorepo root — see internal/cli/instinct_memory_helpers.go.
 func NewEventWriter(path string) (*EventWriter, error) {
+	if path == "" {
+		return nil, fmt.Errorf("events path is empty")
+	}
+	if !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("events path must be absolute (got %q); compute it from the resolved monorepo root", path)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir events dir: %w", err)
 	}
