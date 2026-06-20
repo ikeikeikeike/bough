@@ -297,16 +297,27 @@ type InstinctFileWatch struct {
 }
 
 // InstinctPluginSecurity governs third-party plugin trust. v0.5
-// ships `require_signed: false` (warn-only) because the v0.5 plugin
-// ecosystem is mostly the bundled SQLite reference-fallback;
-// v0.6 will gain an enforce option once mem0 / Graphiti plugins
-// ship signed. UntrustedWarning=true tells the host CLI to print
-// a "third-party plugin = untrusted code" banner whenever a non-
-// allowlisted plugin is discovered.
+// shipped `require_signed: false` (warn-only); v0.6 (Ν-1.8) starts
+// consuming the flag: when true, the host refuses to spawn an
+// unverified plugin and asks the operator to run `bough plugins
+// verify <binary>` first. UntrustedWarning=true tells the host CLI
+// to print a "third-party plugin = untrusted code" banner whenever
+// a non-allowlisted plugin is discovered (independent of the
+// signing path so warning + enforce can coexist).
+//
+// AcceptedSignatureSchemes (round 4 priority A9 + A11) is the
+// two-system signing surface: "cosign" matches the GoReleaser
+// keyless flow GitHub Actions OIDC uses for official bough
+// releases; "minisign" matches the Ed25519 self-host path docs/
+// SIGNING.md recommends for solo/local plugin authors. Both
+// schemes are accepted by default so plugin authors do not need
+// to pick a side; an enterprise operator can narrow the slice to
+// just "cosign" to enforce the supply-chain story.
 type InstinctPluginSecurity struct {
-	RequireSigned     bool     `yaml:"require_signed"`
-	Allowlist         []string `yaml:"allowlist"`
-	UntrustedWarning  bool     `yaml:"untrusted_warning"`
+	RequireSigned             bool     `yaml:"require_signed"`
+	Allowlist                 []string `yaml:"allowlist"`
+	UntrustedWarning          bool     `yaml:"untrusted_warning"`
+	AcceptedSignatureSchemes  []string `yaml:"accepted_signature_schemes"`
 }
 
 // MemoryBackendCfg declares one persistent memory backend the

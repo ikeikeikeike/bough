@@ -15,9 +15,9 @@ import (
 func newPluginsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "plugins",
-		Short: "List engine plugins discoverable on PATH",
+		Short: "List and verify bough plugin binaries",
 	}
-	cmd.AddCommand(newPluginsListCmd())
+	cmd.AddCommand(newPluginsListCmd(), newPluginsVerifyCmd())
 	return cmd
 }
 
