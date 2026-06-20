@@ -25,19 +25,17 @@
 //   - AI #2: advertise the v0.6 Capabilities cluster mem0 actually
 //     supports (SemanticQuery / VectorSearch / NamespaceIsolation /
 //     TTL / EventualConsistency / MetadataFilter / BulkImport).
-//
-// v0.6.0-dev: this file ships the skeleton — Provider struct,
-// Capabilities, Health, and stubbed Store / Query / Forget / Export
-// / Import that all return errNotYetImplemented. The HTTP client
-// adapter (Ν-1.1d), namespace mapping (Ν-1.1c), and cache layer
-// (Ν-1.1e) land in subsequent commits.
 package mem0
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	memapi "github.com/ikeikeikeike/bough/plugins/memory/api"
@@ -68,10 +66,11 @@ type Config struct {
 	Timeout   time.Duration
 }
 
-// New constructs a Provider. v0.6 skeleton wires the HTTP client
-// + config only; per-method implementations land in Ν-1.1d. The
-// endpoint is required so a misconfigured `.bough.yaml` fails at
-// Discover time rather than silently hitting localhost.
+// New constructs a Provider. The HTTP client is wired with the
+// configured timeout (default 10s) so a stuck mem0 endpoint does
+// not block the host coordinator forever. The endpoint is required
+// so a misconfigured `.bough.yaml` fails at Discover time rather
+// than silently hitting localhost.
 func New(cfg Config) (*Provider, error) {
 	if cfg.Endpoint == "" {
 		return nil, errors.New("mem0 plugin: endpoint is empty (set BOUGH_MEMORY_MEM0_ENDPOINT in .bough.yaml memory_backends[*])")
@@ -96,21 +95,24 @@ func (p *Provider) Close() error {
 	return nil
 }
 
-// Health probes mem0's reachability. v0.6 skeleton returns static
-// plugin metadata; the real probe (= GET <endpoint>/health) lands
-// in Ν-1.1d.
+// Health reports static plugin metadata. mem0 cloud and self-hosted
+// disagree on the exact ping path, and the host's Discover flow
+// already issues the first real RPC right after Health — letting
+// that RPC surface a misconfigured endpoint keeps Health a cheap
+// liveness signal rather than a duplicated probe. Fatal transport
+// errors then show up at the first Store / Query rather than here.
 func (p *Provider) Health(_ context.Context, _ *memapi.HealthReq) (*memapi.HealthResp, error) {
 	return &memapi.HealthResp{BackendKind: "mem0", PluginVersion: Version}, nil
 }
 
 // Capabilities advertises mem0's feature set against the v0.6
-// 17-field CapabilitiesResp. The mem0-strengths cluster
-// (SemanticQuery / VectorSearch / NamespaceIsolation / TTL /
-// EventualConsistency / MetadataFilter / BulkImport / BulkExport)
-// is lit up; DedupeKey / SourceEventID stay false because mem0
-// itself has no native dedupe primitive — the host computes
-// idempotency tokens and the SQLite reference-fallback owns that
-// contract during Read fallback.
+// 17-field CapabilitiesResp. See CONTRACT.md for the rationale of
+// each flag; the round 4 priority A12 cluster (SemanticQuery /
+// VectorSearch / NamespaceIsolation / TTL / EventualConsistency /
+// MetadataFilter / BulkExport / BulkImport) is lit up here.
+// DedupeKey / SourceEventID stay false because mem0 has no native
+// dedupe primitive — the host computes idempotency tokens and the
+// SQLite reference-fallback owns that contract during Read fallback.
 //
 // GraphQuery + TemporalQuery stay false: those land with the
 // Graphiti plugin (= Ν-1.3 docs + skeleton, full implementation
@@ -139,46 +141,414 @@ func (p *Provider) Capabilities(_ context.Context) (*memapi.CapabilitiesResp, er
 	}, nil
 }
 
-// errNotYetImplemented is the stub sentinel every per-RPC method
-// returns until Ν-1.1d wires the actual HTTP client. Keeping it
-// exported via errors.Is lets the conformance suite and unit tests
-// assert on the stub state without depending on the error string.
-var errNotYetImplemented = errors.New("mem0 plugin: not yet implemented (Ν-1.1d)")
-
-// Store routes the upsert through mem0's add-memory endpoint.
+// Store routes the upsert through mem0's add-memories endpoint.
 // Round 4 AI #1 + #2: Store does NOT fall back to the SQLite
-// reference-fallback on error. That is the host coordinator's
-// guarantee: fallback_on_error is consulted only from Query.
-// v0.6 skeleton: stub.
-func (p *Provider) Store(_ context.Context, req *memapi.StoreReq) (*memapi.StoreResp, error) {
-	return nil, fmt.Errorf("Store: %w (instinct=%s)", errNotYetImplemented, req.Instinct.ID)
+// reference-fallback on error — fallback_on_error is consulted only
+// from Query. We pack every Instinct field bough cares about into
+// mem0's metadata map so Export → Import round-trips losslessly.
+func (p *Provider) Store(ctx context.Context, req *memapi.StoreReq) (*memapi.StoreResp, error) {
+	k := p.scopeToMem0(req.Instinct.Scope)
+	body := mem0AddReq{
+		Messages: []mem0Message{
+			{Role: "user", Content: req.Instinct.Rule},
+		},
+		UserID:    k.UserID,
+		SessionID: k.SessionID,
+		Metadata:  instinctToMetadata(req.Instinct, req.DedupeKey, req.SourceEventID),
+	}
+	var addResp mem0Results
+	if err := p.doJSON(ctx, http.MethodPost, "/api/v1/memories/", body, &addResp); err != nil {
+		return nil, fmt.Errorf("mem0 Store: %w (instinct=%s)", err, req.Instinct.ID)
+	}
+	storedID := req.Instinct.ID
+	wasUpsert := false
+	for _, r := range addResp.Results {
+		if r.ID != "" {
+			storedID = r.ID
+		}
+		// mem0 reports event ∈ {ADD, UPDATE, DELETE, NONE}. UPDATE
+		// + NONE both mean the row already existed.
+		if r.Event == "UPDATE" || r.Event == "NONE" {
+			wasUpsert = true
+		}
+	}
+	return &memapi.StoreResp{StoredID: storedID, WasUpsert: wasUpsert}, nil
 }
 
 // Query searches mem0 for matching instincts. The host's Read
 // fallback path consults this method; on error the coordinator can
 // replay against the SQLite reference-fallback (= v0.5.1 wire).
-// v0.6 skeleton: stub.
-func (p *Provider) Query(_ context.Context, _ *memapi.QueryReq) (*memapi.QueryResp, error) {
-	return nil, fmt.Errorf("Query: %w", errNotYetImplemented)
+// Results below MinConfidence are dropped here so the host's budget
+// aggregator never sees them; MaxResults caps the upstream call so
+// we do not pay for unused rows.
+func (p *Provider) Query(ctx context.Context, req *memapi.QueryReq) (*memapi.QueryResp, error) {
+	k := p.scopeToMem0(req.Scope)
+	body := mem0SearchReq{
+		Query:     req.Term,
+		UserID:    k.UserID,
+		SessionID: k.SessionID,
+		Limit:     req.MaxResults,
+	}
+	var searchResp mem0Results
+	if err := p.doJSON(ctx, http.MethodPost, "/api/v1/memories/search/", body, &searchResp); err != nil {
+		return nil, fmt.Errorf("mem0 Query: %w", err)
+	}
+	results := make([]memapi.QueryResult, 0, len(searchResp.Results))
+	for _, m := range searchResp.Results {
+		if m.Score < req.MinConfidence {
+			continue
+		}
+		inst := mem0MemoryToInstinct(m, req.Scope)
+		results = append(results, memapi.QueryResult{
+			Instinct:        inst,
+			Score:           m.Score,
+			EstimatedTokens: estimateTokens(inst.Rule, inst.Why, inst.HowToApply),
+		})
+	}
+	return &memapi.QueryResp{Results: results}, nil
 }
 
-// Forget soft-deletes an instinct. mem0 implements this by deleting
-// the underlying memory; the SoftDelete capability is still honest
-// because the row simply stops being queryable, which is what the
-// host coordinator's audit log treats as "forgotten".
-// v0.6 skeleton: stub.
-func (p *Provider) Forget(_ context.Context, req *memapi.ForgetReq) (*memapi.ForgetResp, error) {
-	return nil, fmt.Errorf("Forget: %w (id=%s)", errNotYetImplemented, req.ID)
+// Forget deletes the named memory from mem0. The capabilities
+// advertise SoftDelete=true because the row stops being queryable
+// from the host's perspective — mem0 itself implements this with a
+// hard delete, but the contract still holds.
+func (p *Provider) Forget(ctx context.Context, req *memapi.ForgetReq) (*memapi.ForgetResp, error) {
+	if req.ID == "" {
+		return nil, errors.New("mem0 Forget: id is empty")
+	}
+	if err := p.doJSON(ctx, http.MethodDelete, "/api/v1/memories/"+url.PathEscape(req.ID)+"/", nil, nil); err != nil {
+		return nil, fmt.Errorf("mem0 Forget: %w (id=%s)", err, req.ID)
+	}
+	return &memapi.ForgetResp{}, nil
 }
 
-// Export walks mem0's bulk-export endpoint. v0.6 skeleton: stub.
-func (p *Provider) Export(_ context.Context, _ *memapi.ExportReq) (*memapi.ExportResp, error) {
-	return nil, fmt.Errorf("Export: %w", errNotYetImplemented)
+// Export walks mem0's get-all endpoint for the configured Scope
+// and emits the same YAML / JSONL shape the sqlite reference-
+// fallback produces, so Import round-trips work across backends.
+func (p *Provider) Export(ctx context.Context, req *memapi.ExportReq) (*memapi.ExportResp, error) {
+	if req.Format != "yaml" && req.Format != "jsonl" {
+		return nil, fmt.Errorf("mem0 Export: format %q unsupported in v0.6", req.Format)
+	}
+	k := p.scopeToMem0(req.Scope)
+	path := "/api/v1/memories/?user_id=" + url.QueryEscape(k.UserID)
+	if k.SessionID != "" {
+		path += "&session_id=" + url.QueryEscape(k.SessionID)
+	}
+	var listResp mem0Results
+	if err := p.doJSON(ctx, http.MethodGet, path, nil, &listResp); err != nil {
+		return nil, fmt.Errorf("mem0 Export: %w", err)
+	}
+	var b strings.Builder
+	contentType := "text/yaml"
+	if req.Format == "jsonl" {
+		contentType = "application/jsonl"
+	}
+	for _, m := range listResp.Results {
+		inst := mem0MemoryToInstinct(m, req.Scope)
+		if req.StateFilter != "" && string(inst.State) != req.StateFilter {
+			continue
+		}
+		writeInstinct(&b, req.Format, inst)
+	}
+	return &memapi.ExportResp{Payload: []byte(b.String()), ContentType: contentType}, nil
 }
 
-// Import replays previously-exported memories into mem0. Mirrors
-// the round-trip semantics sqlite gained in v0.5.1.
-// v0.6 skeleton: stub.
-func (p *Provider) Import(_ context.Context, _ *memapi.ImportReq) (*memapi.ImportResp, error) {
-	return nil, fmt.Errorf("Import: %w", errNotYetImplemented)
+// Import replays a previously-exported payload through Store. We
+// reuse the sqlite-style parser inline rather than calling into
+// the sqlite package — bough plugins do not import each other so
+// every backend stays swappable. v0.6.x will lift the parsers into
+// pkg/memorywire/ once a second plugin needs them.
+func (p *Provider) Import(ctx context.Context, req *memapi.ImportReq) (*memapi.ImportResp, error) {
+	if req.Format != "yaml" && req.Format != "jsonl" {
+		return nil, fmt.Errorf("mem0 Import: format %q unsupported in v0.6", req.Format)
+	}
+	if len(req.Payload) == 0 {
+		return &memapi.ImportResp{}, nil
+	}
+	var rows []memapi.Instinct
+	if req.Format == "jsonl" {
+		rows = parseExportedJSONL(req.Payload)
+	} else {
+		rows = parseExportedYAML(req.Payload)
+	}
+	resp := &memapi.ImportResp{}
+	for _, inst := range rows {
+		if inst.ID == "" {
+			resp.SkippedCount++
+			continue
+		}
+		storeResp, err := p.Store(ctx, &memapi.StoreReq{
+			Instinct:        inst,
+			UpsertSemantics: true,
+		})
+		if err != nil {
+			resp.SkippedCount++
+			continue
+		}
+		if storeResp.WasUpsert {
+			resp.UpsertedCount++
+		} else {
+			resp.ImportedCount++
+		}
+	}
+	return resp, nil
+}
+
+// ----- helpers -----
+
+// instinctToMetadata packs every Instinct field bough cares about
+// into a flat map. Round 4: dedupe_key / source_event_id are stored
+// here too so an Export → Import cycle can rebuild the host-side
+// idempotency tokens — mem0 itself ignores them.
+func instinctToMetadata(inst memapi.Instinct, dedupeKey, sourceEventID string) map[string]any {
+	domain, _ := json.Marshal(inst.Domain)
+	traces, _ := json.Marshal(inst.SourceTraces)
+	evidence, _ := json.Marshal(inst.EvidenceRefs)
+	return map[string]any{
+		"bough_id":                  inst.ID,
+		"bough_rule":                inst.Rule,
+		"bough_why":                 inst.Why,
+		"bough_how_to_apply":        inst.HowToApply,
+		"bough_domain":              string(domain),
+		"bough_source":              inst.Source,
+		"bough_state":               inst.State,
+		"bough_confidence":          inst.Confidence,
+		"bough_hits":                inst.Hits,
+		"bough_dedupe_key":          dedupeKey,
+		"bough_source_event_id":     sourceEventID,
+		"bough_scope_level":         inst.Scope.Level,
+		"bough_scope_worktree_id":   inst.Scope.WorktreeID,
+		"bough_scope_repo_name":     inst.Scope.RepoName,
+		"bough_source_traces":       string(traces),
+		"bough_evidence_refs":       string(evidence),
+		"bough_metadata_json":       inst.MetadataJSON,
+		"bough_created_at":          inst.CreatedAt.Unix(),
+		"bough_last_hit_at":         inst.LastHitAt.Unix(),
+	}
+}
+
+// mem0MemoryToInstinct rebuilds a memapi.Instinct from a mem0 row.
+// The metadata map is the source of truth; we fall back to the
+// `memory` content for Rule and to the caller-supplied scope when
+// the metadata is missing fields (= mem0-side direct writes from
+// another tool).
+func mem0MemoryToInstinct(m mem0Memory, fallbackScope memapi.Scope) memapi.Instinct {
+	inst := memapi.Instinct{
+		ID:    m.ID,
+		Rule:  m.Memory,
+		Scope: fallbackScope,
+	}
+	if m.Metadata == nil {
+		return inst
+	}
+	if s, ok := m.Metadata["bough_id"].(string); ok && s != "" {
+		inst.ID = s
+	}
+	if s, ok := m.Metadata["bough_rule"].(string); ok && s != "" {
+		inst.Rule = s
+	}
+	if s, ok := m.Metadata["bough_why"].(string); ok {
+		inst.Why = s
+	}
+	if s, ok := m.Metadata["bough_how_to_apply"].(string); ok {
+		inst.HowToApply = s
+	}
+	if s, ok := m.Metadata["bough_source"].(string); ok {
+		inst.Source = s
+	}
+	if s, ok := m.Metadata["bough_state"].(string); ok {
+		inst.State = s
+	}
+	if f, ok := m.Metadata["bough_confidence"].(float64); ok {
+		inst.Confidence = f
+	}
+	if f, ok := m.Metadata["bough_hits"].(float64); ok {
+		inst.Hits = int(f)
+	}
+	if s, ok := m.Metadata["bough_dedupe_key"].(string); ok {
+		inst.DedupeKey = s
+	}
+	if s, ok := m.Metadata["bough_scope_level"].(string); ok {
+		inst.Scope.Level = s
+	}
+	if s, ok := m.Metadata["bough_scope_worktree_id"].(string); ok {
+		inst.Scope.WorktreeID = s
+	}
+	if s, ok := m.Metadata["bough_scope_repo_name"].(string); ok {
+		inst.Scope.RepoName = s
+	}
+	if s, ok := m.Metadata["bough_metadata_json"].(string); ok {
+		inst.MetadataJSON = s
+	}
+	if s, ok := m.Metadata["bough_domain"].(string); ok && s != "" {
+		_ = json.Unmarshal([]byte(s), &inst.Domain)
+	}
+	if s, ok := m.Metadata["bough_source_traces"].(string); ok && s != "" {
+		_ = json.Unmarshal([]byte(s), &inst.SourceTraces)
+	}
+	if s, ok := m.Metadata["bough_evidence_refs"].(string); ok && s != "" {
+		_ = json.Unmarshal([]byte(s), &inst.EvidenceRefs)
+	}
+	if f, ok := m.Metadata["bough_created_at"].(float64); ok && f > 0 {
+		inst.CreatedAt = time.Unix(int64(f), 0).UTC()
+	}
+	if f, ok := m.Metadata["bough_last_hit_at"].(float64); ok && f > 0 {
+		inst.LastHitAt = time.Unix(int64(f), 0).UTC()
+	}
+	return inst
+}
+
+// writeInstinct emits one row into the export buffer. YAML/JSONL
+// shapes mirror the sqlite reference-fallback exactly so Import
+// can be backend-agnostic.
+func writeInstinct(b *strings.Builder, format string, inst memapi.Instinct) {
+	if format == "jsonl" {
+		line := map[string]any{
+			"id":          inst.ID,
+			"rule":        inst.Rule,
+			"why":         inst.Why,
+			"scope_level": inst.Scope.Level,
+			"scope_id":    scopeIDFor(inst.Scope),
+			"source":      inst.Source,
+			"confidence":  inst.Confidence,
+			"state":       inst.State,
+			"created_at":  inst.CreatedAt.Unix(),
+		}
+		raw, _ := json.Marshal(line)
+		b.Write(raw)
+		b.WriteString("\n")
+		return
+	}
+	fmt.Fprintf(b, "- id: %s\n  rule: %s\n  scope_level: %s\n  scope_id: %s\n  source: %s\n  confidence: %.2f\n  state: %s\n",
+		inst.ID, escapeYAML(inst.Rule), inst.Scope.Level, scopeIDFor(inst.Scope), inst.Source, inst.Confidence, inst.State)
+}
+
+// scopeIDFor mirrors sqlite's scopeID encoding so YAML / JSONL
+// payloads round-trip across both backends.
+func scopeIDFor(s memapi.Scope) string {
+	switch s.Level {
+	case "worktree":
+		return s.RepoName + "/" + s.WorktreeID
+	case "repo":
+		return s.RepoName
+	default:
+		return ""
+	}
+}
+
+func escapeYAML(s string) string {
+	if strings.ContainsAny(s, ":#@\n") {
+		return `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
+	}
+	return s
+}
+
+func unescapeYAML(s string) string {
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		s = s[1 : len(s)-1]
+		s = strings.ReplaceAll(s, `\"`, `"`)
+	}
+	return s
+}
+
+// splitScopeID inverts scopeIDFor so a YAML payload restores the
+// original Scope.WorktreeID / RepoName split.
+func splitScopeID(level, sid string) (worktreeID, repoName string) {
+	switch level {
+	case "worktree":
+		if idx := strings.LastIndex(sid, "/"); idx >= 0 {
+			return sid[idx+1:], sid[:idx]
+		}
+		return sid, ""
+	case "repo":
+		return "", sid
+	default:
+		return "", ""
+	}
+}
+
+// parseExportedJSONL inverts writeInstinct's JSONL emit.
+func parseExportedJSONL(payload []byte) []memapi.Instinct {
+	var out []memapi.Instinct
+	for _, line := range strings.Split(string(payload), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var row struct {
+			ID         string  `json:"id"`
+			Rule       string  `json:"rule"`
+			Why        string  `json:"why"`
+			ScopeLevel string  `json:"scope_level"`
+			ScopeID    string  `json:"scope_id"`
+			Source     string  `json:"source"`
+			Confidence float64 `json:"confidence"`
+			State      string  `json:"state"`
+			CreatedAt  int64   `json:"created_at"`
+		}
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			out = append(out, memapi.Instinct{})
+			continue
+		}
+		worktreeID, repoName := splitScopeID(row.ScopeLevel, row.ScopeID)
+		inst := memapi.Instinct{
+			ID:         row.ID,
+			Rule:       row.Rule,
+			Why:        row.Why,
+			Scope:      memapi.Scope{Level: row.ScopeLevel, WorktreeID: worktreeID, RepoName: repoName},
+			Source:     row.Source,
+			Confidence: row.Confidence,
+			State:      row.State,
+		}
+		if row.CreatedAt > 0 {
+			inst.CreatedAt = time.Unix(row.CreatedAt, 0).UTC()
+		}
+		out = append(out, inst)
+	}
+	return out
+}
+
+// parseExportedYAML inverts writeInstinct's YAML emit. The shape
+// is a fixed 7-field block per row, so a line-based scan is
+// sufficient and avoids pulling in a full YAML library.
+func parseExportedYAML(payload []byte) []memapi.Instinct {
+	var out []memapi.Instinct
+	var cur memapi.Instinct
+	inBlock := false
+	for _, line := range strings.Split(string(payload), "\n") {
+		if strings.HasPrefix(line, "- id:") {
+			if inBlock {
+				out = append(out, cur)
+			}
+			cur = memapi.Instinct{}
+			inBlock = true
+			cur.ID = strings.TrimSpace(strings.TrimPrefix(line, "- id:"))
+			continue
+		}
+		if !inBlock {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "  rule:"):
+			cur.Rule = unescapeYAML(strings.TrimSpace(strings.TrimPrefix(line, "  rule:")))
+		case strings.HasPrefix(line, "  scope_level:"):
+			cur.Scope.Level = strings.TrimSpace(strings.TrimPrefix(line, "  scope_level:"))
+		case strings.HasPrefix(line, "  scope_id:"):
+			sid := strings.TrimSpace(strings.TrimPrefix(line, "  scope_id:"))
+			cur.Scope.WorktreeID, cur.Scope.RepoName = splitScopeID(cur.Scope.Level, sid)
+		case strings.HasPrefix(line, "  source:"):
+			cur.Source = strings.TrimSpace(strings.TrimPrefix(line, "  source:"))
+		case strings.HasPrefix(line, "  confidence:"):
+			v := strings.TrimSpace(strings.TrimPrefix(line, "  confidence:"))
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				cur.Confidence = f
+			}
+		case strings.HasPrefix(line, "  state:"):
+			cur.State = strings.TrimSpace(strings.TrimPrefix(line, "  state:"))
+		}
+	}
+	if inBlock {
+		out = append(out, cur)
+	}
+	return out
 }
