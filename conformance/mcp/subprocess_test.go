@@ -150,7 +150,7 @@ func buildSubprocessBinaries(t *testing.T) subprocessBinaries {
 		buildCmd.Env = os.Environ()
 		out, err := buildCmd.CombinedOutput()
 		if err != nil {
-			os.RemoveAll(dir)
+			_ = os.RemoveAll(dir)
 			t.Fatalf("build %s: %v\n%s", b.pkg, err, out)
 		}
 	}
