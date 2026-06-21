@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write   # required to publish a GitHub Release
+      id-token: write   # required for keyless cosign signing via GitHub Actions OIDC
     steps:
       - uses: actions/checkout@v6
         with:
@@ -27,6 +28,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      # Cosign on PATH so the .goreleaser.yaml `signs` block can run
+      # `cosign sign-blob` over each archive. Sigstore's keyless flow
+      # picks up the OIDC token from `id-token: write` above.
+      - uses: sigstore/cosign-installer@v3
 
       - uses: goreleaser/goreleaser-action@v6
         with:
