@@ -43,7 +43,7 @@ import (
 
 // Version is reported in the MCP initialize handshake. Bumped per
 // release; the v0.6.0 ship commit replaces the -dev suffix.
-const Version = "v0.6.0-dev"
+const Version = "v0.6.0"
 
 func main() {
 	backend, kill, err := discoverSQLite()

@@ -43,7 +43,7 @@ import (
 
 // Version is reported through Health and Capabilities. Bumped per
 // release; the v0.6.0 ship commit replaces the -dev suffix.
-const Version = "v0.6.0-dev"
+const Version = "v0.6.0"
 
 // Provider is the bough-side handle to a mem0 instance. The HTTP
 // client is configurable so tests can swap in an httptest.Server.
