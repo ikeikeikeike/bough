@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -264,25 +263,25 @@ func (s *Server) handleResourcesRead(ctx context.Context, w io.Writer, req jsonr
 	}
 }
 
-// readScopesResource queries the backend across the three scope
-// levels and returns a compact JSON listing. v0.6 prefers
-// correctness over completeness — an empty backend returns "{}",
-// the host's first-call surface for misconfiguration.
-func (s *Server) readScopesResource(ctx context.Context, w io.Writer, req jsonrpcRequest, uri string) error {
-	scopes := map[string]int{}
-	for _, level := range []string{"worktree", "repo", "global"} {
-		qresp, err := s.backend.Query(ctx, &memapi.QueryReq{
-			Term:       "",
-			Scope:      memapi.Scope{Level: level},
-			MaxResults: 1000,
-			MaxTokens:  4000,
-		})
-		if err != nil {
-			continue
-		}
-		scopes[level] = len(qresp.Results)
+// readScopesResource returns the static list of scope tiers the
+// host honours. v0.6 deliberately does NOT include per-scope row
+// counts (review #23 #6): producing a faithful count from a
+// scope-level-only query requires the host to know its configured
+// RepoName / WorktreeID, which neither the MCP server nor the
+// backend's scopeID encoding can synthesise reliably. A "count" the
+// host cannot guarantee would mislead operators when a half-broken
+// backend silently degrades to zero. v0.6.x adds an explicit count
+// API once Server learns about cfg.Repositories.
+func (s *Server) readScopesResource(_ context.Context, w io.Writer, req jsonrpcRequest, uri string) error {
+	body := map[string]any{
+		"scopes": []map[string]string{
+			{"level": "worktree", "description": "per-branch memory; tied to a specific worktree"},
+			{"level": "repo", "description": "repo-tier memory shared across worktrees of the same repository"},
+			{"level": "global", "description": "user-global memory that follows the operator across repositories"},
+		},
+		"note": "v0.6 exposes the scope tier list only. Use memory.query with scope='<level>' from a host that knows its repo / worktree identity to count rows.",
 	}
-	raw, _ := json.MarshalIndent(scopes, "", "  ")
+	raw, _ := json.MarshalIndent(body, "", "  ")
 	return s.writeResult(w, req.ID, ResourcesReadResult{
 		Contents: []ResourceContent{{URI: uri, MimeType: "application/json", Text: string(raw)}},
 	})
@@ -325,20 +324,13 @@ func writeLine(w io.Writer, payload []byte) error {
 	return nil
 }
 
-// WatchStdin is the round 4 AI #1 zombie-process guard: a Goroutine
-// that waits on os.Stdin EOF, then triggers Server.Shutdown. The
-// MemoryBackend subprocess (= SQLite reference-fallback) is killed
-// as part of Shutdown so file locks never linger after the MCP
-// client (Claude Desktop, Cursor) exits.
-func WatchStdin(s *Server) {
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			_, err := os.Stdin.Read(buf)
-			if err == io.EOF {
-				s.Shutdown()
-				return
-			}
-		}
-	}()
-}
+// The round 4 AI #1 zombie-process guard runs INSIDE Server.Run:
+// the bufio.Scanner returns false when stdin closes, Run returns,
+// and the caller (cmd/bough-mcp-server/main.go) invokes Shutdown
+// from a deferred call which kills the MemoryBackend subprocess.
+//
+// Earlier drafts spawned a parallel goroutine reading os.Stdin to
+// detect EOF, but that goroutine raced Run's scanner for bytes and
+// truncated every JSON-RPC frame mid-flight (review #23 #2 / #3).
+// Run's own scanner.Scan() loop is the single reader; EOF detection
+// happens there for free.

@@ -58,17 +58,20 @@ func main() {
 	}
 
 	server := mcp.NewServer(backend, kill, version)
-	// Round 4 AI #1 zombie-process guard: stdin EOF triggers
-	// Shutdown which kills the SQLite subprocess.
-	mcp.WatchStdin(server)
+
+	// Round 4 AI #1 zombie-process guard lives inside Server.Run:
+	// bufio.Scanner returns false when stdin closes, Run returns,
+	// and the defer below invokes Shutdown which terminates the
+	// MemoryBackend subprocess. Spawning a second goroutine to read
+	// os.Stdin would race with Run's scanner and steal JSON-RPC
+	// bytes — review #23 #2/#3 — so the watchdog stays inline.
+	defer server.Shutdown()
 
 	ctx := context.Background()
 	if err := server.Run(ctx, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "bough-mcp-server: "+err.Error())
-		server.Shutdown()
 		os.Exit(1)
 	}
-	server.Shutdown()
 }
 
 // discoverSQLite spawns the bough-plugin-memory-sqlite binary as
