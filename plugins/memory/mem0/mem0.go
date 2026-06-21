@@ -189,10 +189,14 @@ func (p *Provider) Store(ctx context.Context, req *memapi.StoreReq) (*memapi.Sto
 // aggregator never sees them; MaxResults caps the upstream call so
 // we do not pay for unused rows.
 func (p *Provider) Query(ctx context.Context, req *memapi.QueryReq) (*memapi.QueryResp, error) {
-	cacheK := cacheKeyForQueryReq(req)
+	cacheK := p.cacheKeyFor(req)
 	if cached, ok := p.cache.get(cacheK); ok {
 		return cached, nil
 	}
+	// Review #23 #12: snapshot the cache generation BEFORE issuing
+	// the HTTP roundtrip so a concurrent Store / Forget / Import
+	// can rescind the would-be put.
+	gen := p.cache.currentGen()
 	k := p.scopeToMem0(req.Scope)
 	body := mem0SearchReq{
 		Query:     req.Term,
@@ -217,7 +221,7 @@ func (p *Provider) Query(ctx context.Context, req *memapi.QueryReq) (*memapi.Que
 		})
 	}
 	resp := &memapi.QueryResp{Results: results}
-	p.cache.put(cacheK, resp)
+	_ = p.cache.put(cacheK, resp, gen)
 	return resp, nil
 }
 
@@ -241,18 +245,33 @@ func (p *Provider) Forget(ctx context.Context, req *memapi.ForgetReq) (*memapi.F
 // Export walks mem0's get-all endpoint for the configured Scope
 // and emits the same YAML / JSONL shape the sqlite reference-
 // fallback produces, so Import round-trips work across backends.
+//
+// Review #23 #15: the call paginates until mem0 returns a
+// less-than-page-size batch. mem0's v1 list endpoint defaults to
+// a page size around 100, so a single GET silently truncated
+// long scopes in v0.5.1 / v0.6.0-pre. The loop now drains every
+// page before the YAML / JSONL builder runs.
 func (p *Provider) Export(ctx context.Context, req *memapi.ExportReq) (*memapi.ExportResp, error) {
 	if req.Format != "yaml" && req.Format != "jsonl" {
 		return nil, fmt.Errorf("mem0 Export: format %q unsupported in v0.6", req.Format)
 	}
 	k := p.scopeToMem0(req.Scope)
-	path := "/api/v1/memories/?user_id=" + url.QueryEscape(k.UserID)
-	if k.SessionID != "" {
-		path += "&session_id=" + url.QueryEscape(k.SessionID)
-	}
-	var listResp mem0Results
-	if err := p.doJSON(ctx, http.MethodGet, path, nil, &listResp); err != nil {
-		return nil, fmt.Errorf("mem0 Export: %w", err)
+	const pageSize = 100
+	listResp := mem0Results{}
+	for page := 1; ; page++ {
+		path := fmt.Sprintf("/api/v1/memories/?user_id=%s&page=%d&page_size=%d",
+			url.QueryEscape(k.UserID), page, pageSize)
+		if k.SessionID != "" {
+			path += "&session_id=" + url.QueryEscape(k.SessionID)
+		}
+		var pageResp mem0Results
+		if err := p.doJSON(ctx, http.MethodGet, path, nil, &pageResp); err != nil {
+			return nil, fmt.Errorf("mem0 Export page %d: %w", page, err)
+		}
+		listResp.Results = append(listResp.Results, pageResp.Results...)
+		if len(pageResp.Results) < pageSize {
+			break
+		}
 	}
 	var b strings.Builder
 	contentType := "text/yaml"
@@ -264,7 +283,12 @@ func (p *Provider) Export(ctx context.Context, req *memapi.ExportReq) (*memapi.E
 		if req.StateFilter != "" && string(inst.State) != req.StateFilter {
 			continue
 		}
-		writeInstinct(&b, req.Format, inst)
+		// Review #23 #11: pull dedupe_key / source_event_id back
+		// off the mem0 metadata so the Export captures the
+		// idempotency tokens the host originally supplied.
+		dk, _ := m.Metadata["bough_dedupe_key"].(string)
+		seid, _ := m.Metadata["bough_source_event_id"].(string)
+		writeInstinct(&b, req.Format, inst, dk, seid)
 	}
 	return &memapi.ExportResp{Payload: []byte(b.String()), ContentType: contentType}, nil
 }
@@ -274,6 +298,12 @@ func (p *Provider) Export(ctx context.Context, req *memapi.ExportReq) (*memapi.E
 // the sqlite package — bough plugins do not import each other so
 // every backend stays swappable. v0.6.x will lift the parsers into
 // pkg/memorywire/ once a second plugin needs them.
+//
+// Review #23 #11: the parser returns (Instinct, dedupe_key,
+// source_event_id) so Import can replay both the row and the
+// idempotency tokens the original Export captured. A row missing
+// dedupe_key passes through with an empty token (= the v0.5 wire
+// shape); a row carrying one preserves it across the round trip.
 func (p *Provider) Import(ctx context.Context, req *memapi.ImportReq) (*memapi.ImportResp, error) {
 	if req.Format != "yaml" && req.Format != "jsonl" {
 		return nil, fmt.Errorf("mem0 Import: format %q unsupported in v0.6", req.Format)
@@ -281,20 +311,22 @@ func (p *Provider) Import(ctx context.Context, req *memapi.ImportReq) (*memapi.I
 	if len(req.Payload) == 0 {
 		return &memapi.ImportResp{}, nil
 	}
-	var rows []memapi.Instinct
+	var rows []importRow
 	if req.Format == "jsonl" {
 		rows = parseExportedJSONL(req.Payload)
 	} else {
 		rows = parseExportedYAML(req.Payload)
 	}
 	resp := &memapi.ImportResp{}
-	for _, inst := range rows {
-		if inst.ID == "" {
+	for _, row := range rows {
+		if row.Instinct.ID == "" {
 			resp.SkippedCount++
 			continue
 		}
 		storeResp, err := p.Store(ctx, &memapi.StoreReq{
-			Instinct:        inst,
+			Instinct:        row.Instinct,
+			DedupeKey:       row.DedupeKey,
+			SourceEventID:   row.SourceEventID,
 			UpsertSemantics: true,
 		})
 		if err != nil {
@@ -316,31 +348,41 @@ func (p *Provider) Import(ctx context.Context, req *memapi.ImportReq) (*memapi.I
 // into a flat map. Round 4: dedupe_key / source_event_id are stored
 // here too so an Export → Import cycle can rebuild the host-side
 // idempotency tokens — mem0 itself ignores them.
+//
+// Review #23 #10: time.Time zero values are skipped so a freshly
+// constructed Instinct never serialises a -6.7e12 epoch into mem0
+// metadata (which would round-trip back as a garbage "year 0001"
+// timestamp).
 func instinctToMetadata(inst memapi.Instinct, dedupeKey, sourceEventID string) map[string]any {
 	domain, _ := json.Marshal(inst.Domain)
 	traces, _ := json.Marshal(inst.SourceTraces)
 	evidence, _ := json.Marshal(inst.EvidenceRefs)
-	return map[string]any{
-		"bough_id":                  inst.ID,
-		"bough_rule":                inst.Rule,
-		"bough_why":                 inst.Why,
-		"bough_how_to_apply":        inst.HowToApply,
-		"bough_domain":              string(domain),
-		"bough_source":              inst.Source,
-		"bough_state":               inst.State,
-		"bough_confidence":          inst.Confidence,
-		"bough_hits":                inst.Hits,
-		"bough_dedupe_key":          dedupeKey,
-		"bough_source_event_id":     sourceEventID,
-		"bough_scope_level":         inst.Scope.Level,
-		"bough_scope_worktree_id":   inst.Scope.WorktreeID,
-		"bough_scope_repo_name":     inst.Scope.RepoName,
-		"bough_source_traces":       string(traces),
-		"bough_evidence_refs":       string(evidence),
-		"bough_metadata_json":       inst.MetadataJSON,
-		"bough_created_at":          inst.CreatedAt.Unix(),
-		"bough_last_hit_at":         inst.LastHitAt.Unix(),
+	out := map[string]any{
+		"bough_id":                inst.ID,
+		"bough_rule":              inst.Rule,
+		"bough_why":               inst.Why,
+		"bough_how_to_apply":      inst.HowToApply,
+		"bough_domain":            string(domain),
+		"bough_source":            inst.Source,
+		"bough_state":             inst.State,
+		"bough_confidence":        inst.Confidence,
+		"bough_hits":              inst.Hits,
+		"bough_dedupe_key":        dedupeKey,
+		"bough_source_event_id":   sourceEventID,
+		"bough_scope_level":       inst.Scope.Level,
+		"bough_scope_worktree_id": inst.Scope.WorktreeID,
+		"bough_scope_repo_name":   inst.Scope.RepoName,
+		"bough_source_traces":     string(traces),
+		"bough_evidence_refs":     string(evidence),
+		"bough_metadata_json":     inst.MetadataJSON,
 	}
+	if !inst.CreatedAt.IsZero() {
+		out["bough_created_at"] = inst.CreatedAt.Unix()
+	}
+	if !inst.LastHitAt.IsZero() {
+		out["bough_last_hit_at"] = inst.LastHitAt.Unix()
+	}
+	return out
 }
 
 // mem0MemoryToInstinct rebuilds a memapi.Instinct from a mem0 row.
@@ -417,18 +459,27 @@ func mem0MemoryToInstinct(m mem0Memory, fallbackScope memapi.Scope) memapi.Insti
 // writeInstinct emits one row into the export buffer. YAML/JSONL
 // shapes mirror the sqlite reference-fallback exactly so Import
 // can be backend-agnostic.
-func writeInstinct(b *strings.Builder, format string, inst memapi.Instinct) {
+//
+// Review #23 #10 / #11: zero time.Time is skipped so the JSONL
+// path does not emit a -6.7e12 epoch; dedupe_key + source_event_id
+// land in the payload so the round-trip preserves the v0.5.1 wire
+// (= what sqlite already records in its `instincts` table).
+func writeInstinct(b *strings.Builder, format string, inst memapi.Instinct, dedupeKey, sourceEventID string) {
 	if format == "jsonl" {
 		line := map[string]any{
-			"id":          inst.ID,
-			"rule":        inst.Rule,
-			"why":         inst.Why,
-			"scope_level": inst.Scope.Level,
-			"scope_id":    scopeIDFor(inst.Scope),
-			"source":      inst.Source,
-			"confidence":  inst.Confidence,
-			"state":       inst.State,
-			"created_at":  inst.CreatedAt.Unix(),
+			"id":              inst.ID,
+			"rule":            inst.Rule,
+			"why":             inst.Why,
+			"scope_level":     inst.Scope.Level,
+			"scope_id":        scopeIDFor(inst.Scope),
+			"source":          inst.Source,
+			"confidence":      inst.Confidence,
+			"state":           inst.State,
+			"dedupe_key":      dedupeKey,
+			"source_event_id": sourceEventID,
+		}
+		if !inst.CreatedAt.IsZero() {
+			line["created_at"] = inst.CreatedAt.Unix()
 		}
 		raw, _ := json.Marshal(line)
 		b.Write(raw)
@@ -437,6 +488,12 @@ func writeInstinct(b *strings.Builder, format string, inst memapi.Instinct) {
 	}
 	fmt.Fprintf(b, "- id: %s\n  rule: %s\n  scope_level: %s\n  scope_id: %s\n  source: %s\n  confidence: %.2f\n  state: %s\n",
 		inst.ID, escapeYAML(inst.Rule), inst.Scope.Level, scopeIDFor(inst.Scope), inst.Source, inst.Confidence, inst.State)
+	if dedupeKey != "" {
+		fmt.Fprintf(b, "  dedupe_key: %s\n", dedupeKey)
+	}
+	if sourceEventID != "" {
+		fmt.Fprintf(b, "  source_event_id: %s\n", sourceEventID)
+	}
 }
 
 // scopeIDFor mirrors sqlite's scopeID encoding so YAML / JSONL
@@ -483,27 +540,39 @@ func splitScopeID(level, sid string) (worktreeID, repoName string) {
 	}
 }
 
+// importRow couples the parsed Instinct with the idempotency
+// tokens that ride alongside it on the wire. Review #23 #11: an
+// Import that drops dedupe_key / source_event_id silently breaks
+// every subsequent Store-by-dedupe path.
+type importRow struct {
+	Instinct      memapi.Instinct
+	DedupeKey     string
+	SourceEventID string
+}
+
 // parseExportedJSONL inverts writeInstinct's JSONL emit.
-func parseExportedJSONL(payload []byte) []memapi.Instinct {
-	var out []memapi.Instinct
+func parseExportedJSONL(payload []byte) []importRow {
+	var out []importRow
 	for _, line := range strings.Split(string(payload), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
 		var row struct {
-			ID         string  `json:"id"`
-			Rule       string  `json:"rule"`
-			Why        string  `json:"why"`
-			ScopeLevel string  `json:"scope_level"`
-			ScopeID    string  `json:"scope_id"`
-			Source     string  `json:"source"`
-			Confidence float64 `json:"confidence"`
-			State      string  `json:"state"`
-			CreatedAt  int64   `json:"created_at"`
+			ID            string  `json:"id"`
+			Rule          string  `json:"rule"`
+			Why           string  `json:"why"`
+			ScopeLevel    string  `json:"scope_level"`
+			ScopeID       string  `json:"scope_id"`
+			Source        string  `json:"source"`
+			Confidence    float64 `json:"confidence"`
+			State         string  `json:"state"`
+			CreatedAt     int64   `json:"created_at"`
+			DedupeKey     string  `json:"dedupe_key"`
+			SourceEventID string  `json:"source_event_id"`
 		}
 		if err := json.Unmarshal([]byte(line), &row); err != nil {
-			out = append(out, memapi.Instinct{})
+			out = append(out, importRow{})
 			continue
 		}
 		worktreeID, repoName := splitScopeID(row.ScopeLevel, row.ScopeID)
@@ -519,26 +588,27 @@ func parseExportedJSONL(payload []byte) []memapi.Instinct {
 		if row.CreatedAt > 0 {
 			inst.CreatedAt = time.Unix(row.CreatedAt, 0).UTC()
 		}
-		out = append(out, inst)
+		out = append(out, importRow{Instinct: inst, DedupeKey: row.DedupeKey, SourceEventID: row.SourceEventID})
 	}
 	return out
 }
 
 // parseExportedYAML inverts writeInstinct's YAML emit. The shape
-// is a fixed 7-field block per row, so a line-based scan is
-// sufficient and avoids pulling in a full YAML library.
-func parseExportedYAML(payload []byte) []memapi.Instinct {
-	var out []memapi.Instinct
-	var cur memapi.Instinct
+// is a fixed 7-field block (+ optional dedupe_key / source_event_id
+// from review #23 #11) per row, so a line-based scan is sufficient
+// and avoids pulling in a full YAML library.
+func parseExportedYAML(payload []byte) []importRow {
+	var out []importRow
+	var cur importRow
 	inBlock := false
 	for _, line := range strings.Split(string(payload), "\n") {
 		if strings.HasPrefix(line, "- id:") {
 			if inBlock {
 				out = append(out, cur)
 			}
-			cur = memapi.Instinct{}
+			cur = importRow{}
 			inBlock = true
-			cur.ID = strings.TrimSpace(strings.TrimPrefix(line, "- id:"))
+			cur.Instinct.ID = strings.TrimSpace(strings.TrimPrefix(line, "- id:"))
 			continue
 		}
 		if !inBlock {
@@ -546,21 +616,25 @@ func parseExportedYAML(payload []byte) []memapi.Instinct {
 		}
 		switch {
 		case strings.HasPrefix(line, "  rule:"):
-			cur.Rule = unescapeYAML(strings.TrimSpace(strings.TrimPrefix(line, "  rule:")))
+			cur.Instinct.Rule = unescapeYAML(strings.TrimSpace(strings.TrimPrefix(line, "  rule:")))
 		case strings.HasPrefix(line, "  scope_level:"):
-			cur.Scope.Level = strings.TrimSpace(strings.TrimPrefix(line, "  scope_level:"))
+			cur.Instinct.Scope.Level = strings.TrimSpace(strings.TrimPrefix(line, "  scope_level:"))
 		case strings.HasPrefix(line, "  scope_id:"):
 			sid := strings.TrimSpace(strings.TrimPrefix(line, "  scope_id:"))
-			cur.Scope.WorktreeID, cur.Scope.RepoName = splitScopeID(cur.Scope.Level, sid)
+			cur.Instinct.Scope.WorktreeID, cur.Instinct.Scope.RepoName = splitScopeID(cur.Instinct.Scope.Level, sid)
 		case strings.HasPrefix(line, "  source:"):
-			cur.Source = strings.TrimSpace(strings.TrimPrefix(line, "  source:"))
+			cur.Instinct.Source = strings.TrimSpace(strings.TrimPrefix(line, "  source:"))
 		case strings.HasPrefix(line, "  confidence:"):
 			v := strings.TrimSpace(strings.TrimPrefix(line, "  confidence:"))
 			if f, err := strconv.ParseFloat(v, 64); err == nil {
-				cur.Confidence = f
+				cur.Instinct.Confidence = f
 			}
 		case strings.HasPrefix(line, "  state:"):
-			cur.State = strings.TrimSpace(strings.TrimPrefix(line, "  state:"))
+			cur.Instinct.State = strings.TrimSpace(strings.TrimPrefix(line, "  state:"))
+		case strings.HasPrefix(line, "  dedupe_key:"):
+			cur.DedupeKey = strings.TrimSpace(strings.TrimPrefix(line, "  dedupe_key:"))
+		case strings.HasPrefix(line, "  source_event_id:"):
+			cur.SourceEventID = strings.TrimSpace(strings.TrimPrefix(line, "  source_event_id:"))
 		}
 	}
 	if inBlock {

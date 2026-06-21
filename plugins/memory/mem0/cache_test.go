@@ -26,7 +26,7 @@ func TestQueryCache_HitAndMiss(t *testing.T) {
 	k1 := cacheKey{scopeLevel: "repo", repoName: "auba", term: "early"}
 	k2 := cacheKey{scopeLevel: "repo", repoName: "auba", term: "late"}
 	resp := &memapi.QueryResp{Results: []memapi.QueryResult{{Score: 0.9}}}
-	c.put(k1, resp)
+	c.put(k1, resp, c.currentGen())
 	if got, ok := c.get(k1); !ok || got != resp {
 		t.Errorf("k1 should hit and return the put value")
 	}
@@ -42,7 +42,7 @@ func TestQueryCache_TTLExpiry(t *testing.T) {
 	c := newQueryCache()
 	c.clock = fixedClock(&now)
 	k := cacheKey{term: "expired"}
-	c.put(k, &memapi.QueryResp{})
+	c.put(k, &memapi.QueryResp{}, c.currentGen())
 	if _, ok := c.get(k); !ok {
 		t.Fatal("entry should be live immediately after put")
 	}
@@ -61,7 +61,7 @@ func TestQueryCache_LRUEviction(t *testing.T) {
 	c := newQueryCache()
 	for i := 0; i < cacheMaxEntries+1; i++ {
 		k := cacheKey{term: "k" + string(rune('0'+i%10)), maxResults: i}
-		c.put(k, &memapi.QueryResp{})
+		c.put(k, &memapi.QueryResp{}, c.currentGen())
 	}
 	if c.len() != cacheMaxEntries {
 		t.Errorf("cache should be capped at %d entries: got %d", cacheMaxEntries, c.len())
@@ -74,8 +74,8 @@ func TestQueryCache_InvalidateScope(t *testing.T) {
 	c := newQueryCache()
 	target := cacheKey{scopeLevel: "worktree", worktreeID: "F-x", repoName: "auba", term: "a"}
 	survivor := cacheKey{scopeLevel: "worktree", worktreeID: "F-y", repoName: "auba", term: "a"}
-	c.put(target, &memapi.QueryResp{})
-	c.put(survivor, &memapi.QueryResp{})
+	c.put(target, &memapi.QueryResp{}, c.currentGen())
+	c.put(survivor, &memapi.QueryResp{}, c.currentGen())
 	c.invalidateScope(memapi.Scope{Level: "worktree", WorktreeID: "F-x", RepoName: "auba"})
 	if _, ok := c.get(target); ok {
 		t.Errorf("target entry should be evicted by invalidateScope")
