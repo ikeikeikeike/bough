@@ -213,7 +213,9 @@ signs:
     output: true
     env:
       - COSIGN_EXPERIMENTAL=1
-    if: "{{ not .IsSnapshot }}"
+    # GoReleaser v2 dropped `signs.if`; snapshot-only sign skips
+    # happen through the CLI's `--skip=sign` flag instead. Tag
+    # releases sign unconditionally, which is what we want.
 
 snapshot:
   version_template: '{{ incpatch .Version }}-next'
