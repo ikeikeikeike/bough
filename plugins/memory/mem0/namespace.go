@@ -94,8 +94,13 @@ func (p *Provider) scopeToMem0(s memapi.Scope) scopeKey {
 		rootHash := hashShort(s.RepoName)
 		return scopeKey{UserID: prefix + "repo/" + repoHash + "/" + rootHash}
 	case "worktree":
+		// Round 4 priority A7 follow-up: rootHash is derived from
+		// RepoName ALONE so two worktrees of the same repo share the
+		// same user_id. Branch identity lives entirely in session_id;
+		// repo-tier memories therefore survive across branches as the
+		// CONTRACT.md docstring promises.
 		repoHash := hashShort(s.RepoName)
-		rootHash := hashShort(s.RepoName + "/" + s.WorktreeID)
+		rootHash := hashShort(s.RepoName)
 		return scopeKey{
 			UserID:    prefix + "repo/" + repoHash + "/" + rootHash,
 			SessionID: "worktree/" + s.WorktreeID,

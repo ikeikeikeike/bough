@@ -140,6 +140,13 @@ func newCapabilityLintCmd() *cobra.Command {
 // host-side and unconditional: spin up the coordinator, harvest the
 // instincts the operator asked for, build a CompileRequest, hand it
 // to the v0.6 capability.Compiler, then write or print the emissions.
+//
+// Scope inference for v0.6.0 is intentionally minimal: we hard-code
+// the worktree-level "default" scope so runCompile never depends on
+// nil cfg / Repositories slices. The --scope / --worktree-id flags
+// land in v0.6.x; this default mirrors the value `bough instinct
+// ingest --stdin` writes against when no flag is given so the two
+// CLIs see the same scope by default.
 func runCompile(c *cobra.Command, opts *compileOpts) error {
 	coord, closeAll, err := loadInstinctCoordinator(c)
 	if err != nil {
@@ -147,7 +154,7 @@ func runCompile(c *cobra.Command, opts *compileOpts) error {
 	}
 	defer closeAll()
 
-	scope := currentScope(nil, "", "") // host-side scope inference will land with --scope flags in v0.6.x
+	scope := schema.Scope{Level: schema.ScopeWorktree, WorktreeID: "default"}
 	instincts, err := harvestInstincts(coord, scope, opts.instinctIDs)
 	if err != nil {
 		return err

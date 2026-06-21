@@ -45,14 +45,28 @@ type Result struct {
 }
 
 // Request packages the inputs every Verify call needs. SigPath is
-// optional — when empty, we derive it from BinaryPath by appending
-// the canonical extension (= `.sig` for minisign, `.bundle` for
-// cosign keyless).
+// optional — when empty, the verifier falls back to the
+// GoReleaser-published extension (`<binary>.sig`) and then to
+// the cosign-bundle convention (`<binary>.bundle`).
+//
+// CertIdentity / CertOIDCIssuer (round 4 review #23 #5) are required
+// for cosign 2.x keyless verification. GoReleaser keyless signing
+// embeds the github.com/<owner>/<repo>/.github/workflows/<file>@ref
+// identity into the certificate, so an operator passing the bough
+// release identity (e.g. https://github.com/ikeikeikeike/bough/.
+// github/workflows/release.yml@refs/tags/v0.6.0) and the GitHub
+// OIDC issuer (https://token.actions.githubusercontent.com) will
+// have a successful verify path. The CertPath holds the
+// GoReleaser-published certificate companion (`<binary>.pem`).
 type Request struct {
-	BinaryPath string
-	SigPath    string
-	PubKeyPath string // minisign only; cosign keyless uses OIDC
-	Scheme     Scheme
+	BinaryPath      string
+	SigPath         string
+	CertPath        string // cosign keyless certificate (= <binary>.pem); defaults derived from BinaryPath
+	PubKeyPath      string // minisign only; cosign keyless uses OIDC
+	Scheme          Scheme
+	CertIdentity    string // cosign keyless: --certificate-identity (= the signer's OIDC identity, regex-matchable via CertIdentityRegexp)
+	CertOIDCIssuer  string // cosign keyless: --certificate-oidc-issuer (e.g. https://token.actions.githubusercontent.com)
+	CertIdentityRegexp string // cosign keyless: --certificate-identity-regexp (use this instead of CertIdentity when you need a regex match)
 }
 
 // Verify runs the configured verifier against the binary. Errors are
@@ -76,14 +90,29 @@ func Verify(req Request) (*Result, error) {
 	}
 }
 
-// verifyCosign spawns `cosign verify-blob`. The signature path
-// defaults to "<binary>.bundle" (= GoReleaser keyless output) so
-// the operator does not have to wire it explicitly.
+// verifyCosign spawns `cosign verify-blob`. GoReleaser publishes
+// the signature alongside the archive as `<binary>.sig` plus a
+// matching `<binary>.pem` certificate (see .goreleaser.yaml's
+// signs block). cosign 2.x requires --certificate-identity (or
+// --certificate-identity-regexp) and --certificate-oidc-issuer for
+// keyless verification — without them the verify-blob command
+// exits non-zero even with a genuine signature.
+//
+// SigPath / CertPath fall back to those GoReleaser names; the
+// caller is responsible for supplying the identity + issuer
+// because they are deployment-specific (the GoReleaser keyless
+// flow embeds the repository's workflow URL as the OIDC subject).
 func verifyCosign(req Request) *Result {
 	res := &Result{Scheme: SchemeCosign}
 	sig := req.SigPath
 	if sig == "" {
-		sig = req.BinaryPath + ".bundle"
+		// Prefer GoReleaser's .sig (this is what the official
+		// release pipeline writes); fall back to the legacy
+		// .bundle convention if the operator has an older artifact.
+		sig = req.BinaryPath + ".sig"
+		if _, err := os.Stat(sig); err != nil {
+			sig = req.BinaryPath + ".bundle"
+		}
 	}
 	bin, err := exec.LookPath("cosign")
 	if err != nil {
@@ -95,7 +124,44 @@ func verifyCosign(req Request) *Result {
 		res.Detail = fmt.Sprintf("signature %q missing: %v", sig, err)
 		return res
 	}
-	cmd := exec.Command(bin, "verify-blob", "--bundle", sig, req.BinaryPath)
+	args := []string{"verify-blob"}
+	// --bundle accepts a sigstore bundle (.bundle); --signature
+	// accepts a raw signature (.sig) plus a separate --certificate.
+	if strings.HasSuffix(sig, ".bundle") {
+		args = append(args, "--bundle", sig)
+	} else {
+		args = append(args, "--signature", sig)
+		cert := req.CertPath
+		if cert == "" {
+			cert = strings.TrimSuffix(req.BinaryPath, ".sig") + ".pem"
+		}
+		if _, err := os.Stat(cert); err != nil {
+			res.Detail = fmt.Sprintf("certificate %q missing (required for cosign 2.x keyless): %v", cert, err)
+			return res
+		}
+		args = append(args, "--certificate", cert)
+	}
+	// Round 4 review #23 #5: cosign 2.x requires the keyless
+	// identity + issuer up front. Operators wire these per-release
+	// (the bough release flow uses GitHub Actions OIDC).
+	switch {
+	case req.CertIdentityRegexp != "":
+		args = append(args, "--certificate-identity-regexp", req.CertIdentityRegexp)
+	case req.CertIdentity != "":
+		args = append(args, "--certificate-identity", req.CertIdentity)
+	default:
+		res.Detail = "cosign keyless requires --cert-identity or --cert-identity-regexp (see docs/SIGNING.md for the GoReleaser github-actions identity pattern)"
+		return res
+	}
+	if req.CertOIDCIssuer != "" {
+		args = append(args, "--certificate-oidc-issuer", req.CertOIDCIssuer)
+	} else {
+		// GitHub Actions OIDC issuer is the GoReleaser default, so
+		// default to it when the operator did not pass --cert-issuer.
+		args = append(args, "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com")
+	}
+	args = append(args, req.BinaryPath)
+	cmd := exec.Command(bin, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		res.Detail = fmt.Sprintf("cosign verify-blob failed: %v: %s", err, strings.TrimSpace(string(out)))
