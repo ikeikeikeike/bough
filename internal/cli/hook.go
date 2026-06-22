@@ -2,9 +2,12 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -42,6 +45,7 @@ v0.7.0 sprint per docs/ROADMAP.md.`,
 		newHookListCmd(),
 		newHookReplayCmd(),
 		newHookDoctorCmd(),
+		newHookHandleCmd(),
 	)
 	return cmd
 }
@@ -193,6 +197,91 @@ func runDoctor(c *cobra.Command) error {
 	}
 	report.Render(c.OutOrStdout())
 	return nil
+}
+
+// newHookHandleCmd wires `bough hook handle`, the v0.7.0 O-1.6
+// raw-event capture dispatcher. Claude Code invokes this command
+// (one per registered hook entry, per the install layout) with
+// the event name on the --event flag and the JSON payload on
+// stdin; the dispatcher appends one JSONL record to
+// `.bough/observations.jsonl` and exits cleanly.
+//
+// Hidden from the human surface because Claude Code is the only
+// expected caller — wrapping it in a `bough hook` namespace lets
+// `bough hook replay` reuse the same payload format for golden
+// tests without colliding with operator workflows.
+//
+// The dispatcher intentionally does no parsing of the payload
+// beyond decoding it once to validate the bytes are valid JSON;
+// the observer + Bootstrap Agent (= v0.7.1) own the semantic
+// analysis of what each event means. Keeping the dispatcher
+// dumb means a Claude Code spec drift adds a new field without
+// breaking the bough side until the analysis layer is ready to
+// consume it.
+func newHookHandleCmd() *cobra.Command {
+	var (
+		event   string
+		outPath string
+	)
+	cmd := &cobra.Command{
+		Use:    "handle",
+		Hidden: true,
+		Short:  "Receive a Claude Code hook event payload via stdin and append to .bough/observations.jsonl",
+		RunE: func(c *cobra.Command, _ []string) error {
+			if event == "" {
+				return fmt.Errorf("--event is required (= called by Claude Code's settings.json wiring; see `bough hook install`)")
+			}
+			payload, err := io.ReadAll(c.InOrStdin())
+			if err != nil {
+				return fmt.Errorf("read stdin: %w", err)
+			}
+			// Validate the payload is JSON so a malformed Claude
+			// Code event surfaces as a hook failure instead of
+			// silently appending garbage to the log. We hold the
+			// raw bytes through so downstream tooling can decode
+			// fields bough does not yet know about.
+			if len(payload) > 0 {
+				var probe map[string]any
+				if err := json.Unmarshal(payload, &probe); err != nil {
+					return fmt.Errorf("payload is not valid JSON: %w", err)
+				}
+			}
+			if outPath == "" {
+				outPath = filepath.Join(".bough", "observations.jsonl")
+			}
+			if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+				return fmt.Errorf("mkdir %s: %w", filepath.Dir(outPath), err)
+			}
+			record := struct {
+				TS      string          `json:"ts"`
+				Event   string          `json:"event"`
+				Payload json.RawMessage `json:"payload"`
+			}{
+				TS:      time.Now().UTC().Format(time.RFC3339Nano),
+				Event:   event,
+				Payload: json.RawMessage(payload),
+			}
+			if len(record.Payload) == 0 {
+				record.Payload = json.RawMessage(`null`)
+			}
+			line, err := json.Marshal(record)
+			if err != nil {
+				return fmt.Errorf("marshal observation: %w", err)
+			}
+			f, err := os.OpenFile(outPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+			if err != nil {
+				return fmt.Errorf("open %s: %w", outPath, err)
+			}
+			defer f.Close()
+			if _, err := f.Write(append(line, '\n')); err != nil {
+				return fmt.Errorf("append %s: %w", outPath, err)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&event, "event", "", "Claude Code hook event name (e.g. PreToolUse)")
+	cmd.Flags().StringVar(&outPath, "out", "", "observation log path (default: .bough/observations.jsonl)")
+	return cmd
 }
 
 // defaultClaudeSettingsPath returns the per-project .claude/
