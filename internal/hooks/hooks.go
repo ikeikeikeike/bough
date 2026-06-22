@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -118,10 +119,11 @@ func New(settingsPath string) *Manager {
 // ErrNotYetWired signals that a Manager method has not been
 // implemented in this commit. The v0.7.0 first commit shipped
 // every method behind this sentinel; subsequent O-1.x sub-phases
-// remove the wrapper as they fill the body in. v0.7.0 O-1.2 is
-// the install / uninstall / list reconciliation — Replay /
-// Doctor still wait on their respective sub-phases.
-var ErrNotYetWired = errors.New("hooks: method not yet wired (v0.7.0 O-1.1 skeleton)")
+// remove the wrapper as they fill the body in. v0.7.0 O-1.2 wired
+// install / uninstall / list, O-1.3 wired Replay, and O-1.4 wired
+// Doctor — the sentinel is retained as the canonical "not yet
+// implemented" signal for any future Manager method.
+var ErrNotYetWired = errors.New("hooks: method not yet wired")
 
 // boughCommandPrefix is the canonical prefix every bough-installed
 // hook command starts with. Uninstall keys off this prefix to
@@ -331,6 +333,143 @@ type ReplayResult struct {
 	Stdout   string
 	Stderr   string
 	ExitCode int
+}
+
+// DoctorReport is the v0.7.0 transparency surface. Round 5 review
+// flagged silent billing / silent observer / silent Haiku as the
+// recurring failure mode bough must visibly avoid; the doctor
+// report renders everything an operator needs to confirm bough's
+// background loop is not running expensive things without their
+// knowledge. v0.7.1 extends Cost with per-hook + per-session
+// token tallies; v0.7.0 surfaces the structure so downstream
+// docs / shell autocompletes can develop in parallel.
+type DoctorReport struct {
+	SettingsPath string
+	Events       []EventStatus
+	Observer     ObserverStatus
+	Cost         CostStatus
+}
+
+// EventStatus summarises one event's wiring posture. Both flags can
+// be true (= the event has both a bough group and a hand-edited
+// group); the doctor's render flags that combination explicitly
+// because it is the case operators most often misread.
+type EventStatus struct {
+	Event          HookEvent
+	BoughInstalled bool
+	HandEdited     bool
+	BoughCommand   string
+	HandEntries    []HookEntry
+}
+
+// ObserverStatus tracks whether the v0.7.0 raw-event observer is
+// actually capturing into .bough/observations.jsonl. Configured =
+// false means the operator has not run any session yet (or has not
+// wired hook install).
+type ObserverStatus struct {
+	Configured bool
+	Path       string
+	LineCount  int
+}
+
+// CostStatus mirrors the v0.7.1 cost meter shape so the v0.7.0
+// doctor can render a "not yet capturing" line and the v0.7.1
+// commit only needs to fill Tokens / USDEst / LastSampleAt without
+// touching the render path.
+type CostStatus struct {
+	DataAvailable bool
+	Tokens        int
+	USDEst        float64
+	LastSampleAt  string
+	Message       string
+}
+
+// Doctor returns a snapshot of the wiring, observer, and cost
+// posture an operator needs to confirm bough's background loop is
+// safe. Round 5 review front-loaded this from v0.7.1 because the
+// hook auto-wire is the moment "silent" failure modes become
+// possible; doctor is the operator's first stop when something
+// feels off.
+func (m *Manager) Doctor(ctx context.Context) (*DoctorReport, error) {
+	set, err := m.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	report := &DoctorReport{SettingsPath: m.SettingsPath}
+	for _, event := range AllEvents() {
+		st := EventStatus{Event: event}
+		for _, g := range set[event] {
+			if isBoughGroup(g) {
+				st.BoughInstalled = true
+				if len(g.Hooks) > 0 {
+					st.BoughCommand = g.Hooks[0].Command
+				}
+			} else {
+				st.HandEdited = true
+				st.HandEntries = append(st.HandEntries, g.Hooks...)
+			}
+		}
+		report.Events = append(report.Events, st)
+	}
+	// Observer status: v0.7.0 raw-event capture lands a JSONL file
+	// under .bough/observations.jsonl. The doctor probes the
+	// well-known cwd-relative path so the v0.7.0 sub-phases that
+	// configure a custom location (= .bough.yaml override) can
+	// surface the actual path here in a later patch.
+	obsPath := filepath.Join(".bough", "observations.jsonl")
+	if info, statErr := os.Stat(obsPath); statErr == nil && info.Mode().IsRegular() {
+		report.Observer.Configured = true
+		report.Observer.Path = obsPath
+		if data, readErr := os.ReadFile(obsPath); readErr == nil {
+			report.Observer.LineCount = bytes.Count(data, []byte("\n"))
+		}
+	}
+	// Cost meter: v0.7.0 ships the field shape; the actual counter
+	// integration with the MCP write surface + hook handle path
+	// lands in v0.7.1 once the LLM judge + per-event token tally
+	// have a place to write to.
+	report.Cost.DataAvailable = false
+	report.Cost.Message = "cost meter wires in alongside the v0.7.1 LLM judge integration; not yet capturing"
+	return report, nil
+}
+
+// Render writes a human-friendly report to w. The doctor surface
+// is meant to be read on the terminal; structured output (= JSON
+// for CI consumption) lands in v0.7.x behind a --json flag.
+func (r *DoctorReport) Render(w io.Writer) {
+	fmt.Fprintf(w, "Hook wiring (settings.json: %s)\n", r.SettingsPath)
+	for _, st := range r.Events {
+		mark := "  not wired"
+		switch {
+		case st.BoughInstalled && st.HandEdited:
+			mark = "✓ bough + hand-edited"
+		case st.BoughInstalled:
+			mark = "✓ bough installed"
+		case st.HandEdited:
+			mark = "✓ hand-edited only"
+		}
+		fmt.Fprintf(w, "  %-18s %s\n", st.Event, mark)
+		if st.BoughCommand != "" {
+			fmt.Fprintf(w, "    bough cmd: %s\n", st.BoughCommand)
+		}
+		for _, e := range st.HandEntries {
+			fmt.Fprintf(w, "    hand cmd:  %s\n", e.Command)
+		}
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Observer:")
+	if r.Observer.Configured {
+		fmt.Fprintf(w, "  observations: %s (%d lines)\n", r.Observer.Path, r.Observer.LineCount)
+	} else {
+		fmt.Fprintln(w, "  observations: not yet capturing (.bough/observations.jsonl absent)")
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Cost meter:")
+	if r.Cost.DataAvailable {
+		fmt.Fprintf(w, "  tokens=%d est=$%.4f last=%s\n", r.Cost.Tokens, r.Cost.USDEst, r.Cost.LastSampleAt)
+	} else {
+		fmt.Fprintf(w, "  %s\n", r.Cost.Message)
+	}
 }
 
 // loadSettings reads the settings.json file into a top-level

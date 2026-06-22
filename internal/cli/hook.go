@@ -168,12 +168,31 @@ func newHookDoctorCmd() *cobra.Command {
 Round 5 review front-loaded this from v0.7.1 to v0.7.0 because
 silent billing / silent observer / silent Haiku regressions are
 exactly what ECC has historically struggled with and bough should
-visibly avoid. The body lands in the v0.7.0 transparency sub-phase
-once the observer raw-trace persistence is in.`,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return hooks.ErrNotYetWired
+visibly avoid. Same body as the top-level "bough doctor" alias.`,
+		RunE: func(c *cobra.Command, _ []string) error {
+			return runDoctor(c)
 		},
 	}
+}
+
+// runDoctor is the shared body between `bough doctor` (= top-level
+// alias) and `bough hook doctor`. Both surfaces print the same
+// report so operators do not have to remember which spelling to
+// use; the top-level alias matches the round 5 reviewer ask of
+// having the transparency check reachable without remembering the
+// `hook` namespace.
+func runDoctor(c *cobra.Command) error {
+	settingsPath, err := defaultClaudeSettingsPath()
+	if err != nil {
+		return err
+	}
+	m := hooks.New(settingsPath)
+	report, err := m.Doctor(commandCtx(c))
+	if err != nil {
+		return err
+	}
+	report.Render(c.OutOrStdout())
+	return nil
 }
 
 // defaultClaudeSettingsPath returns the per-project .claude/

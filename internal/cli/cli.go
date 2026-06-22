@@ -47,6 +47,12 @@ func NewRootCmd(version string) *cobra.Command {
 		// the internal/hooks/ skeleton; the underlying Manager
 		// bodies fill in across the subsequent v0.7.0 sub-phases.
 		newHookCmd(),
+		// `bough doctor` is a top-level alias for `bough hook
+		// doctor` so the transparency check (= "what is bough
+		// actually running on my behalf, and how much is it
+		// costing me") is reachable without remembering the
+		// `hook` namespace.
+		newDoctorCmd(),
 	)
 	return root
 }

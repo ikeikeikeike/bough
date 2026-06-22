@@ -299,6 +299,55 @@ func TestManager_List_MissingFile(t *testing.T) {
 	}
 }
 
+// TestManager_Doctor_FreshState reports every event as "not wired"
+// against a fresh repo (= no settings.json, no observations.jsonl).
+func TestManager_Doctor_FreshState(t *testing.T) {
+	m := New(filepath.Join(t.TempDir(), ".claude", "settings.json"))
+	report, err := m.Doctor(context.Background())
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	if len(report.Events) != len(AllEvents()) {
+		t.Fatalf("Events length: got %d want %d", len(report.Events), len(AllEvents()))
+	}
+	for _, st := range report.Events {
+		if st.BoughInstalled || st.HandEdited {
+			t.Errorf("%s: expected unwired on fresh state, got bough=%v hand=%v",
+				st.Event, st.BoughInstalled, st.HandEdited)
+		}
+	}
+	if report.Cost.DataAvailable {
+		t.Errorf("Cost.DataAvailable: expected false on v0.7.0")
+	}
+}
+
+// TestManager_Doctor_AfterInstall verifies every event flips to
+// BoughInstalled=true after Install, and BoughCommand surfaces the
+// canonical command string the render path prints.
+func TestManager_Doctor_AfterInstall(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".claude", "settings.json")
+	m := New(path)
+	if err := m.Install(context.Background(), "bough hook handle"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	report, err := m.Doctor(context.Background())
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	for _, st := range report.Events {
+		if !st.BoughInstalled {
+			t.Errorf("%s: expected BoughInstalled=true after Install", st.Event)
+		}
+		if st.HandEdited {
+			t.Errorf("%s: expected HandEdited=false on clean install", st.Event)
+		}
+		if st.BoughCommand == "" {
+			t.Errorf("%s: expected BoughCommand non-empty", st.Event)
+		}
+	}
+}
+
 // TestManager_List_ParsesExistingHandEdited reads a settings.json
 // the operator authored by hand and verifies bough's decoder
 // round-trips its matcher groups untouched.
