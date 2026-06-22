@@ -53,6 +53,12 @@ func NewRootCmd(version string) *cobra.Command {
 		// costing me") is reachable without remembering the
 		// `hook` namespace.
 		newDoctorCmd(),
+		// `bough bootstrap --dry-run` — v0.7.0 O-1.5 Bootstrap
+		// Agent dry-run path per round 5 AI A Alternative 2.
+		// Writes candidate artifacts to .bough/proposals/<ts>/
+		// for git-diff review; the live (non-dry-run) path lands
+		// in v0.7.1 with the LLM judge.
+		newBootstrapCmd(),
 	)
 	return root
 }
