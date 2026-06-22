@@ -36,14 +36,80 @@ func TestAllEvents_StableOrder(t *testing.T) {
 	}
 }
 
-// TestManager_Replay_StillSkeleton pins the v0.7.0 sub-phase
-// contract. Replay remains a stub until O-1.3 lands the
-// fixture-driven dispatcher; install / uninstall / list went live
-// in O-1.2 and are exercised by the per-method tests below.
-func TestManager_Replay_StillSkeleton(t *testing.T) {
+// TestManager_Replay_NoHandlersWired returns a non-error
+// ReplayResult with a diagnostic Stderr message when settings.json
+// has no entries for the requested event — "no handler wired" is a
+// legitimate state during install / uninstall cycles and the
+// harness should report it, not fail.
+func TestManager_Replay_NoHandlersWired(t *testing.T) {
 	m := New(filepath.Join(t.TempDir(), "settings.json"))
-	if _, err := m.Replay(context.Background(), EventPreToolUse, []byte("{}")); !errors.Is(err, ErrNotYetWired) {
-		t.Errorf("Replay: want ErrNotYetWired, got %v", err)
+	result, err := m.Replay(context.Background(), EventPreToolUse, []byte("{}"))
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Replay returned nil result")
+	}
+	if !strings.Contains(result.Stderr, "no hook handlers wired") {
+		t.Errorf("expected diagnostic Stderr, got %q", result.Stderr)
+	}
+}
+
+// TestManager_Replay_ExecutesWiredCommand installs a custom command
+// (= `cat` echo so the fixture bytes round-trip through stdout)
+// and verifies the Replay harness pipes the fixture into the
+// handler's stdin and surfaces the handler's stdout / exit code.
+func TestManager_Replay_ExecutesWiredCommand(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// `cat` round-trips stdin to stdout — proves both directions
+	// of the pipe wiring.
+	seed := `{
+  "hooks": {
+    "PreToolUse": [
+      {"hooks": [{"type": "command", "command": "cat"}]}
+    ]
+  }
+}
+`
+	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	m := New(path)
+	payload := []byte(`{"hook_event_name":"PreToolUse","fixture":"smoke"}`)
+	result, err := m.Replay(context.Background(), EventPreToolUse, payload)
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Errorf("expected exit 0 for cat, got %d (stderr=%q)", result.ExitCode, result.Stderr)
+	}
+	if !strings.Contains(result.Stdout, `"fixture":"smoke"`) {
+		t.Errorf("stdin was not piped through to stdout: stdout=%q", result.Stdout)
+	}
+}
+
+// TestManager_Replay_FixturesParse smoke-tests the testdata/
+// fixtures so a future patch that breaks the JSON schema gets
+// caught at unit-test time.
+func TestManager_Replay_FixturesParse(t *testing.T) {
+	for _, name := range []string{"PreToolUse.json", "PostToolUse.json", "SessionEnd.json"} {
+		data, err := os.ReadFile(filepath.Join("testdata", name))
+		if err != nil {
+			t.Errorf("read %s: %v", name, err)
+			continue
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			t.Errorf("parse %s: %v", name, err)
+			continue
+		}
+		if parsed["hook_event_name"] == nil {
+			t.Errorf("%s missing hook_event_name", name)
+		}
 	}
 }
 

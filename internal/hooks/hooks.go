@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -260,8 +261,65 @@ func (m *Manager) List(_ context.Context) (HookSet, error) {
 // against a fixture without touching a live Claude Code session.
 // The fixture argument is the raw bytes of the JSON payload Claude
 // Code would have sent into the hook subprocess on stdin.
-func (m *Manager) Replay(_ context.Context, _ HookEvent, _ []byte) (*ReplayResult, error) {
-	return nil, ErrNotYetWired
+//
+// Behaviour:
+//
+//   - Looks up the commands wired for the given event in
+//     settings.json. If none, returns a ReplayResult with a
+//     diagnostic Stderr explaining the wiring is empty — not an
+//     error, since "no handler wired" is a legitimate state during
+//     install / uninstall cycles.
+//   - Spawns each wired command in turn via `sh -c`, piping the
+//     fixture into stdin and capturing combined stdout + stderr.
+//     The Replay caller is the v0.7.0 debug harness (= `bough hook
+//     replay --event ... --fixture ...`), not the production hook
+//     dispatch path; the v0.7.0 production dispatcher is
+//     `bough hook handle` (= O-1.6 in the same sprint).
+//   - Reports the last command's exit code as the result's exit
+//     code. Multi-handler events are uncommon in v0.7.0; v0.7.x
+//     adds an aggregated-exit-code policy when matchers start
+//     producing dependent chains.
+func (m *Manager) Replay(ctx context.Context, event HookEvent, fixture []byte) (*ReplayResult, error) {
+	set, err := m.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	groups, ok := set[event]
+	result := &ReplayResult{Event: event}
+	if !ok || len(groups) == 0 {
+		result.Stderr = fmt.Sprintf("no hook handlers wired for event %q in %s", event, m.SettingsPath)
+		return result, nil
+	}
+	var stdoutAll, stderrAll bytes.Buffer
+	for _, g := range groups {
+		for _, e := range g.Hooks {
+			if e.Type != "command" {
+				continue
+			}
+			cmd := exec.CommandContext(ctx, "sh", "-c", e.Command)
+			cmd.Stdin = bytes.NewReader(fixture)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			runErr := cmd.Run()
+			stdoutAll.Write(stdout.Bytes())
+			stderrAll.Write(stderr.Bytes())
+			exit := 0
+			if runErr != nil {
+				var exitErr *exec.ExitError
+				if errors.As(runErr, &exitErr) {
+					exit = exitErr.ExitCode()
+				} else {
+					exit = -1
+					fmt.Fprintf(&stderrAll, "exec error: %v\n", runErr)
+				}
+			}
+			result.ExitCode = exit
+		}
+	}
+	result.Stdout = stdoutAll.String()
+	result.Stderr = stderrAll.String()
+	return result, nil
 }
 
 // ReplayResult describes the outcome of a Replay invocation. The
