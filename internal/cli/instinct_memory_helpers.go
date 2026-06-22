@@ -12,8 +12,9 @@ import (
 
 	"github.com/ikeikeikeike/bough/internal/config"
 	"github.com/ikeikeikeike/bough/internal/instinct"
-	memapi "github.com/ikeikeikeike/bough/plugins/memory/api"
+	"github.com/ikeikeikeike/bough/internal/pluginsign"
 	"github.com/ikeikeikeike/bough/pkg/schema"
+	memapi "github.com/ikeikeikeike/bough/plugins/memory/api"
 )
 
 // isAllowlisted is the v0.5 plugin trust check. An empty allowlist
@@ -32,6 +33,88 @@ func isAllowlisted(binName string, allowlist []string) bool {
 		}
 	}
 	return false
+}
+
+// enforceSigning is the v0.6.1 spawn-time gate the `require_signed`
+// flag activates. When false (= v0.6 default), this is a no-op and
+// the warn-only path the v0.5 allowlist check provides stays in
+// charge. When true, the gate verifies the plugin binary against
+// the schemes the operator accepted (cosign / minisign) and refuses
+// to spawn an unverified binary that is also not on the allowlist.
+//
+// Fail-open conditions (= v0.6.1 keeps these explicit so flipping
+// the flag without installing tooling does not lock the operator
+// out of their own host):
+//
+//  1. The plugin binary is on `allowlist`. v0.6.1 treats allowlist
+//     as the operator's "I trust this binary, do not verify"
+//     signal — useful for bough's bundled SQLite reference-fallback
+//     and other plugins the operator vendored themselves.
+//  2. None of the configured verifier tools (cosign, minisign) are
+//     on PATH. The function logs a [NOTICE] to stderr so the
+//     operator sees what is missing rather than tripping over an
+//     opaque spawn refusal. Strict mode (= fail-close on missing
+//     tool) lands in v0.7 once the broader Bootstrap layer
+//     requires it.
+//
+// Required environment variables for cosign keyless verify:
+//
+//	BOUGH_SIGNING_CERT_IDENTITY_REGEXP   regex matching the OIDC
+//	                                     identity on the signing
+//	                                     certificate (= the GitHub
+//	                                     Actions workflow URL the
+//	                                     plugin's release pipeline
+//	                                     runs under)
+//	BOUGH_SIGNING_CERT_OIDC_ISSUER       defaults to GitHub Actions
+//	                                     OIDC issuer when unset
+//	BOUGH_SIGNING_PUBKEY                 path to the minisign public
+//	                                     key (required for minisign)
+func enforceSigning(binPath string, cfg *config.Config) error {
+	if cfg == nil || !cfg.Instinct.PluginSecurity.RequireSigned {
+		return nil
+	}
+	binName := filepath.Base(binPath)
+	if isAllowlisted(binName, cfg.Instinct.PluginSecurity.Allowlist) {
+		return nil
+	}
+	schemes := cfg.Instinct.PluginSecurity.AcceptedSignatureSchemes
+	if len(schemes) == 0 {
+		schemes = []string{string(pluginsign.SchemeCosign), string(pluginsign.SchemeMinisign)}
+	}
+	var lastDetail string
+	for _, scheme := range schemes {
+		req := pluginsign.Request{
+			BinaryPath:         binPath,
+			Scheme:             pluginsign.Scheme(scheme),
+			CertIdentity:       os.Getenv("BOUGH_SIGNING_CERT_IDENTITY"),
+			CertIdentityRegexp: os.Getenv("BOUGH_SIGNING_CERT_IDENTITY_REGEXP"),
+			CertOIDCIssuer:     os.Getenv("BOUGH_SIGNING_CERT_OIDC_ISSUER"),
+			PubKeyPath:         os.Getenv("BOUGH_SIGNING_PUBKEY"),
+		}
+		res, err := pluginsign.Verify(req)
+		if err != nil {
+			lastDetail = err.Error()
+			continue
+		}
+		if res.ToolMissing {
+			fmt.Fprintf(os.Stderr,
+				"[NOTICE] require_signed=true but %s verifier is missing on PATH; spawn-time enforcement skipped for %s. Install the verifier to enable strict mode (%s).\n",
+				scheme, binName, res.Detail,
+			)
+			// v0.6.1: any missing verifier opens the gate. v0.7 adds a
+			// `fail_close_on_missing_verifier` flag that enterprise
+			// deploys can flip to refuse-on-missing instead.
+			return nil
+		}
+		if res.Verified {
+			return nil
+		}
+		lastDetail = res.Detail
+	}
+	return fmt.Errorf(
+		"require_signed=true: plugin %s failed signature verification against %v (%s); add it to plugin_security.allowlist or sign it via `bough plugins verify` flow",
+		binName, schemes, lastDetail,
+	)
 }
 
 // discoverMemoryBackend spawns the configured memory plugin (only
@@ -70,6 +153,9 @@ func discoverMemoryBackend(cfg *config.Config) (memapi.MemoryBackend, func(), st
 	binPath, err := exec.LookPath(binName)
 	if err != nil {
 		return nil, nil, role, fmt.Errorf("%s not found on PATH (run `make build` or install the plugin): %w", binName, err)
+	}
+	if err := enforceSigning(binPath, cfg); err != nil {
+		return nil, nil, role, err
 	}
 	cmd := exec.Command(binPath)
 	if dbPath != "" {
@@ -126,6 +212,9 @@ func discoverFallbackSQLite(cfg *config.Config) (memapi.MemoryBackend, func(), e
 	binPath, err := exec.LookPath(binName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s not found on PATH for fallback: %w", binName, err)
+	}
+	if err := enforceSigning(binPath, cfg); err != nil {
+		return nil, nil, err
 	}
 	cmd := exec.Command(binPath)
 	if dbPath != "" {

@@ -33,14 +33,45 @@ instinct:
     allowlist: []                      # bin-name → bypass the signing notice
 ```
 
-`require_signed: false` keeps v0.6 opt-in. The flag itself is
-already accepted by the host config, but the **spawn-time enforce
-gate** (= refuse-to-spawn when verification fails) lands in v0.6.x —
-v0.6.0 only ships the verify CLI for dry-run, so flipping
-`require_signed: true` today is a no-op until you upgrade. Run
-`bough plugin verify <binary>` against each plugin in your install
-path now; the timeline below tells you when bough starts blocking
-unverified spawns.
+`require_signed: false` keeps the gate disabled. The flag itself
+is accepted by the host config; the **spawn-time enforce gate** —
+refuse-to-spawn when verification fails — was scaffolding in v0.6.0
+and went live in v0.6.1 for the memory plugin discovery paths
+(`bough memory ...` / `bough instinct ...` / the SQLite reference-
+fallback). Engine plugins (`bough create` / mysql / postgres /
+redis / elasticsearch) join the gate in v0.7 alongside the
+Bootstrap layer.
+
+When `require_signed: true` is set, every memory plugin spawn runs
+through `internal/cli.enforceSigning` which:
+
+1. **Skips verification** when the binary name is on
+   `plugin_security.allowlist` (= the operator's "I vendored this
+   one myself, do not verify" signal).
+2. **Tries each scheme** in `accepted_signature_schemes` in order
+   (defaults to `[cosign, minisign]`). The first success wins.
+3. **Fails open with a stderr NOTICE** when the verifier binary is
+   missing on PATH. v0.6.1 picks this default so flipping the flag
+   without installing cosign / minisign does not lock you out of
+   your own host; v0.7 adds a `fail_close_on_missing_verifier` flag
+   for enterprise deploys that need a hard gate.
+4. **Refuses to spawn** when at least one verifier ran and reported
+   a non-verified result. The error mentions which schemes were
+   tried and how to recover (= add to allowlist or re-sign).
+
+Wiring cosign keyless verification needs the OIDC identity + issuer
+the GoReleaser pipeline signed under. The host reads them from
+environment variables so an operator can rotate identities without
+touching `.bough.yaml`:
+
+```sh
+# Verify bough's own first-party plugins against the GoReleaser
+# keyless flow's GitHub Actions OIDC identity.
+export BOUGH_SIGNING_CERT_IDENTITY_REGEXP='https://github.com/ikeikeikeike/bough/\.github/workflows/release\.yml@.*'
+export BOUGH_SIGNING_CERT_OIDC_ISSUER='https://token.actions.githubusercontent.com'
+# minisign-signed third-party plugins:
+export BOUGH_SIGNING_PUBKEY=~/.config/bough/minisign.pub
+```
 
 ## Verify CLI
 
