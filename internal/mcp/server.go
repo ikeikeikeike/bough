@@ -3,12 +3,16 @@ package mcp
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	memapi "github.com/ikeikeikeike/bough/plugins/memory/api"
 )
@@ -28,6 +32,14 @@ type Server struct {
 	close   func()
 	version string
 
+	// allowWrite gates the state-changing tools (memory.store /
+	// memory.forget). v0.6.0 shipped with this hard-wired false
+	// (= "read-only first"); v0.6.1 reads the host's --allow-write
+	// CLI flag into it. When false, the host-side behaviour is
+	// indistinguishable from v0.6.0: tools/list omits the write
+	// tools and tools/call refuses them with codeWriteForbidden.
+	allowWrite bool
+
 	// shut flips to 1 once Graceful Shutdown begins. New incoming
 	// requests after shut=1 return a JSON-RPC error rather than
 	// reaching the backend, so the host can drain in-flight RPCs
@@ -41,8 +53,18 @@ type Server struct {
 // and a close callback. The host invokes close exactly once at
 // shutdown — the watchdog goroutine or a sentinel "shutdown" method
 // — so the SQLite subprocess never lingers.
-func NewServer(backend memapi.MemoryBackend, closeFn func(), version string) *Server {
-	return &Server{backend: backend, close: closeFn, version: version}
+//
+// allowWrite=false matches v0.6.0 behaviour (= read-only first); the
+// v0.6.1 host flips it to true via the --allow-write CLI flag so MCP
+// clients can drive memory.store / memory.forget through the same
+// stdio surface as memory.query.
+func NewServer(backend memapi.MemoryBackend, closeFn func(), version string, allowWrite bool) *Server {
+	return &Server{
+		backend:    backend,
+		close:      closeFn,
+		version:    version,
+		allowWrite: allowWrite,
+	}
 }
 
 // Run loops on r, dispatching each incoming line as a JSON-RPC
@@ -139,8 +161,8 @@ func (s *Server) handleInitialize(w io.Writer, req jsonrpcRequest) error {
 			Prompts:   map[string]any{},
 			BoughMCPServer: BoughMCPCapabilities{
 				SpecVersion:        MCPSpecVersion,
-				ReadOnly:           true,
-				StateChangingTools: false,
+				ReadOnly:           !s.allowWrite,
+				StateChangingTools: s.allowWrite,
 				HostVersion:        s.version,
 			},
 		},
@@ -148,8 +170,9 @@ func (s *Server) handleInitialize(w io.Writer, req jsonrpcRequest) error {
 	return s.writeResult(w, req.ID, result)
 }
 
-// handleToolsList returns the v0.6 tool catalogue. Only
-// "memory.query" ships; state-changing tools are v0.6.x.
+// handleToolsList returns the tool catalogue. memory.query always
+// ships; memory.store / memory.forget land in the list only when
+// the host was launched with --allow-write (= v0.6.1).
 func (s *Server) handleToolsList(w io.Writer, req jsonrpcRequest) error {
 	tools := []ToolDefinition{
 		{
@@ -174,6 +197,54 @@ func (s *Server) handleToolsList(w io.Writer, req jsonrpcRequest) error {
 			},
 		},
 	}
+	if s.allowWrite {
+		tools = append(tools,
+			ToolDefinition{
+				Name:        "memory.store",
+				Description: "Store a behavioural rule into bough's memory backend as a candidate. The host writes the row with state=candidate so a human approval step (`bough instinct approve <id>`) is required before it goes active. Side effect: persists a new row, writes a `mcp.store` event to the audit log, and may trigger backend-side deduplication.",
+				InputSchema: map[string]any{
+					"type":     "object",
+					"required": []string{"rule"},
+					"properties": map[string]any{
+						"rule": map[string]any{
+							"type":        "string",
+							"description": "the behavioural rule string (= the canonical text of the instinct)",
+						},
+						"scope": map[string]any{
+							"type":        "string",
+							"description": "scope level (worktree | repo | global); defaults to worktree",
+						},
+						"source": map[string]any{
+							"type":        "string",
+							"description": "trace source classification; defaults to 'explicit_user_feedback'",
+						},
+					},
+				},
+			},
+			ToolDefinition{
+				Name:        "memory.forget",
+				Description: "Soft-delete an instinct by ID. The backend keeps the row but flips its state to forgotten so subsequent queries skip it. Side effect: state mutation + a `mcp.forget` audit event.",
+				InputSchema: map[string]any{
+					"type":     "object",
+					"required": []string{"id"},
+					"properties": map[string]any{
+						"id": map[string]any{
+							"type":        "string",
+							"description": "the instinct ID to forget (= dedupe_key sha256 hash)",
+						},
+						"scope": map[string]any{
+							"type":        "string",
+							"description": "scope level (worktree | repo | global); defaults to worktree",
+						},
+						"reason": map[string]any{
+							"type":        "string",
+							"description": "audit reason explaining why this rule is being retired",
+						},
+					},
+				},
+			},
+		)
+	}
 	return s.writeResult(w, req.ID, ToolsListResult{Tools: tools})
 }
 
@@ -188,8 +259,22 @@ func (s *Server) handleToolsCall(ctx context.Context, w io.Writer, req jsonrpcRe
 	switch params.Name {
 	case "memory.query":
 		return s.callMemoryQuery(ctx, w, req, params)
-	case "memory.store", "memory.forget", "memory.promote":
-		return s.writeError(w, req.ID, codeWriteForbidden, fmt.Sprintf("%s is a state-changing tool; v0.6.0 is read-only first (lands with --allow-write in v0.6.x)", params.Name))
+	case "memory.store":
+		if !s.allowWrite {
+			return s.writeError(w, req.ID, codeWriteForbidden, "memory.store is a state-changing tool; the host is running without --allow-write")
+		}
+		return s.callMemoryStore(ctx, w, req, params)
+	case "memory.forget":
+		if !s.allowWrite {
+			return s.writeError(w, req.ID, codeWriteForbidden, "memory.forget is a state-changing tool; the host is running without --allow-write")
+		}
+		return s.callMemoryForget(ctx, w, req, params)
+	case "memory.promote":
+		// memory.promote needs the host coordinator (= Store(target) +
+		// Forget(source) pair), not just the backend client this server
+		// holds. v0.6.1 refuses it even with --allow-write; v0.7 wires
+		// it through the coordinator alongside the Bootstrap layer.
+		return s.writeError(w, req.ID, codeWriteForbidden, "memory.promote requires the host coordinator and lands in v0.7 alongside the Bootstrap layer")
 	default:
 		return s.writeError(w, req.ID, codeMethodNotFound, fmt.Sprintf("tool %q not registered", params.Name))
 	}
@@ -231,6 +316,126 @@ func (s *Server) callMemoryQuery(ctx context.Context, w io.Writer, req jsonrpcRe
 	return s.writeResult(w, req.ID, ToolCallResult{
 		Content: []ToolCallContent{{Type: "text", Text: b.String()}},
 	})
+}
+
+// callMemoryStore runs MemoryBackend.Store after stamping the
+// canonical dedupe key (= sha256(rule | scope-level | worktree-id |
+// repo-name)) and forcing state=candidate. The host coordinator's
+// approval flow (`bough instinct approve <id>`) is what flips the
+// row to active — v0.6.1 deliberately refuses to bypass that even
+// when the MCP client carries explicit_user_feedback intent, because
+// memory poisoning prevention (= round 1 design freeze) demands a
+// human review step before active artifacts ship.
+//
+// Audit: every store writes a line to stderr (= the host's chosen
+// log stream); v0.7 wires this through the coordinator so the
+// events.jsonl audit log captures `mcp.store` events alongside the
+// CLI-driven mint / ingest paths.
+func (s *Server) callMemoryStore(ctx context.Context, w io.Writer, req jsonrpcRequest, params ToolCallParams) error {
+	rule, _ := params.Arguments["rule"].(string)
+	rule = strings.TrimSpace(rule)
+	if rule == "" {
+		return s.writeError(w, req.ID, codeInvalidRequest, "memory.store: 'rule' argument is required and cannot be empty")
+	}
+	scopeLevel := "worktree"
+	if raw, ok := params.Arguments["scope"].(string); ok && raw != "" {
+		scopeLevel = raw
+	}
+	source := "explicit_user_feedback"
+	if raw, ok := params.Arguments["source"].(string); ok && raw != "" {
+		source = raw
+	}
+	scope := memapi.Scope{Level: scopeLevel}
+	dedupeKey := computeMemoryDedupeKey(rule, scope)
+	fmt.Fprintf(os.Stderr, "bough-mcp-server: memory.store: scope=%s source=%s id=%s rule=%q\n",
+		scopeLevel, source, dedupeKey, rule)
+	storeResp, err := s.backend.Store(ctx, &memapi.StoreReq{
+		Instinct: memapi.Instinct{
+			ID:         dedupeKey,
+			Rule:       rule,
+			Scope:      scope,
+			Source:     source,
+			Confidence: 0.5, // host default; ConfidencePolicy clamps later when ingest runs
+			State:      "candidate",
+			CreatedAt:  time.Now().UTC(),
+		},
+		DedupeKey:       dedupeKey,
+		SourceEventID:   "mcp/" + dedupeKey,
+		UpsertSemantics: true,
+	})
+	if err != nil {
+		return s.writeResult(w, req.ID, ToolCallResult{
+			Content: []ToolCallContent{{Type: "text", Text: fmt.Sprintf("memory.store failed: %v", err)}},
+			IsError: true,
+		})
+	}
+	verb := "stored"
+	if storeResp.WasUpsert {
+		verb = "reinforced (existing dedupe key)"
+	}
+	text := fmt.Sprintf("%s as candidate. id=%s\n\nApprove with: bough instinct approve %s", verb, storeResp.StoredID, storeResp.StoredID)
+	return s.writeResult(w, req.ID, ToolCallResult{
+		Content: []ToolCallContent{{Type: "text", Text: text}},
+	})
+}
+
+// callMemoryForget routes a soft-delete through MemoryBackend.Forget.
+// The backend keeps the row but flips its state so subsequent
+// queries skip it; this is recoverable through an Export → Import
+// round trip with state="forgotten" preserved.
+func (s *Server) callMemoryForget(ctx context.Context, w io.Writer, req jsonrpcRequest, params ToolCallParams) error {
+	id, _ := params.Arguments["id"].(string)
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return s.writeError(w, req.ID, codeInvalidRequest, "memory.forget: 'id' argument is required and cannot be empty")
+	}
+	scopeLevel := "worktree"
+	if raw, ok := params.Arguments["scope"].(string); ok && raw != "" {
+		scopeLevel = raw
+	}
+	reason, _ := params.Arguments["reason"].(string)
+	if reason == "" {
+		reason = "mcp client forget"
+	}
+	fmt.Fprintf(os.Stderr, "bough-mcp-server: memory.forget: scope=%s id=%s reason=%q\n",
+		scopeLevel, id, reason)
+	if _, err := s.backend.Forget(ctx, &memapi.ForgetReq{
+		ID:     id,
+		Scope:  memapi.Scope{Level: scopeLevel},
+		Reason: reason,
+	}); err != nil {
+		return s.writeResult(w, req.ID, ToolCallResult{
+			Content: []ToolCallContent{{Type: "text", Text: fmt.Sprintf("memory.forget failed: %v", err)}},
+			IsError: true,
+		})
+	}
+	return s.writeResult(w, req.ID, ToolCallResult{
+		Content: []ToolCallContent{{Type: "text", Text: fmt.Sprintf("forgotten: id=%s reason=%q", id, reason)}},
+	})
+}
+
+// computeMemoryDedupeKey mirrors internal/instinct.DedupeKey for the
+// MCP server's write path. The two must stay in sync — the SQLite
+// reference-fallback uses this hash as the row primary key, so any
+// drift between the coordinator (= ingest / mint paths) and the
+// MCP server would silently break dedupe across the two entry
+// points. v0.7 lifts the helper into pkg/dedupe so the two callers
+// share one definition; until then this inline copy ships with the
+// rule "same input, same hash" comment block as the canonical
+// crosscheck.
+//
+//	canonical input = lower(trim(rule)) | scope.Level | scope.WorktreeID | scope.RepoName
+//	hash            = sha256
+func computeMemoryDedupeKey(rule string, scope memapi.Scope) string {
+	h := sha256.New()
+	h.Write([]byte(strings.ToLower(strings.TrimSpace(rule))))
+	h.Write([]byte("|"))
+	h.Write([]byte(scope.Level))
+	h.Write([]byte("|"))
+	h.Write([]byte(scope.WorktreeID))
+	h.Write([]byte("|"))
+	h.Write([]byte(scope.RepoName))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // handleResourcesList exposes the static set of resource URIs the

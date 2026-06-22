@@ -45,7 +45,7 @@ func Run(t *testing.T, cfg Config) {
 	if backend == nil {
 		backend = newFakeBackend()
 	}
-	server := mcp.NewServer(backend, func() {}, "v0.6.0-conformance")
+	server := mcp.NewServer(backend, func() {}, "v0.6.0-conformance", false)
 
 	stdinR, stdinW := io.Pipe()
 	stdoutR, stdoutW := io.Pipe()
@@ -225,12 +225,15 @@ func newFakeBackend() *fakeBackend { return &fakeBackend{} }
 func (f *fakeBackend) Health(_ context.Context, _ *memapi.HealthReq) (*memapi.HealthResp, error) {
 	return &memapi.HealthResp{BackendKind: "conformance-fake"}, nil
 }
+
 func (f *fakeBackend) Capabilities(_ context.Context) (*memapi.CapabilitiesResp, error) {
 	return &memapi.CapabilitiesResp{}, nil
 }
+
 func (f *fakeBackend) Store(_ context.Context, _ *memapi.StoreReq) (*memapi.StoreResp, error) {
 	return &memapi.StoreResp{}, nil
 }
+
 func (f *fakeBackend) Query(_ context.Context, _ *memapi.QueryReq) (*memapi.QueryResp, error) {
 	return &memapi.QueryResp{
 		Results: []memapi.QueryResult{
@@ -238,12 +241,15 @@ func (f *fakeBackend) Query(_ context.Context, _ *memapi.QueryReq) (*memapi.Quer
 		},
 	}, nil
 }
+
 func (f *fakeBackend) Forget(_ context.Context, _ *memapi.ForgetReq) (*memapi.ForgetResp, error) {
 	return &memapi.ForgetResp{}, nil
 }
+
 func (f *fakeBackend) Export(_ context.Context, _ *memapi.ExportReq) (*memapi.ExportResp, error) {
 	return &memapi.ExportResp{}, nil
 }
+
 func (f *fakeBackend) Import(_ context.Context, _ *memapi.ImportReq) (*memapi.ImportResp, error) {
 	return &memapi.ImportResp{}, nil
 }

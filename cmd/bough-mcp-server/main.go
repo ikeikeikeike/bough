@@ -2,38 +2,53 @@
 // clients (Claude Desktop, Cursor, etc.) over stdio JSON-RPC per the
 // MCP 2025-11-25 spec.
 //
-// v0.6.0 is **read-only first** (round 4 AI #2):
+// v0.6.1 surface (= read-only by default, write opt-in):
 //
-//   - memory.query                Tool      (read-only)
-//   - memory.store / .forget      refused with codeWriteForbidden
+//   - memory.query                Tool      (always read-only)
+//   - memory.store / .forget      Tools     (require --allow-write)
+//   - memory.promote              refused   (= needs the host
+//     coordinator; v0.7)
 //   - bough://memory/scopes       Resource  (read-only)
 //
-// v0.6.x adds the state-changing surface behind an --allow-write
-// CLI flag. The round 4 AI #1 zombie-process guard fires Graceful
-// Shutdown the moment stdin closes so the MemoryBackend subprocess
-// (= SQLite reference-fallback) never lingers and the DB file lock
-// is released. See plugins/memory/sqlite/sqlite.go for the
-// underlying lock semantics.
+// The --allow-write flag unlocks the two state-changing Tools so an
+// MCP client (Claude Desktop, Cursor) can persist or retire rules
+// from the same stdio surface that already serves memory.query. The
+// host writes every new row with state=candidate; promotion to
+// active still requires `bough instinct approve <id>`. memory.promote
+// stays refused even with --allow-write because it needs the host
+// coordinator (Store(target) + Forget(source) pair), which this
+// server intentionally does not embed.
 //
-// Configuration is read from environment variables so an MCP client
-// (= Claude Desktop's `mcpServers` block) can wire bough by setting
-// the same env block it would for any other MCP server.
+// The round 4 AI #1 zombie-process guard fires Graceful Shutdown the
+// moment stdin closes so the MemoryBackend subprocess (= SQLite
+// reference-fallback) never lingers and the DB file lock is
+// released. See plugins/memory/sqlite/sqlite.go for the underlying
+// lock semantics.
 //
-// Required:
+// Configuration is read from CLI flags + environment variables so an
+// MCP client (= Claude Desktop's `mcpServers` block) can wire bough
+// by setting the same env block it would for any other MCP server.
 //
-//	(none — defaults pick up the sqlite reference-fallback)
+// CLI flags:
 //
-// Optional:
+//	--allow-write             enable memory.store + memory.forget
+//	                          (default: false; v0.6.0 read-only)
+//
+// Environment variables (optional):
 //
 //	BOUGH_MCP_SERVER_VERSION   reported in initialize response
 //	                           (default: linker-set Version constant)
+//	BOUGH_MCP_ALLOW_WRITE      "true" / "1" sets --allow-write
+//	                           without a CLI argument
 package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/hashicorp/go-plugin"
 
@@ -42,10 +57,23 @@ import (
 )
 
 // Version is reported in the MCP initialize handshake. Bumped per
-// release; the v0.6.0 ship commit replaces the -dev suffix.
-const Version = "v0.6.0"
+// release; the v0.6.1 ship commit replaces the -dev suffix.
+const Version = "v0.6.1"
 
 func main() {
+	allowWriteFlag := flag.Bool("allow-write", false,
+		"enable memory.store and memory.forget tools (state-changing). Off by default; v0.6 read-only first.")
+	flag.Parse()
+	allowWrite := *allowWriteFlag
+	if !allowWrite {
+		if env := strings.TrimSpace(os.Getenv("BOUGH_MCP_ALLOW_WRITE")); env != "" {
+			switch strings.ToLower(env) {
+			case "1", "true", "yes", "on":
+				allowWrite = true
+			}
+		}
+	}
+
 	backend, kill, err := discoverSQLite()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "bough-mcp-server: "+err.Error())
@@ -57,7 +85,11 @@ func main() {
 		version = env
 	}
 
-	server := mcp.NewServer(backend, kill, version)
+	if allowWrite {
+		fmt.Fprintln(os.Stderr, "bough-mcp-server: --allow-write enabled; memory.store and memory.forget are reachable. Rows persist with state=candidate; promote with `bough instinct approve <id>`.")
+	}
+
+	server := mcp.NewServer(backend, kill, version, allowWrite)
 
 	// Round 4 AI #1 zombie-process guard lives inside Server.Run:
 	// bufio.Scanner returns false when stdin closes, Run returns,
