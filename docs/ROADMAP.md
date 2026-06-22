@@ -88,38 +88,141 @@ absorbs both before the next minor.
 - Experimental compilers ship as community / experimental plugins
   under `examples/`.
 
-## v0.7 — Bootstrap layer
+## v0.7 — Bootstrap layer (round 5 refined)
 
 The v0.6 retrospective (2026-06-22) clarified that the user-facing
 intent — "`claude --worktree X` materialises an isolated dev
 environment **and** generates the artifacts the next session will
 need" — needs a dedicated layer above the existing CapabilityCompiler.
-The Layer C compile path is correct as-is; what's missing is a
-trigger model that fires *on first worktree open* and a Bootstrap
-Agent specification that picks which of the seven artifact kinds to
-materialise from the materialised sub-repos.
+Round 5 external review (2026-06-22, two independent AI passes)
+agreed on the direction but flagged the original 14-day v0.7.0 scope
+as overambitious: LLM-judge inference + 4-gate clustering + hook
+auto-wire + cost transparency in one sprint underestimates the
+Bash/Python→Go rewrite cost. Both reviewers recommended splitting
+the LLM-touching layer (= GATE 5) into v0.7.1 and front-loading the
+safety + observability surfaces into v0.7.0 instead. The Phase split
+below incorporates that guidance.
 
-Concretely:
+### v0.7.0 — Bootstrap safety floor (~10 day)
 
-- `bough init` CLI (manual trigger; the same code path the hook fires)
-- `WorktreeCreate`-time invocation of a configured Bootstrap Agent
-  (opt-in; off by default per existing safety posture)
-- Bootstrap Agent specification: input sources (repo tree, git log,
-  `CLAUDE.md`, `tasks/lessons.md`, prior `.bough/memory/`), output
-  contract (artifact kind × candidate state), guardrails (rate limit,
-  artifact cap per scope, hard token budget)
-- Artifact persistence layer formalised (where each kind lands; how
-  the lifecycle interacts with `bough instinct promote` / `forget`)
-- ECC interop: when ECC's hook pipeline is already installed in a
-  monorepo, bough's Bootstrap Agent stays out of its way (config flag
-  `bootstrap.deferred_to_ecc: true`).
-- Letta Context Repositories interop: optionally treat the bough
-  memory filesystem as a Letta `memfs`-compatible projection so
-  Letta-native tools can read bough state without translation.
-- `SkillEvaluator` first materialisation so generated artifacts get
-  measured against the trajectories that produced them.
-- GEPA / TextGrad / MUSE-Autoskill / SkillAudit adapters as
-  plug-in evaluator backends.
+The "automation is safe to turn on" floor. Nothing here calls an
+external LLM; every artifact lands in a reviewable form before
+touching the memory backend.
+
+- `bough hook install` / `uninstall` (= writes / removes the
+  Claude Code `WorktreeCreate` / `PreToolUse` / `PostToolUse` /
+  `UserPromptSubmit` / `SessionEnd` / `PreCompact` / `Stop`
+  entries against `.claude/settings.json`), with idempotent
+  reconciliation so re-running on a partially-wired monorepo
+  converges instead of duplicating handlers.
+- **`bough hook replay --event <name> --fixture <json>`** harness
+  + golden tests over a `testdata/` corpus of canonical hook
+  payloads. Hook auto-wire without a replay harness was named as
+  the single highest carryover risk by both round 5 reviewers.
+- `bough hook doctor` / **`bough doctor`** — surfaces the
+  observer status, current hook wiring, per-worktree token /
+  cost meter, and signing posture in a single command. Front-
+  loaded into v0.7.0 (was v0.7.1 in the pre-review plan) so
+  silent-billing or silent-observer regressions get caught the
+  moment Bootstrap turns on.
+- `bough bootstrap --dry-run` writes candidate artifacts to
+  `.bough/proposals/<timestamp>/*.md` (= Markdown frontmatter,
+  one file per candidate). The operator reviews with `git diff`
+  semantics and runs `bough instinct approve <id>` to promote
+  into the backend. The DB never sees an artifact the operator
+  has not already inspected.
+- Observer event capture: raw observations persist to
+  `.bough/observations.jsonl` (= append-only, signed via the
+  same provenance schema the capability artifacts use). No
+  inference yet; ingestion remains opt-in.
+- All generated artifacts ship `state: candidate`. Promotion
+  stays a human CLI action (no MCP promote tool, no auto-active
+  path).
+- Schema additions kept "Letta interop-ready": every artifact
+  records `source_trace`, `provenance.generated_by`, a
+  git-backed export path, and a `scope_boundary` field so v0.8
+  can light up Letta Context Repositories or Graphiti memfs
+  without a schema migration.
+- MCP write surface gains the round 5 mitigation set: dry-run
+  default, per-tool permission flag, per-worktree scope
+  enforcement, rate limit per session, append-only audit log,
+  schema validation before store. `memory.promote` stays
+  refused on the MCP surface — promotion is a CLI human
+  action (round 5 unanimous).
+
+### v0.7.1 — Evolve + LLM judge (~7 day)
+
+Splits from v0.7.0 so the LLM-touching surface ships with its
+own debugging budget.
+
+- 4-gate mechanical filter (`/evolve-skill-manual-v3` algorithm)
+  ported as a single Go pipeline. v3 is the canonical algorithm;
+  the upstream ECC `/evolve` clustering acts as parser / baseline
+  reference, not a parallel port.
+- GATE 5 LLM judge behind a `JudgeClient` interface in
+  `plugins/capability/api/llm.go`. Three implementations:
+  - `ClaudeJudgeClient` (= live LLM, gated by config)
+  - `HeuristicJudgeClient` (= deterministic fallback for CI /
+    offline)
+  - `ReplayJudgeClient` (= fixture / cassette playback so the
+    integration tests are reproducible)
+- SQLite-backed judge cache keyed by
+  `sha256(prompt_version | model_id | cluster_member_ids |
+  cluster_member_hashes | nearest_prior_label |
+  nearest_prior_description)` so a re-run of the same evolve
+  pass never re-bills the operator.
+- Audit dir `.evolve/judgements/<cache_key>.json` storing
+  model, prompt_version, request hash, raw response, parsed
+  verdict, cost estimate, timestamp. Append-only.
+- JSON-schema-validated judge output (verdict ∈
+  {PASS, DOUBT, FAIL}, confidence, reason,
+  recommended_label, reuse_prior_label). temperature = 0,
+  max_output_tokens fixed.
+- CLAUDE.md proposal pipeline (= observe → propose → apply)
+  using the same judge interface so the heuristic / replay
+  fallbacks cover it too.
+- Quality-gate framework concept (= user supplies the lint /
+  typecheck / smoke command, bough sequences it as a Post-tool
+  hook).
+- Golden corpus driven by threecorp's live 346-instinct /
+  21-skill / 6-agent / 116-command snapshot so the Go port's
+  output diff-tests against the in-production Python output.
+
+### v0.7.2 — ECC compatibility + dogfooding (~5 day)
+
+- `bough ecc import` reads `~/.local/share/ecc-homunculus/
+  projects/<id>/` and emits the canonical bough schema.
+- Round-trip validation against the threecorp dogfooding
+  corpus (= the same 346 / 21 / 6 / 116 the v0.7.1 judge
+  golden tests use).
+- Bug-fix budget reserved for whatever the dogfooding session
+  surfaces.
+
+### v0.7.3 — Polish (~3 day)
+
+- `README-ja.md` (= threecorp / eiicon-company devs read the
+  Japanese tagline first).
+- `examples/` pack: a curated subset of upstream skills + threecorp
+  commands so a first-time user sees what the bootstrap surface
+  can actually emit. The full upstream catalogue stays out of the
+  binary release.
+
+### Reframed v1.0 / v2.0 vision (round 5 Q7)
+
+Both round 5 reviewers warned against pivoting bough into a
+multi-agent orchestrator (claude-flow / CrewAI territory) or a
+generic memory database. The competitive moat is "worktree-native
+AI development environment orchestrator" — keep it.
+
+- **v1.0** stabilises the v0.7 surfaces (= hook install / replay,
+  observer, candidate generation, `bough doctor`, MCP candidate
+  tools, evolve-v3, ECC import) under semver guarantees.
+- **v2.0** unlocks Letta Context Repositories interop,
+  `SkillEvaluator` plus GEPA / TextGrad / MUSE-Autoskill adapters,
+  signed skill registry, evaluator-driven skill retirement, and
+  multi-host backends (Cursor / OpenCode / Codex). The CI-tier
+  pivot (= "instincts that pass CI promote to global") becomes
+  defensible only after the evaluator layer ships.
 
 ## What bough deliberately does NOT do
 
