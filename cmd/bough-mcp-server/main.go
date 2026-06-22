@@ -48,7 +48,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/go-plugin"
 
@@ -90,6 +92,18 @@ func main() {
 	}
 
 	server := mcp.NewServer(backend, kill, version, allowWrite)
+	if allowWrite {
+		// v0.7.0 O-1.7 write hardening: append-only audit log
+		// under .bough/memory/mcp_audit.jsonl, rate-limit at
+		// 60 writes / minute, and refuse non-worktree scopes
+		// so an MCP client cannot accidentally promote into the
+		// repo or global tier without an explicit CLI action.
+		// Operators wiring a multi-scope MCP surface can swap
+		// these defaults out in a future v0.7.x flag rev.
+		server.SetAuditLogPath(filepath.Join(".bough", "memory", "mcp_audit.jsonl"))
+		server.SetRateLimit(60, time.Minute)
+		server.SetAllowedScopes([]string{"worktree"})
+	}
 
 	// Round 4 AI #1 zombie-process guard lives inside Server.Run:
 	// bufio.Scanner returns false when stdin closes, Run returns,

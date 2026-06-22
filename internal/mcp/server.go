@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -47,6 +48,24 @@ type Server struct {
 	shut atomic.Int32
 
 	writeMu sync.Mutex // serialises stdout writes (JSON-RPC requires whole-message atomicity)
+
+	// v0.7.0 O-1.7 write hardening surfaces. All three are
+	// optional — when zero / empty the server behaves exactly as
+	// v0.6.1 did. Round 5 AI B Q4 mitigation set covered:
+	// dry-run (= --allow-write opt-in), per-tool permission, per-
+	// worktree scope, rate limit, append-only audit log, schema
+	// validation. v0.7.0 lands rate limit + audit log + scope
+	// boundary; per-tool granular permission falls out from the
+	// existing memory.store / memory.forget / memory.promote split
+	// since promote stays refused unconditionally.
+	auditMu       sync.Mutex
+	auditPath     string
+	rateLimitMu   sync.Mutex
+	rateLimitMax  int
+	rateWindow    time.Duration
+	rateWindowEnd time.Time
+	rateCount     int
+	allowedScopes map[string]struct{}
 }
 
 // NewServer constructs a Server from an already-discovered backend
@@ -64,6 +83,115 @@ func NewServer(backend memapi.MemoryBackend, closeFn func(), version string, all
 		close:      closeFn,
 		version:    version,
 		allowWrite: allowWrite,
+		rateWindow: time.Minute,
+	}
+}
+
+// SetAuditLogPath turns on append-only JSONL auditing of every
+// successful memory.store / memory.forget invocation. Each call
+// produces one line under the supplied path. Round 5 AI B Q4 + AI A
+// Q4: "audit log immutable append-only" + "Trace ID for provenance".
+// Path empty disables auditing (= v0.6.1 default behaviour).
+func (s *Server) SetAuditLogPath(path string) {
+	s.auditMu.Lock()
+	defer s.auditMu.Unlock()
+	s.auditPath = path
+}
+
+// SetRateLimit bounds memory.store + memory.forget invocations to
+// `max` per `window` (e.g. 60 per minute). Zero `max` disables the
+// limit (= v0.6.1 default). Round 5 AI B Q4 mitigation #7.
+func (s *Server) SetRateLimit(max int, window time.Duration) {
+	s.rateLimitMu.Lock()
+	defer s.rateLimitMu.Unlock()
+	s.rateLimitMax = max
+	if window > 0 {
+		s.rateWindow = window
+	}
+	s.rateWindowEnd = time.Time{}
+	s.rateCount = 0
+}
+
+// SetAllowedScopes restricts memory.store / memory.forget calls to
+// the named scope levels (e.g. ["worktree"]). Empty slice or nil
+// = all scopes accepted. Round 5 AI B Q4 mitigation #4 + #5: per-
+// worktree scope boundary keeps an MCP-side bug from accidentally
+// promoting into repo / global memory without the operator's
+// explicit consent.
+func (s *Server) SetAllowedScopes(scopes []string) {
+	if len(scopes) == 0 {
+		s.allowedScopes = nil
+		return
+	}
+	m := make(map[string]struct{}, len(scopes))
+	for _, scope := range scopes {
+		m[scope] = struct{}{}
+	}
+	s.allowedScopes = m
+}
+
+// checkRateLimit increments the counter and returns false when the
+// caller exceeded the configured ceiling. Wraps on the configured
+// window so a long-running session does not eventually choke
+// itself.
+func (s *Server) checkRateLimit() bool {
+	s.rateLimitMu.Lock()
+	defer s.rateLimitMu.Unlock()
+	if s.rateLimitMax <= 0 {
+		return true
+	}
+	now := time.Now()
+	if now.After(s.rateWindowEnd) {
+		s.rateWindowEnd = now.Add(s.rateWindow)
+		s.rateCount = 0
+	}
+	if s.rateCount >= s.rateLimitMax {
+		return false
+	}
+	s.rateCount++
+	return true
+}
+
+// scopeAllowed returns true when scope is within the configured
+// allow-list, or when no allow-list has been configured.
+func (s *Server) scopeAllowed(scopeLevel string) bool {
+	if s.allowedScopes == nil {
+		return true
+	}
+	_, ok := s.allowedScopes[scopeLevel]
+	return ok
+}
+
+// appendAudit writes one JSONL line per successful write. Errors
+// are not fatal to the caller — auditing is a side-channel and
+// the operator would rather see the store succeed than block the
+// MCP client because the audit file is on a full disk. We surface
+// the failure on stderr instead.
+func (s *Server) appendAudit(record map[string]any) {
+	s.auditMu.Lock()
+	path := s.auditPath
+	s.auditMu.Unlock()
+	if path == "" {
+		return
+	}
+	record["ts"] = time.Now().UTC().Format(time.RFC3339Nano)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "bough-mcp-server: audit mkdir failed: %v\n", err)
+		return
+	}
+	line, err := json.Marshal(record)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bough-mcp-server: audit marshal failed: %v\n", err)
+		return
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bough-mcp-server: audit open failed: %v\n", err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		fmt.Fprintf(os.Stderr, "bough-mcp-server: audit write failed: %v\n", err)
 	}
 }
 
@@ -341,6 +469,12 @@ func (s *Server) callMemoryStore(ctx context.Context, w io.Writer, req jsonrpcRe
 	if raw, ok := params.Arguments["scope"].(string); ok && raw != "" {
 		scopeLevel = raw
 	}
+	if !s.scopeAllowed(scopeLevel) {
+		return s.writeError(w, req.ID, codeWriteForbidden, fmt.Sprintf("memory.store: scope %q is outside the server's allowed_scopes list", scopeLevel))
+	}
+	if !s.checkRateLimit() {
+		return s.writeError(w, req.ID, codeWriteForbidden, "memory.store: rate limit exceeded; retry shortly")
+	}
 	source := "explicit_user_feedback"
 	if raw, ok := params.Arguments["source"].(string); ok && raw != "" {
 		source = raw
@@ -373,6 +507,15 @@ func (s *Server) callMemoryStore(ctx context.Context, w io.Writer, req jsonrpcRe
 	if storeResp.WasUpsert {
 		verb = "reinforced (existing dedupe key)"
 	}
+	s.appendAudit(map[string]any{
+		"op":         "memory.store",
+		"scope":      scopeLevel,
+		"id":         storeResp.StoredID,
+		"upsert":     storeResp.WasUpsert,
+		"source":     source,
+		"dedupe_key": dedupeKey,
+		"rule":       rule,
+	})
 	text := fmt.Sprintf("%s as candidate. id=%s\n\nApprove with: bough instinct approve %s", verb, storeResp.StoredID, storeResp.StoredID)
 	return s.writeResult(w, req.ID, ToolCallResult{
 		Content: []ToolCallContent{{Type: "text", Text: text}},
@@ -393,6 +536,12 @@ func (s *Server) callMemoryForget(ctx context.Context, w io.Writer, req jsonrpcR
 	if raw, ok := params.Arguments["scope"].(string); ok && raw != "" {
 		scopeLevel = raw
 	}
+	if !s.scopeAllowed(scopeLevel) {
+		return s.writeError(w, req.ID, codeWriteForbidden, fmt.Sprintf("memory.forget: scope %q is outside the server's allowed_scopes list", scopeLevel))
+	}
+	if !s.checkRateLimit() {
+		return s.writeError(w, req.ID, codeWriteForbidden, "memory.forget: rate limit exceeded; retry shortly")
+	}
 	reason, _ := params.Arguments["reason"].(string)
 	if reason == "" {
 		reason = "mcp client forget"
@@ -409,6 +558,12 @@ func (s *Server) callMemoryForget(ctx context.Context, w io.Writer, req jsonrpcR
 			IsError: true,
 		})
 	}
+	s.appendAudit(map[string]any{
+		"op":     "memory.forget",
+		"scope":  scopeLevel,
+		"id":     id,
+		"reason": reason,
+	})
 	return s.writeResult(w, req.ID, ToolCallResult{
 		Content: []ToolCallContent{{Type: "text", Text: fmt.Sprintf("forgotten: id=%s reason=%q", id, reason)}},
 	})
