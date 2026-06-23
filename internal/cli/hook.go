@@ -11,7 +11,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/ikeikeikeike/bough/internal/config"
 	"github.com/ikeikeikeike/bough/internal/hooks"
+	"github.com/ikeikeikeike/bough/internal/qualitygate"
 )
 
 // newHookCmd wires `bough hook install / uninstall / list / replay
@@ -282,12 +284,100 @@ func newHookHandleCmd() *cobra.Command {
 			if _, err := f.Write(append(line, '\n')); err != nil {
 				return fmt.Errorf("append %s: %w", outPath, err)
 			}
+			// v0.7.2 wires quality-gate dispatch onto the
+			// observation path: if .bough.yaml declares any gates
+			// that match (event, tool, file_path, repo) we run them
+			// here and surface pass/fail to stderr so Claude Code's
+			// next turn can see it. The runner ships its own
+			// per-gate TimeoutSeconds cap (= default 60s) so a
+			// hanging gate cannot block the hook.
+			dispatchQualityGates(c, event, payload)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&event, "event", "", "Claude Code hook event name (e.g. PreToolUse)")
 	cmd.Flags().StringVar(&outPath, "out", "", "observation log path (default: .bough/observations.jsonl)")
 	return cmd
+}
+
+// dispatchQualityGates loads .bough.yaml's quality_gates: section
+// (when present) and runs the entries whose matchers fit the
+// current event. Configuration absence is a hard non-error: a
+// monorepo with no gates declared sees no behaviour change.
+func dispatchQualityGates(c *cobra.Command, event string, payload []byte) {
+	cfgPath := os.Getenv("BOUGH_CONFIG")
+	if cfgPath == "" {
+		cfgPath = ".bough.yaml"
+	}
+	if _, err := os.Stat(cfgPath); err != nil {
+		return // no .bough.yaml in cwd → nothing to run.
+	}
+	cfg, err := loadConfigQuiet(cfgPath)
+	if err != nil || len(cfg.QualityGates) == 0 {
+		return
+	}
+	mc := buildMatchContext(event, payload)
+	gates := convertGates(cfg.QualityGates)
+	_ = qualitygate.RunMatching(commandCtx(c), gates, mc, c.ErrOrStderr())
+}
+
+// buildMatchContext projects the Claude Code hook payload into a
+// qualitygate.MatchContext. The payload shape varies by event;
+// PreToolUse / PostToolUse carry tool_name + tool_input. Missing
+// fields fall through as the empty string so an unmatcher matcher
+// still wildcards correctly.
+func buildMatchContext(event string, payload []byte) qualitygate.MatchContext {
+	mc := qualitygate.MatchContext{Event: event}
+	if len(payload) == 0 {
+		return mc
+	}
+	var probe struct {
+		ToolName  string          `json:"tool_name"`
+		ToolInput json.RawMessage `json:"tool_input"`
+	}
+	if err := json.Unmarshal(payload, &probe); err != nil {
+		return mc
+	}
+	mc.Tool = probe.ToolName
+	if len(probe.ToolInput) == 0 {
+		return mc
+	}
+	var ti struct {
+		FilePath string `json:"file_path"`
+		Path     string `json:"path"`
+		Command  string `json:"command"`
+	}
+	_ = json.Unmarshal(probe.ToolInput, &ti)
+	mc.FilePath = ti.FilePath
+	if mc.FilePath == "" {
+		mc.FilePath = ti.Path
+	}
+	mc.Command = ti.Command
+	return mc
+}
+
+func convertGates(cfgs []config.QualityGateCfg) []qualitygate.Gate {
+	out := make([]qualitygate.Gate, 0, len(cfgs))
+	for _, g := range cfgs {
+		out = append(out, qualitygate.Gate{
+			Name:           g.Name,
+			Command:        g.Command,
+			OnEvent:        g.OnEvent,
+			OnTool:         g.OnTool,
+			OnMatch:        g.OnMatch,
+			OnRepo:         g.OnRepo,
+			TimeoutSeconds: g.TimeoutSeconds,
+		})
+	}
+	return out
+}
+
+// loadConfigQuiet reads .bough.yaml without raising config drift
+// warnings to stderr (= hook handle stderr is reserved for the
+// quality-gate run summary; config noise would break the
+// dispatcher's pass/fail signal).
+func loadConfigQuiet(path string) (*config.Config, error) {
+	return config.Load(path)
 }
 
 // defaultClaudeSettingsPath returns the per-project .claude/

@@ -1,5 +1,62 @@
 # Changelog
 
+## v0.7.2
+
+The "ECC compat + dogfooding bridge" release. v0.7.0 shipped the
+safety floor, v0.7.1 the evolve + LLM judge layer. v0.7.2 lets
+bough read the existing upstream affaan-m/everything-claude-code
+("ECC") homunculus corpus so an operator with 300+ pre-existing
+instincts / skills / agents / commands can pipe them into bough's
+schemas without re-running the evolve pipeline.
+
+Quality-gate dispatch (= the wire-up deferred from v0.7.1 P1.5)
+also lands here: when `.bough.yaml` declares a `quality_gates:`
+section, `bough hook handle` now runs the matching gates after
+appending the observation and surfaces per-gate pass/fail to
+stderr so Claude Code's next turn sees the result.
+
+### Added
+
+- **`bough ecc import`** — walks the ECC corpus (default:
+  `~/.local/share/ecc-homunculus`) and projects each artifact
+  family onto bough canonical types:
+  - ECC instinct → `schema.InstinctCandidate` (state=candidate)
+  - ECC skill   → `schema.CapabilityArtifact` (Kind=skill)
+  - ECC agent   → `schema.CapabilityArtifact` (Kind=agent)
+  - ECC command → `schema.CapabilityArtifact` (Kind=command)
+- **`internal/ecc/`** — parser + discovery package. Parser
+  tolerances cover the four shapes the live corpus uses (= sampled
+  against the threecorp fork: 1080 instincts / 49 skills / 6
+  agents / 116 commands across 4 projects). Frontmatter parsing
+  accepts both string ("80%") and float (0.8) confidence values.
+- **Quality-gate dispatch** in `bough hook handle` — loads
+  `.bough.yaml`, matches each declared gate against the
+  (event, tool, file_path, repo) of the incoming hook, and runs
+  the matchers through `internal/qualitygate.RunMatching`.
+  Per-gate `TimeoutSeconds` caps the runtime (default 60s) so a
+  hanging gate cannot block the hook indefinitely.
+- **Soft-error reporting** — `bough ecc import` records per-file
+  parse errors against the manifest rather than aborting the
+  walk. Catalog files (`INSTINCTS.md` / `MEMORY.md` / `README.md`)
+  and frontmatter-less personal entries skip silently instead of
+  cluttering the soft-errors list.
+- **Manifest + JSON outputs** — every dry-run writes
+  `.bough/ecc-imports/<ts>/_manifest.md` summarising the projects
+  + counts + sample candidates; `--json` adds machine-readable
+  `instincts.json` / `skills.json` / `agents.json` /
+  `commands.json` siblings.
+
+### Changed
+
+- `bough-mcp-server` Version reports `v0.7.2`.
+- `bough-plugin-memory-mem0` Version reports `v0.7.2`.
+
+### Deferred to v0.8
+
+- ECC → memory backend write loop (= P4 memory backend
+  integration). v0.7.2 ships the read + project pipeline; the
+  Store loop wires once Letta + mem0 reconcile land in v0.8.
+
 ## v0.7.1
 
 The "Evolve + LLM judge" release. v0.7.0 shipped the safety floor

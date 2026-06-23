@@ -59,6 +59,13 @@ func NewRootCmd(version string) *cobra.Command {
 		// for git-diff review; the live (non-dry-run) path lands
 		// in v0.7.1 with the LLM judge.
 		newBootstrapCmd(),
+		// `bough ecc import` — v0.7.2 P2 ECC compat bridge. Walks
+		// the upstream affaan-m/everything-claude-code corpus
+		// (default: ~/.local/share/ecc-homunculus) and projects
+		// each instinct / skill / agent / command onto bough's
+		// canonical schemas. Read-only in v0.7.2; backend write
+		// loop wires in P4 v0.8.
+		newEccCmd(),
 	)
 	return root
 }

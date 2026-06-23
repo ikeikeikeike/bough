@@ -60,7 +60,7 @@ import (
 
 // Version is reported in the MCP initialize handshake. Bumped per
 // release; the v0.6.1 ship commit replaces the -dev suffix.
-const Version = "v0.7.1"
+const Version = "v0.7.2"
 
 func main() {
 	allowWriteFlag := flag.Bool("allow-write", false,
