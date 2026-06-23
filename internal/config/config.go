@@ -54,6 +54,27 @@ type Config struct {
 	Instinct       InstinctConfig     `yaml:"instinct"`
 	MemoryBackends []MemoryBackendCfg `yaml:"memory_backends" validate:"dive"`
 	Export         ExportConfig       `yaml:"export"`
+
+	// QualityGates (v0.7.1) declares operator-supplied lint /
+	// typecheck / smoke commands the host runs from
+	// `bough hook handle` against matching events. Each entry is
+	// a Gate from internal/qualitygate — declared here as a raw
+	// shape so internal/config does not depend on the runner.
+	QualityGates []QualityGateCfg `yaml:"quality_gates" validate:"dive"`
+}
+
+// QualityGateCfg mirrors internal/qualitygate.Gate at the config
+// boundary so the YAML decoder produces a struct the runner can
+// consume without re-parsing. Validation rules pin the fields the
+// runner relies on (Name + Command non-empty).
+type QualityGateCfg struct {
+	Name           string `yaml:"name" validate:"required"`
+	Command        string `yaml:"command" validate:"required"`
+	OnEvent        string `yaml:"on_event"`
+	OnTool         string `yaml:"on_tool"`
+	OnMatch        string `yaml:"on_match"`
+	OnRepo         string `yaml:"on_repo"`
+	TimeoutSeconds int    `yaml:"timeout_seconds"`
 }
 
 // Repository declares one git sub-repo that hangs off
@@ -400,6 +421,7 @@ type LegacyConfig struct {
 	Instinct       InstinctConfig       `yaml:"instinct"`
 	MemoryBackends []MemoryBackendCfg   `yaml:"memory_backends"`
 	Export         ExportConfig         `yaml:"export"`
+	QualityGates   []QualityGateCfg     `yaml:"quality_gates"`
 }
 
 // LegacyDatabase is the v0.3 shape of one `databases:` entry. The
@@ -576,6 +598,7 @@ func migrateLegacy(lc *LegacyConfig) (*Config, []string) {
 		Instinct:       lc.Instinct,
 		MemoryBackends: lc.MemoryBackends,
 		Export:         lc.Export,
+		QualityGates:   lc.QualityGates,
 	}
 	if lc.SchemaVersion == 1 {
 		warnings = append(warnings,
