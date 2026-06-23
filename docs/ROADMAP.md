@@ -88,6 +88,29 @@ absorbs both before the next minor.
 - Experimental compilers ship as community / experimental plugins
   under `examples/`.
 
+## v0.8.0 — Evaluator adapters + global hook scope (shipped 2026-06-23)
+
+Bundles two original roadmap lanes:
+
+- **P5 (= evaluator adapters)** — `internal/evaluators/` ships
+  GEPA / TextGrad / MUSE / SkillAudit in-process behind the v0.5
+  `plugins/evaluator/api.SkillEvaluator` contract. The four
+  strategies cover the research-paper-derived heuristics the
+  roadmap has been carrying since v0.5.
+- **P6 (= global hook scope)** — `--scope=user` on the
+  `bough hook` family reaches `~/.claude/settings.json` so an
+  operator can wire bough's observer once at the user level.
+
+Memory-backend Store loop (= P4) stays deferred per the operator's
+"memory backend は後回し" direction. v0.8 ships the read-side of
+every pipeline that needs it; the persistent write side lands
+once Letta + mem0 reconcile are ready.
+
+The 12-language rule pack from the original v0.9 plan is now an
+operator deliverable: pipe each language's idioms into
+`bough ecc import` (= v0.7.2) and let the evaluator adapters
+shape the surviving set. bough OSS stays language-neutral.
+
 ## v0.7.2 — ECC compat + dogfooding bridge (shipped 2026-06-23)
 
 Reads the upstream affaan-m/everything-claude-code corpus so a

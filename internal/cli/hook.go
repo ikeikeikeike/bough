@@ -53,11 +53,12 @@ v0.7.0 sprint per docs/ROADMAP.md.`,
 }
 
 func newHookInstallCmd() *cobra.Command {
-	return &cobra.Command{
+	var scope string
+	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install bough's canonical hook handlers into .claude/settings.json",
 		RunE: func(c *cobra.Command, _ []string) error {
-			settingsPath, err := defaultClaudeSettingsPath()
+			settingsPath, err := claudeSettingsPath(HookScope(scope))
 			if err != nil {
 				return err
 			}
@@ -65,14 +66,17 @@ func newHookInstallCmd() *cobra.Command {
 			return m.Install(commandCtx(c), "bough hook handle")
 		},
 	}
+	cmd.Flags().StringVar(&scope, "scope", "project", "settings.json scope: project (= cwd/.claude) | user (= ~/.claude)")
+	return cmd
 }
 
 func newHookUninstallCmd() *cobra.Command {
-	return &cobra.Command{
+	var scope string
+	cmd := &cobra.Command{
 		Use:   "uninstall",
 		Short: "Remove bough's hook handlers from .claude/settings.json",
 		RunE: func(c *cobra.Command, _ []string) error {
-			settingsPath, err := defaultClaudeSettingsPath()
+			settingsPath, err := claudeSettingsPath(HookScope(scope))
 			if err != nil {
 				return err
 			}
@@ -80,14 +84,17 @@ func newHookUninstallCmd() *cobra.Command {
 			return m.Uninstall(commandCtx(c))
 		},
 	}
+	cmd.Flags().StringVar(&scope, "scope", "project", "settings.json scope: project | user")
+	return cmd
 }
 
 func newHookListCmd() *cobra.Command {
-	return &cobra.Command{
+	var scope string
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "Print every hook handler currently wired in .claude/settings.json",
 		RunE: func(c *cobra.Command, _ []string) error {
-			settingsPath, err := defaultClaudeSettingsPath()
+			settingsPath, err := claudeSettingsPath(HookScope(scope))
 			if err != nil {
 				return err
 			}
@@ -119,6 +126,8 @@ func newHookListCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&scope, "scope", "project", "settings.json scope: project | user")
+	return cmd
 }
 
 func newHookReplayCmd() *cobra.Command {
@@ -380,17 +389,43 @@ func loadConfigQuiet(path string) (*config.Config, error) {
 	return config.Load(path)
 }
 
+// HookScope picks which Claude Code settings.json the hook
+// subcommands target. v0.8 (= P6) adds the global scope so an
+// operator can wire bough's observer once at the user level rather
+// than per-monorepo.
+type HookScope string
+
+const (
+	HookScopeProject HookScope = "project" // = <cwd>/.claude/settings.json (v0.7.0 default)
+	HookScopeUser    HookScope = "user"    // = ~/.claude/settings.json (v0.8 addition)
+)
+
 // defaultClaudeSettingsPath returns the per-project .claude/
-// settings.json bough manages. v0.7.0 anchors against the CLI's
-// current working directory so each monorepo gets an isolated hook
-// wiring; v0.7.x adds --scope=user / --scope=project flags to
-// reach the global surface explicitly.
+// settings.json bough manages.
 func defaultClaudeSettingsPath() (string, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("getwd: %w", err)
+	return claudeSettingsPath(HookScopeProject)
+}
+
+// claudeSettingsPath resolves the settings.json bough manages for
+// the requested scope. Project scope anchors against the current
+// working directory; user scope expands ~/.claude/settings.json.
+func claudeSettingsPath(scope HookScope) (string, error) {
+	switch scope {
+	case "", HookScopeProject:
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("getwd: %w", err)
+		}
+		return filepath.Join(cwd, ".claude", "settings.json"), nil
+	case HookScopeUser:
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("UserHomeDir: %w", err)
+		}
+		return filepath.Join(home, ".claude", "settings.json"), nil
+	default:
+		return "", fmt.Errorf("unknown hook scope %q (use 'project' or 'user')", scope)
 	}
-	return filepath.Join(cwd, ".claude", "settings.json"), nil
 }
 
 // commandCtx returns the cobra command's context or background

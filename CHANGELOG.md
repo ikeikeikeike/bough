@@ -1,5 +1,64 @@
 # Changelog
 
+## v0.8.0
+
+The "Evaluator adapters + global hook scope" release. v0.8 bundles
+two roadmap items the original plan called for separately (= P5 +
+P6 in the Imminent / Long-term lanes): in-process implementations
+of the four evaluator strategies the v0.5 SkillEvaluator interface
+has been carrying, plus `--scope=user` on the `bough hook` family
+so an operator can wire bough's observer once at the user level
+rather than per-monorepo.
+
+The memory-backend Store loop (= P4 in the roadmap) stays
+deferred per the operator's "memory backend は後回し" direction.
+v0.8 ships the read-side of every pipeline that needs it (evolve,
+ECC, evaluators); the persistent write surface lands when Letta +
+mem0 reconcile are ready.
+
+### Added
+
+- **`internal/evaluators/`** — in-process SkillEvaluator
+  implementations behind the v0.5 `plugins/evaluator/api`
+  contract:
+  - `gepa` — reflective prompt optimiser. Flags scope creep + over-
+    generalisation via token count + vagueness markers +
+    Constraints/Inputs absence. Recommends revise when any signal
+    fires.
+  - `textgrad` — gradient evaluator. Diffs the current artifact's
+    token set against a prior version (passed in via
+    `EvaluatorContextJSON`) and routes by Jaccard distance:
+    > 0.7 → promote, 0.3-0.7 → keep, < 0.3 → revise.
+  - `muse` — autoskill lifecycle. Uses hit count + regression count
+    + last-used timestamp from the audit log. Prunes stale
+    (90+ days, no hits) and broken (regression ≥ 3) artifacts;
+    promotes high-use (≥ 10 hits, 0 regressions).
+  - `skillaudit` — paired-trajectory auditor. Computes token
+    overlap against a peer artifact; for high-overlap pairs
+    routes by confidence delta (≥ 0.05 → keep current, ≤ -0.05 →
+    prune, |delta| < 0.05 → revise both).
+- **`bough hook install / uninstall / list --scope=project|user`** —
+  global scope reaches `~/.claude/settings.json`. Project scope
+  (= default) keeps the v0.7.0 behaviour.
+- **`claudeSettingsPath(HookScope)`** helper in
+  `internal/cli/hook.go` for downstream commands needing the same
+  scope-aware resolution.
+
+### Changed
+
+- `bough-mcp-server` Version reports `v0.8.0`.
+- `bough-plugin-memory-mem0` Version reports `v0.8.0`.
+
+### Deferred to dogfooding
+
+- The 12-language rule pack the v0.9 plan referenced is now an
+  operator deliverable — feed each language's idioms into
+  `bough ecc import` (= v0.7.2) and let the evaluator adapters
+  shape the surviving set. The bough OSS stays language-neutral.
+- Evaluator-driven retirement loop (= P11 in the roadmap) wires
+  in v0.9 once the memory-backend Store path exists to act on
+  prune verdicts.
+
 ## v0.7.2
 
 The "ECC compat + dogfooding bridge" release. v0.7.0 shipped the
