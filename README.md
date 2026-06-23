@@ -249,6 +249,45 @@ See [docs/CONCEPTS.md](docs/CONCEPTS.md) for the three-layer split
 and how bough relates to ECC, Letta, Anthropic Skills, mem0, and
 the 2026 anti-pattern literature.
 
+## Bootstrap (v0.7+)
+
+v0.7.0 adds the safety floor for the Bootstrap loop — Claude Code
+hook auto-wire, raw-event capture, transparency reporting, and
+dry-run proposal output — without calling any external LLM. The
+live (= LLM-judge driven) path lands in v0.7.1.
+
+```sh
+# Wire bough handlers into .claude/settings.json (idempotent;
+# hand-edited entries are preserved).
+bough hook install
+
+# Inspect what is wired + what the observer has captured + what
+# the cost meter reports.
+bough doctor
+
+# Replay a recorded payload through the wired handler for
+# debugging.
+bough hook replay --event PreToolUse --fixture internal/hooks/testdata/PreToolUse.json
+
+# Read observations.jsonl + write candidate proposals under
+# .bough/proposals/<timestamp>/*.md for git-diff review.
+bough bootstrap --dry-run
+
+# Remove bough's hook entries (hand-edited rows survive).
+bough hook uninstall
+```
+
+The MCP server surface gains opt-in write tools:
+
+```sh
+# Enable memory.store + memory.forget. The host wires worktree-only
+# scope, 60 writes/minute, append-only audit log automatically.
+bough-mcp-server --allow-write
+```
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for the v0.7.0 sub-phases
+that shipped (O-1.1 through O-1.8) and the v0.7.1+ plan.
+
 The subsystem is **off by default**. Enable it by setting
 `instinct.enabled: true` in `.bough.yaml`:
 

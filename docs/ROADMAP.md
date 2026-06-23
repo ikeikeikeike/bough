@@ -88,6 +88,27 @@ absorbs both before the next minor.
 - Experimental compilers ship as community / experimental plugins
   under `examples/`.
 
+## v0.7.0 — Bootstrap safety floor (shipped 2026-06-23)
+
+The "automation is safe to turn on" floor. Nothing in this release
+calls an external LLM; every artifact lands in a reviewable form
+before touching the memory backend. Round 5 review (= 2026-06-22,
+two independent external AI passes) split the LLM-touching surface
+into v0.7.1 and front-loaded the safety + observability surfaces
+into v0.7.0. The eight sub-phases all shipped:
+
+- ✅ O-1.1 cobra surface skeleton (`bough hook`)
+- ✅ O-1.2 install / uninstall / list reconciliation
+- ✅ O-1.3 replay harness + canonical testdata fixtures
+- ✅ O-1.4 `bough doctor` body + top-level alias
+- ✅ O-1.5 `bough bootstrap --dry-run` → `.bough/proposals/<ts>/*.md`
+- ✅ O-1.6 `bough hook handle` (= raw event capture into
+  `.bough/observations.jsonl`)
+- ✅ O-1.7 MCP write hardening (rate-limit + scope boundary +
+  append-only audit; host wires worktree-only / 60-per-min /
+  `.bough/memory/mcp_audit.jsonl` defaults when `--allow-write` on)
+- ✅ O-1.8 end-to-end integration test in `conformance/hooks/`
+
 ## v0.7 — Bootstrap layer (round 5 refined)
 
 The v0.6 retrospective (2026-06-22) clarified that the user-facing

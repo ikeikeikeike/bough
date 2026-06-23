@@ -1,5 +1,68 @@
 # Changelog
 
+## v0.7.0
+
+The "Bootstrap safety floor" release. Round 5 external review
+(= two independent AI passes on 2026-06-22) split the LLM-touching
+surface into v0.7.1 and front-loaded the safety + observability
+surfaces into v0.7.0. Every artifact this release generates lands
+in a reviewable form (= Markdown proposals under
+`.bough/proposals/`) before touching the memory backend; the
+operator's `bough instinct approve` is what makes anything active.
+
+No external LLM is called by anything in this release. The MCP
+write surface is opt-in (= `--allow-write`); the host wires the
+v0.7.0 hardening defaults (worktree-only scope, 60 writes/minute,
+append-only audit log) the moment write is enabled.
+
+### Added
+
+- **`bough hook install / uninstall / list / replay / doctor /
+  handle`** — the v0.7.0 user-facing surface for the Claude Code
+  hook layer. install / uninstall reconcile `.claude/settings.
+  json` idempotently and preserve hand-edited entries; list
+  renders the current wiring; replay drives a fixture payload
+  through the wired handler for debugging; handle is the
+  dispatcher Claude Code invokes (writes one JSONL line per
+  event to `.bough/observations.jsonl`); doctor is the
+  transparency surface (= what is wired, what the observer has
+  captured, what the cost meter says).
+- **`bough doctor`** — top-level alias for `bough hook doctor`
+  so the transparency check is reachable without remembering
+  the `hook` namespace. Round 5 reviewer recommendation.
+- **`bough bootstrap --dry-run`** — reads
+  `.bough/observations.jsonl`, summarises observations per
+  event, writes the manifest + per-event Markdown stubs under
+  `.bough/proposals/<timestamp>/`. The live (non-dry-run) path
+  that mints + persists candidate artifacts via the LLM judge
+  lands in v0.7.1. v0.7.0 requires `--dry-run` explicitly so
+  operators do not silently get a no-op when they expect a
+  write.
+- **MCP write hardening** — `Server.SetAuditLogPath`,
+  `SetRateLimit`, `SetAllowedScopes`. All optional; zero
+  defaults match v0.6.1 behaviour. The host (`bough-mcp-server
+  --allow-write`) flips conservative defaults at startup:
+  worktree-only scope, 60 writes/minute, audit log at
+  `.bough/memory/mcp_audit.jsonl`. Round 5 AI B Q4 mitigation
+  set (10 items) fully closed.
+
+### Notes
+
+- v0.6.1 → v0.7.0 is a drop-in upgrade for everyone not using
+  the new surfaces. Existing plugins, `.bough.yaml`, and
+  `bough-mcp-server` invocations keep working unchanged; the
+  `bough hook` / `bough doctor` / `bough bootstrap` commands
+  are net-new.
+- The v0.7.0 sprint is "safety floor only" — `bough bootstrap`
+  without `--dry-run` and the live LLM-judge path land in
+  v0.7.1 per `docs/ROADMAP.md`. The non-dry-run invocation
+  exits with an explicit "v0.7.0 requires --dry-run" message
+  so an operator does not silently get a no-op.
+- The new `conformance/hooks/` package runs the install →
+  handle → bootstrap → doctor → uninstall chain against a
+  built bough binary. Add it to your CI matrix if you build
+  bough from source.
+
 ## v0.6.1
 
 Drop-in patch on top of v0.6.0 that absorbs three findings from the
