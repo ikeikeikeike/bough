@@ -105,65 +105,11 @@ builds:
     env:
       - CGO_ENABLED=0
 
-  # v0.5 memory subsystem: SQLite reference-fallback. modernc.org/sqlite
-  # is pure Go (no CGO) so this binary cross-compiles to the same
-  # 4 OS-arch matrix as the engine plugins without a C toolchain.
-  - id: bough-plugin-memory-sqlite
-    main: ./cmd/bough-plugin-memory-sqlite
-    binary: bough-plugin-memory-sqlite
-    goos:
-      - linux
-      - darwin
-    goarch:
-      - amd64
-      - arm64
-    flags:
-      - -trimpath
-    ldflags:
-      - -s
-      - -w
-    env:
-      - CGO_ENABLED=0
-
-  # v0.6 external memory: official mem0 adapter. HTTP REST client +
-  # 30 s TTL cache + namespace mapping. Same cross-compile matrix as
-  # every other bough plugin.
-  - id: bough-plugin-memory-mem0
-    main: ./cmd/bough-plugin-memory-mem0
-    binary: bough-plugin-memory-mem0
-    goos:
-      - linux
-      - darwin
-    goarch:
-      - amd64
-      - arm64
-    flags:
-      - -trimpath
-    ldflags:
-      - -s
-      - -w
-    env:
-      - CGO_ENABLED=0
-
-  # v0.6 MCP server: stdio JSON-RPC companion binary. Spawns
-  # bough-plugin-memory-sqlite as the backing store so it ships in
-  # the same release archive.
-  - id: bough-mcp-server
-    main: ./cmd/bough-mcp-server
-    binary: bough-mcp-server
-    goos:
-      - linux
-      - darwin
-    goarch:
-      - amd64
-      - arm64
-    flags:
-      - -trimpath
-    ldflags:
-      - -s
-      - -w
-    env:
-      - CGO_ENABLED=0
+  # v0.5-v0.8 memory subsystem + MCP server: deleted on the v0.9
+  # reset (= ECC verbatim port). claude --print subprocess does the
+  # LLM work, so neither bough-plugin-memory-{sqlite,mem0} nor
+  # bough-mcp-server need to ship in the v0.9 archive. Operators
+  # who depend on those surfaces should stay on v0.8.1.
 
 archives:
   - id: default
@@ -173,9 +119,6 @@ archives:
       - bough-plugin-postgres
       - bough-plugin-redis
       - bough-plugin-elasticsearch
-      - bough-plugin-memory-sqlite
-      - bough-plugin-memory-mem0
-      - bough-mcp-server
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     formats:
