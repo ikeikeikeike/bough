@@ -1,5 +1,100 @@
 # Changelog
 
+## v0.7.1
+
+The "Evolve + LLM judge" release. v0.7.0 shipped the safety floor
+(= hook auto-wire, bootstrap dry-run, MCP write hardening). v0.7.1
+layers the actual artifact-generation pipeline on top: a 4-gate
+mechanical filter ported from the upstream ECC v3 canonical
+algorithm, a swappable JudgeClient interface with three reference
+backends, SHA256-keyed audit cache, and a `bough bootstrap --apply`
+path that writes PASS candidates into `.claude/skills/<label>.md`.
+
+Deviations from the m plan (`~/.claude/plans/bough-v071-sprint-
+detail.md`):
+
+* `bough bootstrap` default stays dry-run; `--apply` is opt-in.
+  Round 5 reviewers flagged silent CLAUDE.md overwrite as the
+  highest-blast-radius failure mode, so v0.7.1 ships actual-run
+  as an explicit gesture. v0.7.2 dogfooding can flip the default.
+* `ClaudeJudgeClient` ships as a stub returning `ErrClaudeNotWired`.
+  Wiring `anthropic-sdk-go` would add a vendor SDK; v0.7.2 picks
+  that up alongside the live cost-meter integration `bough doctor`
+  surfaces today. v0.7.1 default is `HeuristicJudgeClient` (= LLM-
+  free).
+* Golden corpus is Go-vs-Go regression only. The Python v3 diff
+  defers to v0.7.2 (= `bough ecc import` lands the cross-check
+  rig).
+
+### Added
+
+- **`plugins/capability/api/llm.go`** — `JudgeClient` interface,
+  `JudgeRequest` / `JudgeVerdict` types, `VerdictKind` enum
+  (`PASS` / `DOUBT` / `FAIL`). Lifted into `plugins/capability/api/`
+  so v0.8+ can graduate it into a gRPC plugin slot.
+- **`internal/judge/heuristic.go`** — deterministic rule-based
+  judge over cluster size + hash diversity + nearest-prior
+  proximity. v0.7.1 default; works without an API key at zero
+  per-call cost.
+- **`internal/judge/replay.go`** — fixture playback rooted at
+  `.evolve/judgements/`. `ErrReplayMiss` sentinel lets the golden
+  corpus harness distinguish cache miss from parse error.
+- **`internal/judge/claude.go`** — stub returning
+  `ErrClaudeNotWired` until v0.7.2 wires the Anthropic SDK.
+- **`internal/evolve/`** — 4-gate Go port of the ECC
+  `/evolve-skill-manual-v3` algorithm. Gates split into
+  `gate1_schema.go` (drop malformed bundles), `gate2_heuristic.go`
+  (length + token diversity + anti-pattern filter), `gate3_cluster.
+  go` (Jaccard threshold 0.4 sweep + nearest-prior link), and
+  `gate4_candidate.go` (verdict + cluster → `[]InstinctCandidate`).
+- **`internal/evolve/cache.go`** — canonical `CacheKey(req)` over
+  `sha256(prompt_version | model_id | cluster_member_ids |
+  cluster_member_hashes | nearest_prior_label |
+  nearest_prior_description)`. Field separators (0x00 / 0x1F)
+  prevent collision when ids contain the join char.
+- **`internal/evolve/audit.go`** — `AuditDir` + `CachedJudge`
+  wrapper. Records persist as
+  `.evolve/judgements/<cache_key>.json`; the schema doubles as
+  the Replay fixture format. Temperature is overwritten to 0 and
+  MaxOutputTokens to 1024 inside `Judge()` so a caller cannot
+  bypass the determinism invariant.
+- **`internal/evolve/cache.go: ValidateVerdict(v)`** — JSON
+  schema validation for `JudgeVerdict`. Invalid live-LLM
+  responses fall through to DOUBT instead of poisoning the
+  cache.
+- **`bough bootstrap --apply`** — runs the 4-gate + judge
+  pipeline, atomic-writes PASS candidates into
+  `.claude/skills/<label>.md` via tmp+rename, refuses when
+  `.claude/` has uncommitted changes (= `--force` overrides),
+  and prints a `git diff --stat` summary for operator review.
+  FAIL verdicts are always skipped; DOUBT promotes only with
+  `--force`.
+- **`internal/qualitygate/`** — operator-supplied lint /
+  typecheck / smoke runner. Gates declare matchers against
+  (event, tool, file path, repo) and run sequentially via
+  `sh -c <command>` with per-gate `TimeoutSeconds` cap.
+- **`.bough.yaml: quality_gates:`** root section, validated by
+  the same LegacyConfig superset migration pattern that v0.6.1
+  introduced.
+- **`internal/evolve/testdata/golden/`** — Go-vs-Go regression
+  corpus. `UPDATE_GOLDEN=1` refreshes expected snapshots when a
+  change is intentional.
+
+### Fixed
+
+- **`bough hook replay --fixture -`** now reads from stdin when
+  the fixture argument is `-`. k smoke (v0.7.0 post-ship)
+  flagged the missing stdin path; the fix is additive.
+- **`Makefile: build`** target now also compiles
+  `bough-plugin-memory-mem0` and `bough-mcp-server`. The
+  v0.7.0 hotfix already shipped on `main` (d25ee97); v0.7.1
+  carries it forward.
+
+### Changed
+
+- `bough-mcp-server` Version reports `v0.7.1`.
+- `bough-plugin-memory-mem0` Version reports `v0.7.1`.
+
 ## v0.7.0
 
 The "Bootstrap safety floor" release. Round 5 external review
