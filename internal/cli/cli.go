@@ -46,6 +46,8 @@ func NewRootCmd(version string) *cobra.Command {
 		// Hook auto-wire (v0.7+).
 		newHookCmd(),
 		newDoctorCmd(),
+		// Continuous learning surface (v0.9+).
+		newObserverCmd(),
 	)
 	return root
 }
