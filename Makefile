@@ -58,16 +58,13 @@ fmt:  ## gofumpt + gci.
 
 
 .PHONY: build
-build:  ## Build host + all engine plugins + memory plugins + MCP server under dist/.
+build:  ## Build host + all 4 engine plugins under dist/. (v0.9 reset: memory + mcp binaries removed.)
 	mkdir -p dist
 	go build -o dist/bough ./cmd/bough
 	go build -o dist/bough-plugin-mysql ./cmd/bough-plugin-mysql
 	go build -o dist/bough-plugin-postgres ./cmd/bough-plugin-postgres
 	go build -o dist/bough-plugin-redis ./cmd/bough-plugin-redis
 	go build -o dist/bough-plugin-elasticsearch ./cmd/bough-plugin-elasticsearch
-	go build -o dist/bough-plugin-memory-sqlite ./cmd/bough-plugin-memory-sqlite
-	go build -o dist/bough-plugin-memory-mem0 ./cmd/bough-plugin-memory-mem0
-	go build -o dist/bough-mcp-server ./cmd/bough-mcp-server
 
 
 # PLUGIN is the engine kind: mysql / postgres / redis / elasticsearch.

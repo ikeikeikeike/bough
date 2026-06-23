@@ -1,314 +1,263 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
+	"sort"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/ikeikeikeike/bough/internal/observer"
-	"github.com/ikeikeikeike/bough/pkg/schema"
+	"github.com/ikeikeikeike/bough/internal/homunculus"
 )
 
+// newInstinctCmd wires `bough instinct` — the read-side counterpart
+// to `bough observer run-once`. v0.9.0 ships status / list / show so
+// an operator can see what the observer wrote without grepping the
+// homunculus tree directly. promote / approve land alongside the
+// v0.9.1 evolve pipeline; mint stays out of v0.9.0 because the
+// canonical mint path is via `bough observer run-once`.
 func newInstinctCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "instinct",
-		Short: "Mint, approve, query, and forget per-worktree instincts",
-		Long: `bough instinct manages the v0.5 instinct subsystem: behavioural
-rules and observations the host accumulates per worktree, repo,
-and global scope.
-
-The subsystem is opt-in. Set instinct.enabled: true in .bough.yaml
-to use it. See docs/INSTINCTS.md for the lifecycle.`,
+		Short: "Inspect the instinct corpus the bough observer has captured",
+		Long: `bough instinct surfaces the homunculus on stdout so an
+operator can audit what the observer extracted without digging into
+~/.local/share/bough-homunculus/projects/<hash>/instincts/personal/.
+status prints the per-project totals, list enumerates ids /
+triggers / confidence, show prints one file verbatim.`,
 	}
-	cmd.AddCommand(
-		newInstinctStatusCmd(),
-		newInstinctMintCmd(),
-		newInstinctIngestCmd(),
-		newInstinctApproveCmd(),
-		newInstinctQueryCmd(),
-		newInstinctForgetCmd(),
-		newInstinctPromoteCmd(),
-		newInstinctExportCmd(),
-		newInstinctImportCmd(),
-	)
+	cmd.AddCommand(newInstinctStatusCmd(), newInstinctListCmd(), newInstinctShowCmd())
 	return cmd
 }
 
 func newInstinctStatusCmd() *cobra.Command {
-	var scopeArg string
+	var root string
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Show the active instinct counts per scope",
-		RunE: func(c *cobra.Command, _ []string) error {
-			coord, close, err := loadInstinctCoordinator(c)
+		Short: "Print per-project instinct totals + confidence histogram",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ident, layout, instincts, _, err := loadInstinctsForCWD(cmd.Context(), root)
 			if err != nil {
 				return err
 			}
-			defer close()
-			_, cfg, _ := loadConfigAndRoot(c, "")
-			scope := currentScope(cfg, "", scopeArg)
-			results, err := coord.Query(noopCtx(), "", scope)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(c.OutOrStdout(), "Scope: %s/%s/%s\n", scope.Level, scope.WorktreeID, scope.RepoName)
-			fmt.Fprintf(c.OutOrStdout(), "Items: %d returned (max_results=%d, max_tokens=%d)\n",
-				len(results), cfg.Instinct.Retrieve.MaxResults, cfg.Instinct.Retrieve.MaxTokens)
+			renderStatus(cmd.OutOrStdout(), ident, layout, instincts)
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&scopeArg, "worktree", "", "worktree id (default: derived from cwd)")
+	cmd.Flags().StringVar(&root, "root", "", "monorepo root (default: $PWD)")
 	return cmd
 }
 
-func newInstinctMintCmd() *cobra.Command {
+func newInstinctListCmd() *cobra.Command {
 	var (
-		rule   string
-		source string
+		root      string
+		sortBy    string
+		limit     int
+		domain    string
+		minConf   float64
 	)
 	cmd := &cobra.Command{
-		Use:   "mint",
-		Short: "Mint a single instinct from an explicit rule string",
-		RunE: func(c *cobra.Command, _ []string) error {
-			if rule == "" {
-				return fmt.Errorf("--rule is required")
-			}
-			coord, close, err := loadInstinctCoordinator(c)
+		Use:   "list",
+		Short: "List instincts (id, trigger, confidence, domain)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			_, _, instincts, _, err := loadInstinctsForCWD(cmd.Context(), root)
 			if err != nil {
 				return err
 			}
-			defer close()
-			_, cfg, _ := loadConfigAndRoot(c, "")
-			scope := currentScope(cfg, "", "")
-			bundle := schema.TraceBundle{
-				Source:  schema.TraceSource(source),
-				Scope:   scope,
-				Content: rule,
+			filtered := filterInstincts(instincts, domain, minConf)
+			sortInstincts(filtered, sortBy)
+			if limit > 0 && len(filtered) > limit {
+				filtered = filtered[:limit]
 			}
-			admitted, _, err := coord.Ingest(noopCtx(), scope, []schema.TraceBundle{bundle})
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(c.OutOrStdout(), "minted %d candidate(s); approve with `bough instinct approve <id>`\n", admitted)
+			renderList(cmd.OutOrStdout(), filtered)
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&rule, "rule", "", "the behavioural rule string")
-	cmd.Flags().StringVar(&source, "source", "explicit_user_feedback", "the trace source classification")
+	cmd.Flags().StringVar(&root, "root", "", "monorepo root (default: $PWD)")
+	cmd.Flags().StringVar(&sortBy, "sort", "confidence", "sort key: confidence | id | recent")
+	cmd.Flags().IntVar(&limit, "limit", 0, "limit rows (0 = no cap)")
+	cmd.Flags().StringVar(&domain, "domain", "", "filter by domain (e.g. workflow, testing)")
+	cmd.Flags().Float64Var(&minConf, "min-confidence", 0, "filter rows with confidence below this value")
 	return cmd
 }
 
-func newInstinctIngestCmd() *cobra.Command {
-	var (
-		source        string
-		sourceEventID string
-	)
+func newInstinctShowCmd() *cobra.Command {
+	var root string
 	cmd := &cobra.Command{
-		Use:   "ingest",
-		Short: "Ingest a stream of trace lines from stdin",
-		Long: `Read stdin and group lines into TraceBundles for the coordinator.
-
-Examples:
-
-  make test 2>&1 | bough instinct ingest --stdin --source test_failure
-  go test ./... 2>&1 | bough instinct ingest --stdin --source test_failure
-
---source-event-id makes the ingest idempotent: a CI rerun with the
-same id and identical payload produces no new rows.`,
-		RunE: func(c *cobra.Command, _ []string) error {
-			coord, close, err := loadInstinctCoordinator(c)
-			if err != nil {
-				return err
-			}
-			defer close()
-			_, cfg, _ := loadConfigAndRoot(c, "")
-			scope := currentScope(cfg, "", "")
-			admitted, reinforced, err := observer.Ingest(noopCtx(), coord, os.Stdin, observer.StdinIngestOptions{
-				Source:        schema.TraceSource(source),
-				Scope:         scope,
-				SourceEventID: sourceEventID,
-			})
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(c.OutOrStdout(), "ingest: %d admitted, %d reinforced (source=%s)\n",
-				admitted, reinforced, source)
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&source, "source", "stdin", "trace source classification")
-	cmd.Flags().StringVar(&sourceEventID, "source-event-id", "", "idempotency token (recommended for CI)")
-	_ = cmd.Flags().Bool("stdin", true, "read from stdin (placeholder for ergonomics; stdin is always read)")
-	return cmd
-}
-
-func newInstinctApproveCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "approve <id>",
-		Short: "Promote a candidate row to active",
+		Use:   "show <id>",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(c *cobra.Command, args []string) error {
-			coord, close, err := loadInstinctCoordinator(c)
+		Short: "Print one instinct file verbatim by id",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id := args[0]
+			ident, layout, instincts, _, err := loadInstinctsForCWD(cmd.Context(), root)
 			if err != nil {
 				return err
 			}
-			defer close()
-			_, cfg, _ := loadConfigAndRoot(c, "")
-			scope := currentScope(cfg, "", "")
-			results, err := coord.Query(noopCtx(), "", scope)
-			if err != nil {
-				return err
-			}
-			for _, r := range results {
-				if r.ID == args[0] {
-					return coord.ApproveInstinct(noopCtx(), r)
+			for _, in := range instincts {
+				if in.ID == id {
+					raw, rerr := os.ReadFile(in.Path)
+					if rerr != nil {
+						return fmt.Errorf("instinct show: read %s: %w", in.Path, rerr)
+					}
+					_, _ = cmd.OutOrStdout().Write(raw)
+					return nil
 				}
 			}
-			return fmt.Errorf("instinct %q not found in scope %s/%s", args[0], scope.Level, scope.WorktreeID)
+			return fmt.Errorf("instinct %q not found under %s (project=%s)", id, layout.InstinctsDir(ident.ID), ident.Name)
 		},
 	}
+	cmd.Flags().StringVar(&root, "root", "", "monorepo root (default: $PWD)")
 	return cmd
 }
 
-func newInstinctQueryCmd() *cobra.Command {
-	var term string
-	cmd := &cobra.Command{
-		Use:   "query",
-		Short: "FTS search across stored instincts",
-		RunE: func(c *cobra.Command, _ []string) error {
-			coord, close, err := loadInstinctCoordinator(c)
-			if err != nil {
-				return err
-			}
-			defer close()
-			_, cfg, _ := loadConfigAndRoot(c, "")
-			scope := currentScope(cfg, "", "")
-			results, err := coord.Query(noopCtx(), term, scope)
-			if err != nil {
-				return err
-			}
-			for _, r := range results {
-				fmt.Fprintf(c.OutOrStdout(), "[%s] %s (conf=%.2f, hits=%d)\n", r.ID, r.Rule, r.Confidence, r.Hits)
-			}
-			fmt.Fprintf(c.OutOrStdout(), "(%d results)\n", len(results))
-			return nil
-		},
+// loadInstinctsForCWD is the shared resolution + scan path the
+// three subcommands use. Returns the ProjectIdentity (for the
+// header line), the Layout (for the path under error messages),
+// the parsed instincts, and any soft scan errors.
+func loadInstinctsForCWD(ctx context.Context, root string) (homunculus.ProjectIdentity, homunculus.Layout, []*homunculus.Instinct, []error, error) {
+	_ = ctx
+	cwd := root
+	if cwd == "" {
+		w, err := os.Getwd()
+		if err != nil {
+			return homunculus.ProjectIdentity{}, homunculus.Layout{}, nil, nil, fmt.Errorf("instinct: getwd: %w", err)
+		}
+		cwd = w
 	}
-	cmd.Flags().StringVar(&term, "term", "", "FTS search term")
-	return cmd
+	ident, err := homunculus.DetectIdentity(cwd)
+	if err != nil {
+		return homunculus.ProjectIdentity{}, homunculus.Layout{}, nil, nil, err
+	}
+	layout := homunculus.NewLayout()
+	instincts, soft := homunculus.ScanInstincts(layout.InstinctsDir(ident.ID))
+	return ident, layout, instincts, soft, nil
 }
 
-func newInstinctForgetCmd() *cobra.Command {
-	var reason string
-	cmd := &cobra.Command{
-		Use:   "forget <id>",
-		Short: "Soft-delete an instinct (state → forgotten)",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(c *cobra.Command, args []string) error {
-			coord, close, err := loadInstinctCoordinator(c)
-			if err != nil {
-				return err
-			}
-			defer close()
-			_, cfg, _ := loadConfigAndRoot(c, "")
-			scope := currentScope(cfg, "", "")
-			if reason == "" {
-				reason = "explicit forget"
-			}
-			return coord.Forget(noopCtx(), args[0], scope, reason)
-		},
+func renderStatus(w io.Writer, ident homunculus.ProjectIdentity, layout homunculus.Layout, instincts []*homunculus.Instinct) {
+	fmt.Fprintf(w, "project: %s (%s)\n", ident.Name, ident.ID)
+	fmt.Fprintf(w, "root:    %s\n", ident.Root)
+	fmt.Fprintf(w, "remote:  %s\n", emptyIfBlank(ident.Remote))
+	fmt.Fprintf(w, "store:   %s\n", layout.InstinctsDir(ident.ID))
+	fmt.Fprintf(w, "count:   %d\n", len(instincts))
+	if len(instincts) == 0 {
+		fmt.Fprintln(w, "(no instincts yet — run `bough observer run-once` after the operator records some Claude Code sessions)")
+		return
 	}
-	cmd.Flags().StringVar(&reason, "reason", "", "audit-log reason for the forget")
-	return cmd
+	// Confidence histogram in 5 buckets.
+	buckets := []float64{0.4, 0.55, 0.70, 0.80, 0.90}
+	labels := []string{"<0.40", "0.40-0.55", "0.55-0.70", "0.70-0.80", ">=0.80"}
+	hist := make([]int, len(buckets))
+	for _, in := range instincts {
+		idx := len(buckets) - 1
+		for i, b := range buckets {
+			if in.Confidence < b {
+				idx = i
+				break
+			}
+		}
+		hist[idx]++
+	}
+	fmt.Fprintln(w, "confidence histogram:")
+	for i, label := range labels {
+		fmt.Fprintf(w, "  %-10s %4d %s\n", label, hist[i], strings.Repeat("█", hist[i]))
+	}
+
+	// Top-3 most recent
+	recent := append([]*homunculus.Instinct(nil), instincts...)
+	sort.SliceStable(recent, func(i, j int) bool {
+		return recent[i].LastSeen.After(recent[j].LastSeen)
+	})
+	cutoff := 3
+	if len(recent) < cutoff {
+		cutoff = len(recent)
+	}
+	fmt.Fprintln(w, "most recent:")
+	for _, in := range recent[:cutoff] {
+		fmt.Fprintf(w, "  %s  (conf=%.2f, %s)\n", in.ID, in.Confidence, lastSeen(in))
+	}
 }
 
-func newInstinctPromoteCmd() *cobra.Command {
-	var to string
-	cmd := &cobra.Command{
-		Use:   "promote <id> --to repo|global",
-		Short: "Promote an instinct to a higher scope tier",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(c *cobra.Command, args []string) error {
-			coord, close, err := loadInstinctCoordinator(c)
-			if err != nil {
-				return err
-			}
-			defer close()
-			_, cfg, _ := loadConfigAndRoot(c, "")
-			scope := currentScope(cfg, "", "")
-			results, err := coord.Query(noopCtx(), "", scope)
-			if err != nil {
-				return err
-			}
-			for _, r := range results {
-				if r.ID == args[0] {
-					target := schema.ScopeLevel(to)
-					return coord.Promote(noopCtx(), r, target)
-				}
-			}
-			return fmt.Errorf("instinct %q not found in scope %s/%s", args[0], scope.Level, scope.WorktreeID)
-		},
+func renderList(w io.Writer, instincts []*homunculus.Instinct) {
+	if len(instincts) == 0 {
+		fmt.Fprintln(w, "(no instincts matched the filter)")
+		return
 	}
-	cmd.Flags().StringVar(&to, "to", "", "target scope: repo | global")
-	_ = cmd.MarkFlagRequired("to")
-	return cmd
+	fmt.Fprintf(w, "%-44s %-5s %-13s %s\n", "ID", "CONF", "DOMAIN", "TRIGGER")
+	for _, in := range instincts {
+		fmt.Fprintf(w, "%-44s %.2f  %-13s %s\n",
+			truncate(in.ID, 44),
+			in.Confidence,
+			truncate(in.Domain, 13),
+			truncate(in.Trigger, 90))
+	}
 }
 
-func newInstinctExportCmd() *cobra.Command {
-	var format string
-	cmd := &cobra.Command{
-		Use:   "export",
-		Short: "Export instincts in yaml or jsonl",
-		RunE: func(c *cobra.Command, _ []string) error {
-			coord, closeAll, err := loadInstinctCoordinator(c)
-			if err != nil {
-				return err
-			}
-			defer closeAll()
-			_, cfg, _ := loadConfigAndRoot(c, "")
-			scope := currentScope(cfg, "", "")
-			resp, err := coord.Export(noopCtx(), format, scope)
-			if err != nil {
-				return err
-			}
-			_, _ = c.OutOrStdout().Write(resp.Payload)
-			return nil
-		},
+func filterInstincts(in []*homunculus.Instinct, domain string, minConf float64) []*homunculus.Instinct {
+	if domain == "" && minConf <= 0 {
+		return in
 	}
-	cmd.Flags().StringVar(&format, "format", "yaml", "yaml | jsonl")
-	return cmd
+	out := make([]*homunculus.Instinct, 0, len(in))
+	for _, row := range in {
+		if domain != "" && !strings.EqualFold(row.Domain, domain) {
+			continue
+		}
+		if row.Confidence < minConf {
+			continue
+		}
+		out = append(out, row)
+	}
+	return out
 }
 
-func newInstinctImportCmd() *cobra.Command {
-	var (
-		format    string
-		overwrite bool
-	)
-	cmd := &cobra.Command{
-		Use:   "import <file>",
-		Short: "Import previously-exported instincts",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(c *cobra.Command, args []string) error {
-			payload, err := os.ReadFile(args[0])
-			if err != nil {
-				return fmt.Errorf("read %s: %w", args[0], err)
+func sortInstincts(rows []*homunculus.Instinct, key string) {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "id", "":
+		sort.SliceStable(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	case "confidence":
+		sort.SliceStable(rows, func(i, j int) bool {
+			if rows[i].Confidence == rows[j].Confidence {
+				return rows[i].ID < rows[j].ID
 			}
-			coord, closeAll, err := loadInstinctCoordinator(c)
-			if err != nil {
-				return err
-			}
-			defer closeAll()
-			resp, err := coord.Import(noopCtx(), format, payload, overwrite)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(c.OutOrStdout(), "Imported: imported=%d upserted=%d skipped=%d\n",
-				resp.ImportedCount, resp.UpsertedCount, resp.SkippedCount)
-			return nil
-		},
+			return rows[i].Confidence > rows[j].Confidence
+		})
+	case "recent":
+		sort.SliceStable(rows, func(i, j int) bool {
+			return rows[i].LastSeen.After(rows[j].LastSeen)
+		})
 	}
-	cmd.Flags().StringVar(&format, "format", "yaml", "yaml | jsonl")
-	cmd.Flags().BoolVar(&overwrite, "overwrite", true, "overwrite existing rows on dedupe match")
-	return cmd
+}
+
+func truncate(s string, max int) string {
+	if max <= 1 || len(s) <= max {
+		return s
+	}
+	return s[:max-1] + "…"
+}
+
+func emptyIfBlank(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "(not detected)"
+	}
+	return s
+}
+
+func lastSeen(in *homunculus.Instinct) string {
+	if in.LastSeen.IsZero() {
+		return "no last_seen"
+	}
+	d := time.Since(in.LastSeen)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%d min ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%d hr ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%d days ago", int(d.Hours()/24))
+	}
 }

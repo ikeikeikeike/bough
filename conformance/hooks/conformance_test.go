@@ -86,26 +86,15 @@ func TestHooks_EndToEnd_InstallHandleBootstrapDoctorUninstall(t *testing.T) {
 		t.Errorf("observations.jsonl line count: got %d want 2", got)
 	}
 
-	// bootstrap --dry-run reads the observations + writes proposals
-	stdout, _ = run(t, "bootstrap --dry-run", "", "bootstrap", "--dry-run")
-	if !strings.Contains(stdout, "_manifest.md") {
-		t.Errorf("bootstrap output missing manifest line: %s", stdout)
-	}
-	proposalsRoot := filepath.Join(workdir, ".bough", "proposals")
-	entries, err := os.ReadDir(proposalsRoot)
-	if err != nil {
-		t.Fatalf("proposals dir missing: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 proposals subdir, got %d", len(entries))
-	}
-	manifestPath := filepath.Join(proposalsRoot, entries[0].Name(), "_manifest.md")
-	manifest, err := os.ReadFile(manifestPath)
-	if err != nil {
-		t.Fatalf("manifest missing: %v", err)
-	}
-	if !strings.Contains(string(manifest), "Observations counted: **2**") {
-		t.Errorf("manifest missing expected counted line: %s", manifest)
+	// v0.9 surface: observer run-once --dry-run renders the
+	// prompt without spawning `claude --print`. The legacy
+	// v0.7-v0.8 `bootstrap --dry-run` writes-Markdown surface is
+	// gone (= chore(v0.9): reset). The dry-run is enough to
+	// verify the install → handle pipeline lands observations
+	// where the observer expects them.
+	stdout, _ = run(t, "observer run-once --dry-run", "", "observer", "run-once", "--dry-run")
+	if !strings.Contains(stdout, "rendered prompt") && !strings.Contains(stdout, "nothing to extract") {
+		t.Errorf("observer run-once output missing expected marker: %s", stdout)
 	}
 
 	// doctor reports the wired state + observer line count

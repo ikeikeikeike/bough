@@ -1,5 +1,117 @@
 # Changelog
 
+## v0.9.0
+
+The "ECC verbatim port" release. v0.5-v0.8 accreted memory backends,
+capability compilers, MCP server, evaluator adapters, judges, evolve
+gates of my own design, and ECC import helpers — none of which the
+operator's vision needs. v0.9 resets to the threecorp ECC reference
+architecture (= upstream affaan-m/everything-claude-code) and ports
+it verbatim into Go so the LLM cost stays inside the operator's
+existing Claude Code subscription. No Anthropic API call, no
+separate billing, no API key.
+
+The user constraint that drove the reset:
+
+> "threecorp ECC はギリギリサブスクリプション内に収まる範囲で hook から
+>  LLM を呼び出している。 API 等々使うとサブスクリプション以外の課金が
+>  されるので、 そういった実装はするな。"
+
+External-AI review (= two independent passes, 2026-06-23) pinned
+Option A′ as the canonical mechanism: `claude --print --output-format
+json --json-schema` as a subprocess, with Go validating the
+structured output and writing the instinct files itself (= ECC
+delegates the Write tool, bough does not, for testability + path-
+traversal safety).
+
+### Removed (= no compatibility shim)
+
+The v0.5-v0.8 surface was deleted wholesale on the v0.9-ecc-port
+reset commit:
+
+- `internal/{judge,evolve,bootstrap,evaluators,ecc}/`
+- `internal/{mcp,capability,export,instinct}/`
+- `cmd/{bough-mcp-server,bough-plugin-memory-sqlite,bough-plugin-memory-mem0}/`
+- `plugins/{memory,capability,db,evaluator,instinct}/`
+- `conformance/{capability,mcp,memory,instinct}/`
+- `pkg/schema/{capability,evidence,instinct,stability,budget}.go`
+- `examples/memory-plugin-*`
+
+If you depend on any of these surfaces, stay on v0.8.1.
+
+### Added
+
+- **`internal/homunculus/`** — the on-disk corpus shape under
+  `~/.local/share/bough-homunculus/` (override via
+  `BOUGH_HOMUNCULUS_DIR` or `XDG_DATA_HOME`). The namespace is
+  intentionally separate from `~/.local/share/ecc-homunculus/` so
+  both systems can coexist. project_id = sha256 first 12 hex of
+  the git remote URL (credentials stripped) or the project root
+  path. RegistryRW.WriteUpsert is atomic + preserves CreatedAt;
+  ReadInstinctFile enforces the filename ↔ frontmatter id match
+  that ECC v3.2 silently violated.
+- **`internal/observe/`** — `observations.jsonl` writer with
+  O_APPEND atomic per-line writes (= multi-goroutine + multi-
+  process safe). `SanitizeAnthropicEnv` strips
+  ANTHROPIC_API_KEY / AUTH_TOKEN / BASE_URL / Bedrock+Vertex
+  twins / CLAUDE_API_KEY from any env slice; the same scrub
+  applies to spawned subprocesses and the `bough doctor` env
+  warning.
+- **`internal/prompts/`** — //go:embed defaults + 3-layer
+  override resolver (`<repo>/.bough/prompts/` >
+  `~/.config/bough/prompts/` > embedded). Template.Version is
+  sha256[:12] of the body so the v0.9.1 GATE 5 cache never mixes
+  overridden and embedded prompts. v0.9.0 only ships the
+  `observer.md` body; stubs hold the slot for v0.9.1's evolve_*
+  templates and the v0.9.2 session-end handler.
+- **`internal/provider/claudecli/`** — Option A′ provider. Spawns
+  `claude -p <prompt> --model haiku --max-turns 4 --output-format
+  json --permission-mode bypassPermissions` with a sanitised env.
+  Retries once on transient failure (= empty stdout / timeout /
+  connection reset / 429); never retries schema violations.
+  Limiter enforces self-DoS: 10 calls/session, 30 calls/hour,
+  3 consecutive failures → 15min cooldown. FakeExec hook lets
+  unit tests run without a real claude binary.
+- **`bough observer run-once`** — synchronous single-shot
+  extraction pass. Resolves project_id from $PWD's git remote,
+  ensures the per-project homunculus subtree exists, reads the
+  tail of observations.jsonl, renders the observer prompt with
+  project + session + window data, calls `claude --print`,
+  validates the structured JSON, and atomically writes each
+  accepted instinct under `<pid>/instincts/personal/`. `--dry-run`
+  prints / saves the rendered prompt without spawning Claude.
+- **`bough instinct status / list / show`** — read-side counterpart.
+  status renders project header + 5-bucket confidence histogram +
+  top-3 most recent. list is filterable + sortable. show prints a
+  single instinct file verbatim.
+- **`bough doctor` — continuous-learning posture block.** New
+  section after the v0.7 hook + observer report: claude CLI
+  presence, Anthropic env scrub (warns when ANTHROPIC_API_KEY
+  etc. are exported in the operator's shell), Self-DoS limiter
+  defaults, homunculus root path.
+
+### Pinned constants
+
+- 5-gate evolve thresholds (= v0.9.1 lands the pipeline using
+  these): MEMBER_MIN=2 / COH_MIN=0.20 / LEXICON_COVERAGE_MAX=0.55
+  / REL_ISOLATION_MIN=0.40 (ECC v3 verbatim).
+- Self-DoS: 10 calls/session, 30/hour, 3-failure breaker, 15min
+  cooldown.
+- Namespace: `~/.local/share/bough-homunculus/`.
+
+### Deferred to v0.9.1 / v0.9.2
+
+- 5-gate evolve pipeline + GATE 5 LLM judge + cluster-labels.json
+  + SKILL.md / agent / command emit (= P9.1 v0.9.1 sprint).
+- `bough inject-context` UserPromptSubmit hook (9.5KB cap + LRU)
+  + SessionEnd handlers (summary / evaluate / evolve-claudemd) +
+  PreCompact + observer daemon mode + `bough ecc import` migration
+  (= P9.2 v0.9.2 sprint).
+
+External-AI consult handover:
+`~/.claude/notes/bough-instinct-generation-handover-2026-06-23.md`
+Plan: `~/.claude/plans/bough-v09-claudecli-port.md`
+
 ## v0.8.0
 
 The "Evaluator adapters + global hook scope" release. v0.8 bundles
