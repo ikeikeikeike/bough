@@ -297,3 +297,42 @@ export:
 		t.Errorf("Export.OutputDir: got %q want %q", got, want)
 	}
 }
+
+// TestLoad_acceptsQualityGates pins the v0.7.1 quality_gates root
+// section so the LegacyConfig superset migration carries each gate
+// declaration through to the canonical Config. The Gate runner
+// (internal/qualitygate) reads from c.QualityGates, so this guard
+// is what makes `bough config validate` accept the new section.
+func TestLoad_acceptsQualityGates(t *testing.T) {
+	yaml := `schema_version: 2
+monorepo_root: "."
+repositories:
+  - name: demo
+    branch_strategy: develop
+registry:
+  path: .bough-ports.json
+quality_gates:
+  - name: typecheck
+    command: "nix develop -c make test-short"
+    on_event: PostToolUse
+    on_tool: Edit
+    on_match: ".*\\.go$"
+    timeout_seconds: 120
+  - name: lint
+    command: "golangci-lint run --new-from-rev=HEAD~1"
+    on_event: PostToolUse
+`
+	c, err := LoadFromBytes([]byte(yaml), "test-v071-quality-gates")
+	if err != nil {
+		t.Fatalf("LoadFromBytes(quality_gates): %v", err)
+	}
+	if got, want := len(c.QualityGates), 2; got != want {
+		t.Fatalf("QualityGates length: got %d want %d", got, want)
+	}
+	if got, want := c.QualityGates[0].Name, "typecheck"; got != want {
+		t.Errorf("QualityGates[0].Name: got %q want %q", got, want)
+	}
+	if got, want := c.QualityGates[0].TimeoutSeconds, 120; got != want {
+		t.Errorf("QualityGates[0].TimeoutSeconds: got %d want %d", got, want)
+	}
+}

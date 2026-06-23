@@ -138,9 +138,15 @@ pair end-to-end.`,
 				return fmt.Errorf("--event is required (e.g. --event PreToolUse)")
 			}
 			if fixture == "" {
-				return fmt.Errorf("--fixture is required (= path to the JSON payload Claude Code would have sent on stdin)")
+				return fmt.Errorf("--fixture is required (= '-' for stdin, or path to a JSON payload file)")
 			}
-			payload, err := os.ReadFile(fixture)
+			var payload []byte
+			var err error
+			if fixture == "-" {
+				payload, err = io.ReadAll(c.InOrStdin())
+			} else {
+				payload, err = os.ReadFile(fixture)
+			}
 			if err != nil {
 				return fmt.Errorf("read fixture %s: %w", fixture, err)
 			}
@@ -160,7 +166,7 @@ pair end-to-end.`,
 		},
 	}
 	cmd.Flags().StringVar(&event, "event", "", "hook event name (e.g. PreToolUse, PostToolUse, SessionEnd)")
-	cmd.Flags().StringVar(&fixture, "fixture", "", "path to a JSON fixture file (e.g. internal/hooks/testdata/pretooluse.json)")
+	cmd.Flags().StringVar(&fixture, "fixture", "", "path to a JSON fixture file (or '-' to read from stdin)")
 	return cmd
 }
 

@@ -88,6 +88,41 @@ absorbs both before the next minor.
 - Experimental compilers ship as community / experimental plugins
   under `examples/`.
 
+## v0.7.1 — Evolve + LLM judge (shipped 2026-06-23)
+
+Layered on top of the v0.7.0 safety floor. Round 5 reviewer
+non-negotiables shaped the sprint: cache + audit + replay are all
+mandatory before any LLM-touching surface ships, and the
+CLAUDE.md write path stays opt-in via `--apply`.
+
+- ✅ `JudgeClient` interface at `plugins/capability/api/llm.go`
+  with three reference impls in `internal/judge/` (Heuristic
+  default, Replay for golden corpus, Claude stub deferred to
+  v0.7.2)
+- ✅ 4-gate Go port (`internal/evolve/`) — Gate 1 schema, Gate 2
+  heuristic filter, Gate 3 Jaccard clustering, Gate 4 candidate
+  stamping. Thresholds match the ECC Python v3 canonical values.
+- ✅ SHA256 cache key + audit dir (`.evolve/judgements/`) with
+  atomic tmp+rename writes and `CachedJudge` read-through wrapper.
+- ✅ JSON schema validation on every `JudgeVerdict` so an invalid
+  LLM response falls through to DOUBT instead of poisoning the
+  cache.
+- ✅ `bough bootstrap --apply` pipeline — runs the evolve pipeline
+  on `.bough/observations.jsonl` and writes PASS candidates into
+  `.claude/skills/<label>.md` atomically. Refuses on dirty
+  `.claude/` (= `--force` overrides); FAIL always skipped; DOUBT
+  requires `--force`.
+- ✅ Quality-gate framework (`internal/qualitygate/`) + new
+  `quality_gates:` root section in `.bough.yaml`. Runner ships;
+  PostToolUse dispatch wires in v0.7.2.
+- ✅ Golden corpus at `internal/evolve/testdata/golden/` — Go-vs-
+  Go regression baseline; Python v3 parity diff deferred to v0.7.2
+  when `bough ecc import` lands.
+- ✅ `bough hook replay --fixture -` supports stdin (= k smoke
+  finding from v0.7.0 post-ship).
+- ✅ `Makefile build` covers all 8 binaries (= v0.7.0 hotfix
+  d25ee97).
+
 ## v0.7.0 — Bootstrap safety floor (shipped 2026-06-23)
 
 The "automation is safe to turn on" floor. Nothing in this release
