@@ -88,6 +88,34 @@ absorbs both before the next minor.
 - Experimental compilers ship as community / experimental plugins
   under `examples/`.
 
+## v0.7.2 — ECC compat + dogfooding bridge (shipped 2026-06-23)
+
+Reads the upstream affaan-m/everything-claude-code corpus so a
+project with 300+ pre-existing instincts can land in bough's
+schemas without re-running the evolve pipeline. Quality-gate
+dispatch wires onto the v0.7.0 hook handle path.
+
+- ✅ `bough ecc import` walks `~/.local/share/ecc-homunculus/`
+  + each `projects/<id>/` and projects instincts / skills /
+  agents / commands onto pkg/schema types. Verified against the
+  local threecorp dogfood corpus: 1072 instincts / 48 skills /
+  6 agents / 116 commands migrate cleanly.
+- ✅ `internal/ecc/` parser handles the four ECC shapes (= YAML
+  frontmatter + body for instincts / skills / agents; body-only
+  with `Evolved from instinct:` line for commands). Catalog
+  files (`INSTINCTS.md` / `MEMORY.md`) skip silently.
+- ✅ Quality-gate dispatch in `bough hook handle` — runner
+  framework lifted from v0.7.1 P1.5 + wired into the
+  PostToolUse path through `.bough.yaml`'s `quality_gates:`
+  section.
+- ✅ Soft-error reporting + sample manifest +
+  `--json instincts.json/skills.json/agents.json/commands.json`
+  outputs so downstream tooling can pipe the projection.
+
+Deferred to v0.8 (= P4): the ECC → memory backend Store loop.
+v0.7.2 ships the read + project pipeline; the persistent write
+side waits on Letta + mem0 reconcile.
+
 ## v0.7.1 — Evolve + LLM judge (shipped 2026-06-23)
 
 Layered on top of the v0.7.0 safety floor. Round 5 reviewer
