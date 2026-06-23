@@ -2,6 +2,47 @@
 
 Round 3 external review (June 2026) settled the v0.5 → v0.6 → v0.7+ shape. This document is the canonical reference; the release CHANGELOG ties specific commits back to each item.
 
+## v0.9.0 — ECC verbatim port (shipped 2026-06-23)
+
+The "reset to the operator's vision" release. v0.5-v0.8 accreted
+memory backends, capability compilers, MCP server, evaluator
+adapters, judges, ECC import helpers — none of which the operator's
+vision needs. v0.9 deletes them and ships threecorp ECC's
+continuous-learning architecture verbatim in Go.
+
+Mechanism: `claude --print` subprocess. No Anthropic API call. LLM
+cost stays inside the operator's existing Claude Code subscription.
+
+- ✅ `internal/homunculus/` — `~/.local/share/bough-homunculus/`
+  layout, project_id (= sha256[:12] of git remote URL stripped),
+  atomic registry, instinct file IO with filename ↔ id enforcement.
+- ✅ `internal/observe/` — `observations.jsonl` writer (O_APPEND
+  per-line atomic) + Anthropic env scrub.
+- ✅ `internal/prompts/` — //go:embed defaults + 3-layer override
+  resolver. Template.Version is sha256[:12] of body for cache
+  pinning.
+- ✅ `internal/provider/claudecli/` — Option A′ subprocess provider
+  + Limiter (10 calls/session, 30/hour, 3-failure breaker, 15min
+  cooldown).
+- ✅ `bough observer run-once` — synchronous single-shot extraction
+  pass with `--dry-run` preview.
+- ✅ `bough instinct status / list / show` — read-side corpus
+  inspection (5-bucket confidence histogram, filterable list).
+- ✅ `bough doctor` — continuous-learning posture block (claude CLI
+  on PATH, Anthropic env scrub warning, Limiter defaults,
+  homunculus root).
+
+v0.9.1 + v0.9.2 (= upcoming):
+
+- 5-gate evolve pipeline (= ECC v3 verbatim, MEMBER_MIN=2 / COH_MIN
+  =0.20 / LEXICON_COVERAGE_MAX=0.55 / REL_ISOLATION_MIN=0.40) +
+  GATE 5 LLM judge + cluster-labels.json + SKILL.md / agent /
+  command emit.
+- `bough inject-context` UserPromptSubmit hook (9.5KB cap +
+  confidence-sorted LRU) + SessionEnd handlers (summary /
+  evaluate / evolve-claudemd) + PreCompact + optional observer
+  daemon + `bough ecc import` migration.
+
 ## v0.5.0 — Foundation
 
 - ✅ 4 plugin contracts frozen (`plugins/{memory,instinct,capability,evaluator}/api/`)
