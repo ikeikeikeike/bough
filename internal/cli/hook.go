@@ -212,7 +212,9 @@ func runDoctor(c *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	report.Render(c.OutOrStdout())
+	w := c.OutOrStdout()
+	report.Render(w)
+	renderContinuousLearningPosture(w)
 	return nil
 }
 
