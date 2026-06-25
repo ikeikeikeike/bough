@@ -1,10 +1,35 @@
 package cli
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// TestEccImport_WarnsOnOrphanProjectDir covers the #32 follow-up: a
+// project dir on disk but absent from projects.json is reported, not
+// silently skipped.
+func TestEccImport_WarnsOnOrphanProjectDir(t *testing.T) {
+	eccRoot := t.TempDir()
+	writeFile(t, filepath.Join(eccRoot, "projects.json"),
+		`{"reg":{"name":"p","root":"/r","remote":""}}`)
+	writeFile(t, filepath.Join(eccRoot, "projects", "reg", "instincts", "personal", "a.md"), "# a")
+	writeFile(t, filepath.Join(eccRoot, "projects", "orphan", "instincts", "personal", "b.md"), "# b")
+
+	cmd := newEccImportCmd()
+	cmd.SetArgs([]string{"--from", eccRoot}) // dry-run default → no homunculus writes
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !strings.Contains(out.String(), "projects/orphan is on disk but not in projects.json") {
+		t.Errorf("missing orphan warning:\n%s", out.String())
+	}
+}
 
 func writeFile(t *testing.T, path, body string) {
 	t.Helper()

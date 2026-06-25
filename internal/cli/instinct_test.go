@@ -71,11 +71,12 @@ func TestRenderStatus_HistogramAndCount(t *testing.T) {
 		mkInstinct("c", "testing", 0.50, now),
 		mkInstinct("d", "git", 0.30, now),
 	}
-	renderStatus(&buf, ident, layout, rows)
+	renderStatus(&buf, ident, layout, rows, make([]error, 2)) // 2 soft (skipped) errors
 	out := buf.String()
 	for _, want := range []string{
 		"project: demo (abc123)",
 		"count:   4",
+		"skipped: 2",
 		"confidence histogram:",
 		"<0.40",
 		"most recent:",

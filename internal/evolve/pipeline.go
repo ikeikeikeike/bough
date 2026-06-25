@@ -61,6 +61,25 @@ type Pipeline struct {
 	Judge      Judge
 	Thresholds Thresholds
 	Now        func() time.Time
+
+	// OnJudge, when set, is invoked once per gate-passing cluster as its
+	// GATE 5 verdict lands, so a multi-minute --generate run streams
+	// progress instead of looking hung. It is a pure callback — the
+	// pipeline writes nothing itself.
+	OnJudge func(JudgeProgress)
+}
+
+// JudgeProgress reports one GATE 5 verdict as it is produced. Err is
+// non-nil when the verdict is an error / rate-limit fallback to DOUBT
+// (= NOT the model's actual decision), so the CLI can tell the operator
+// which DOUBTs were real judgements and which were the judge being
+// unavailable.
+type JudgeProgress struct {
+	Index    int    // 1-based, among gate-passing clusters
+	Sample   string // a representative member id, for a scannable line
+	Members  int    // cluster size
+	Decision string // PASS / DOUBT / FAIL (matches Verdict.Decision)
+	Err      error  // non-nil → verdict is an error/limit fallback to DOUBT
 }
 
 // Run executes discovery → GATE 1-4 → GATE 5 → eligibility checks and
@@ -87,6 +106,7 @@ func (p Pipeline) Run(ctx context.Context, instincts []*homunculus.Instinct, lab
 		ClusterCount:  len(clusters),
 	}
 
+	judged := 0 // gate-passing clusters sent to GATE 5, for progress
 	for _, c := range clusters {
 		gate := EvaluateGatesWithPriorUnion(c, priorUnion, th)
 		if !gate.Passed {
@@ -113,6 +133,18 @@ func (p Pipeline) Run(ctx context.Context, instincts []*homunculus.Instinct, lab
 				Confidence: 0.3,
 				Reason:     "GATE 5 judge errored; surfaced as DOUBT for operator review: " + err.Error(),
 			}
+		}
+
+		judged++
+		if p.OnJudge != nil {
+			sample := ""
+			if len(c.Members) > 0 {
+				sample = c.Members[0].ID
+			}
+			p.OnJudge(JudgeProgress{
+				Index: judged, Sample: sample, Members: len(c.Members),
+				Decision: verdict.Decision, Err: err,
+			})
 		}
 
 		switch verdict.Decision {

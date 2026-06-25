@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **`bough evolve --generate` streams GATE 5 progress** instead of going
+  silent for minutes. Each verdict is now printed as it lands
+  (`[GATE5] 3: grpc-bearer-auth (3 members) → PASS`), and a DOUBT that is
+  really the judge being unavailable (rate-limit / parse) is labelled as
+  such and tallied so the operator can tell it apart from the model's own
+  DOUBT — re-run with a higher `--max-calls` to judge the capped ones.
+- **`bough instinct status` reports skipped instinct files.** A count
+  lower than the `.md` file count (files ScanInstincts dropped for an
+  unreadable body or a filename ≠ frontmatter-id mismatch) now shows a
+  `skipped: N` line instead of leaving the operator to wonder where they
+  went.
+- **`bough ecc import` warns on orphan project dirs.** A `projects/<id>`
+  directory present on disk but absent from `projects.json` is now noted
+  as skipped rather than ignored silently.
+
 ## v0.9.3
 
 The "make the loop actually run" patch. Dogfooding v0.9.2 against a real

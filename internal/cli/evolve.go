@@ -91,16 +91,34 @@ evolved/commands/<slug>.md.`,
 			if err != nil {
 				return err
 			}
+			stderr := cmd.ErrOrStderr()
+			fmt.Fprintln(stderr, "running GATE 5 judge over the gate-passing clusters (claude --print, subscription)…")
+			errCapped := 0
 			pipe := evolve.Pipeline{
 				Judge:      j,
 				Thresholds: th,
 				Now:        time.Now,
+				// Stream each verdict as it lands so a multi-minute run is
+				// not silent, and flag DOUBTs that are really the judge
+				// being unavailable (rate-limit / parse) rather than the
+				// model's decision.
+				OnJudge: func(pr evolve.JudgeProgress) {
+					marker := pr.Decision
+					if pr.Err != nil {
+						errCapped++
+						marker = "DOUBT (judge unavailable — rate-limit/parse, not the model's call)"
+					}
+					fmt.Fprintf(stderr, "  [GATE5] %d: %s (%d members) → %s\n", pr.Index, pr.Sample, pr.Members, marker)
+				},
 			}
 			out, err := pipe.Run(ctx, instincts, labels)
 			if err != nil {
 				return err
 			}
-			return persistEvolveOutcome(stdout, cmd.ErrOrStderr(), ident, layout, labels, labelsPath, out, th, noSymlink, prov)
+			if errCapped > 0 {
+				fmt.Fprintf(stderr, "note: %d cluster(s) could not be LLM-judged (cap/parse) and defaulted to DOUBT — re-run with a higher --max-calls to judge them\n", errCapped)
+			}
+			return persistEvolveOutcome(stdout, stderr, ident, layout, labels, labelsPath, out, th, noSymlink, prov)
 		},
 	}
 	cmd.Flags().StringVar(&root, "root", "", "monorepo root (default: $PWD)")

@@ -68,6 +68,53 @@ func TestPipeline_PassMintsSkill(t *testing.T) {
 	}
 }
 
+func TestPipeline_OnJudgeStreamsProgress(t *testing.T) {
+	var events []JudgeProgress
+	p := Pipeline{
+		Judge: stubJudge{verdict: Verdict{
+			Decision: DecisionPass, Confidence: 0.9,
+			Label: "io-data-layer", Description: "Apply when wrapping I/O",
+		}},
+		OnJudge: func(pr JudgeProgress) { events = append(events, pr) },
+	}
+	labels := &ClusterLabels{Labels: map[string]string{}}
+	if _, err := p.Run(context.Background(), ioInstincts(3), labels); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("OnJudge was never called — a --generate run would look hung")
+	}
+	e := events[0]
+	if e.Index != 1 || e.Decision != DecisionPass || e.Err != nil {
+		t.Errorf("first progress = %+v, want Index 1 / PASS / nil Err", e)
+	}
+	if e.Members == 0 || e.Sample == "" {
+		t.Errorf("progress missing cluster detail: %+v", e)
+	}
+}
+
+func TestPipeline_OnJudgeFlagsJudgeError(t *testing.T) {
+	var events []JudgeProgress
+	p := Pipeline{
+		Judge:   stubJudge{err: context.Canceled}, // judge unavailable
+		OnJudge: func(pr JudgeProgress) { events = append(events, pr) },
+	}
+	labels := &ClusterLabels{Labels: map[string]string{}}
+	if _, err := p.Run(context.Background(), ioInstincts(3), labels); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("OnJudge was never called")
+	}
+	e := events[0]
+	if e.Err == nil {
+		t.Errorf("judge error must set JudgeProgress.Err so the CLI can flag it; got nil")
+	}
+	if e.Decision != DecisionDoubt {
+		t.Errorf("judge error → DOUBT fallback; got %q", e.Decision)
+	}
+}
+
 func TestPipeline_FailRejects(t *testing.T) {
 	p := Pipeline{
 		Judge: stubJudge{verdict: Verdict{Decision: DecisionFail, Confidence: 0.9, Reason: "orthogonal"}},

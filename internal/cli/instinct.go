@@ -40,11 +40,11 @@ func newInstinctStatusCmd() *cobra.Command {
 		Use:   "status",
 		Short: "Print per-project instinct totals + confidence histogram",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ident, layout, instincts, _, err := loadInstinctsForCWD(cmd.Context(), root)
+			ident, layout, instincts, soft, err := loadInstinctsForCWD(cmd.Context(), root)
 			if err != nil {
 				return err
 			}
-			renderStatus(cmd.OutOrStdout(), ident, layout, instincts)
+			renderStatus(cmd.OutOrStdout(), ident, layout, instincts, soft)
 			return nil
 		},
 	}
@@ -54,11 +54,11 @@ func newInstinctStatusCmd() *cobra.Command {
 
 func newInstinctListCmd() *cobra.Command {
 	var (
-		root      string
-		sortBy    string
-		limit     int
-		domain    string
-		minConf   float64
+		root    string
+		sortBy  string
+		limit   int
+		domain  string
+		minConf float64
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -137,12 +137,18 @@ func loadInstinctsForCWD(ctx context.Context, root string) (homunculus.ProjectId
 	return ident, layout, instincts, soft, nil
 }
 
-func renderStatus(w io.Writer, ident homunculus.ProjectIdentity, layout homunculus.Layout, instincts []*homunculus.Instinct) {
+func renderStatus(w io.Writer, ident homunculus.ProjectIdentity, layout homunculus.Layout, instincts []*homunculus.Instinct, soft []error) {
 	fmt.Fprintf(w, "project: %s (%s)\n", ident.Name, ident.ID)
 	fmt.Fprintf(w, "root:    %s\n", ident.Root)
 	fmt.Fprintf(w, "remote:  %s\n", emptyIfBlank(ident.Remote))
 	fmt.Fprintf(w, "store:   %s\n", layout.InstinctsDir(ident.ID))
 	fmt.Fprintf(w, "count:   %d\n", len(instincts))
+	// Surface the files ScanInstincts skipped (unreadable, or filename ≠
+	// frontmatter id) so the operator can reconcile a count that is lower
+	// than the .md file count instead of wondering where they went.
+	if len(soft) > 0 {
+		fmt.Fprintf(w, "skipped: %d (unreadable / filename↔frontmatter-id mismatch)\n", len(soft))
+	}
 	if len(instincts) == 0 {
 		fmt.Fprintln(w, "(no instincts yet — run `bough observer run-once` after the operator records some Claude Code sessions)")
 		return
