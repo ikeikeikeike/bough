@@ -24,14 +24,14 @@ import (
 // the same calls the dogfood team analysed during the design
 // freeze.
 const (
-	DefaultBin             = "claude"
-	DefaultModel           = "haiku"
-	DefaultMaxTurns        = 4
-	DefaultTimeout         = 120 * time.Second
-	DefaultRetryOnce       = true
-	DefaultOutputFormat    = "json"
-	DefaultPermissionMode  = "bypassPermissions"
-	DefaultAllowedTools    = "" // bough rejects the Write tool; the host writes files itself.
+	DefaultBin            = "claude"
+	DefaultModel          = "haiku"
+	DefaultMaxTurns       = 4
+	DefaultTimeout        = 120 * time.Second
+	DefaultRetryOnce      = true
+	DefaultOutputFormat   = "json"
+	DefaultPermissionMode = "bypassPermissions"
+	DefaultAllowedTools   = "" // bough rejects the Write tool; the host writes files itself.
 )
 
 // ErrCLINotFound is returned by Generate when the configured Bin is
@@ -55,15 +55,15 @@ var ErrSchemaViolation = errors.New("claudecli: response did not match schema")
 // Construct via NewProvider; tests override Bin / Now / FakeExec
 // to avoid spawning a real subprocess.
 type Provider struct {
-	Bin             string
-	Model           string
-	MaxTurns        int
-	Timeout         time.Duration
-	OutputFormat    string
-	PermissionMode  string
-	AllowedTools    string
-	JSONSchemaPath  string // optional --json-schema file
-	Limiter         *Limiter
+	Bin            string
+	Model          string
+	MaxTurns       int
+	Timeout        time.Duration
+	OutputFormat   string
+	PermissionMode string
+	AllowedTools   string
+	JSONSchemaPath string // optional --json-schema file
+	Limiter        *Limiter
 
 	// FakeExec, when non-nil, is invoked instead of spawning a
 	// real subprocess. Tests use this to inject canned outputs.
@@ -98,25 +98,25 @@ type GenerateRequest struct {
 // GenerateResult holds the parsed structured output plus the audit
 // metadata bough doctor / `.evolve/judgements/` consume.
 type GenerateResult struct {
-	Raw           []byte           // raw stdout bytes
-	Parsed        map[string]any   // top-level JSON document
-	PromptVersion string           // Template.Version pinned for cache key derivation
-	Model         string           // resolved model id
-	Snapshot      Snapshot         // limiter state after the call
-	Duration      time.Duration    // wall-clock cost
+	Raw           []byte         // raw stdout bytes
+	Parsed        map[string]any // top-level JSON document
+	PromptVersion string         // Template.Version pinned for cache key derivation
+	Model         string         // resolved model id
+	Snapshot      Snapshot       // limiter state after the call
+	Duration      time.Duration  // wall-clock cost
 }
 
 // Generate sends one call to the Claude CLI. The flow is:
 //
-//   1. Acquire a limiter slot. Self-DoS or breaker → return error
-//      without touching the subprocess.
-//   2. Render the template against req.Data via text/template.
-//   3. Spawn `claude -p <prompt> --model <model> --max-turns N
-//      --output-format json [--json-schema path]` with a sanitised
-//      env (= ANTHROPIC_API_KEY etc stripped).
-//   4. Time out at p.Timeout; on transient failure (timeout / empty
-//      stdout / non-zero exit with empty stderr), retry once.
-//   5. Unmarshal the stdout; surface Parsed + Raw + audit metadata.
+//  1. Acquire a limiter slot. Self-DoS or breaker → return error
+//     without touching the subprocess.
+//  2. Render the template against req.Data via text/template.
+//  3. Spawn `claude -p <prompt> --model <model> --max-turns N
+//     --output-format json [--json-schema path]` with a sanitised
+//     env (= ANTHROPIC_API_KEY etc stripped).
+//  4. Time out at p.Timeout; on transient failure (timeout / empty
+//     stdout / non-zero exit with empty stderr), retry once.
+//  5. Unmarshal the stdout; surface Parsed + Raw + audit metadata.
 //
 // FakeExec replaces step 3 for tests.
 func (p *Provider) Generate(ctx context.Context, req GenerateRequest) (*GenerateResult, error) {
@@ -151,7 +151,15 @@ func (p *Provider) Generate(ctx context.Context, req GenerateRequest) (*Generate
 		}
 	}
 
-	parsed, perr := parseJSON(raw)
+	// raw is claude --print's result envelope, not the model's answer
+	// (see ExtractResultJSON). The observer parsed the envelope directly
+	// and found no instincts at its top level; unwrap to .result first.
+	inner, eerr := ExtractResultJSON(raw)
+	if eerr != nil {
+		p.Limiter.RecordFailure()
+		return nil, eerr
+	}
+	parsed, perr := parseJSON(inner)
 	if perr != nil {
 		p.Limiter.RecordFailure()
 		return nil, perr

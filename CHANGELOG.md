@@ -1,9 +1,41 @@
 # Changelog
 
-## Unreleased
+## v0.9.3
+
+The "make the loop actually run" patch. Dogfooding v0.9.2 against a real
+1090-instinct corpus surfaced two defects that left the continuous-
+learning loop inert end-to-end: the ECC importer migrated zero instincts,
+and neither the observer nor the GATE 5 judge could read `claude --print`'s
+output. Both are the same class of bug — a mock/fixture that never matched
+the real shape — and both are fixed here.
 
 ### Fixed
 
+- **Neither the observer nor the GATE 5 judge could read `claude --print`'s
+  output — the whole learning loop was inert.** `claude --print
+  --output-format json` returns a *result envelope* (a stream-event array,
+  or a `{"type":"result","result":"…"}` object), not the model's answer;
+  the model's JSON is a ```json-fenced string nested inside `.result`. Both
+  consumers parsed the envelope directly:
+  - `observer run-once` (`claudecli.Generate` → `parseJSON`) found no
+    `instincts` at the envelope's top level, so it minted **zero**
+    instincts from a real session — the first stage of the loop produced
+    nothing.
+  - `evolve --generate` (`ClaudeJudge.Judge`) unmarshalled the envelope
+    into the `Verdict` struct, every field stayed zero, `ValidateVerdict`
+    failed, and the pipeline mapped the error to DOUBT for **every**
+    cluster — GATE 5's PASS/FAIL/DOUBT decision was discarded and skills
+    were emitted on the mechanical gates alone.
+
+  New `claudecli.ExtractResultJSON` unwraps the envelope (array → result
+  element, or object → `.result`), strips the code fence, and returns the
+  bare model JSON; `Generate` and the evolve judge both route through it.
+  Verified on a real corpus: `evolve --generate` now yields PASS verdicts
+  that mint fresh labels where the broken path produced 31/31 DOUBT. The
+  unit tests fed `FakeExec` a bare JSON object, so the real
+  `--output-format json` shape was never exercised; `extract_test.go` +
+  `TestProvider_Generate_UnwrapsRealEnvelope` now pin the live
+  event-array, single-envelope, bare-object, no-fence and no-result cases.
 - **`bough ecc import` silently migrated zero instincts from a re-keyed
   ECC corpus.** ECC dedups a re-keyed project by symlinking its
   `instincts/`, `memory/` and `evolved/` dirs at the physical project

@@ -26,12 +26,12 @@ import (
 // `/evolve-skill-manual-v3` vs `--generate` UX.
 func newEvolveCmd() *cobra.Command {
 	var (
-		root        string
-		generate    bool
-		judge       string
-		model       string
-		noSymlink   bool
-		maxCalls    int
+		root      string
+		generate  bool
+		judge     string
+		model     string
+		noSymlink bool
+		maxCalls  int
 	)
 	cmd := &cobra.Command{
 		Use:   "evolve",
@@ -221,7 +221,14 @@ func buildEvolveJudge(backend, model string, maxCalls int) (evolve.Judge, *claud
 	}
 	generate := func(ctx context.Context, promptBody string) ([]byte, error) {
 		raw, _, err := prov.GenerateRaw(ctx, promptBody)
-		return raw, err
+		if err != nil {
+			return nil, err
+		}
+		// GenerateRaw returns claude --print's result envelope, not the
+		// model's answer. Unwrap to the inner verdict JSON; without this
+		// every Judge() unmarshalled the envelope into an empty Verdict
+		// and the pipeline fell back to DOUBT for every cluster.
+		return claudecli.ExtractResultJSON(raw)
 	}
 	return evolve.NewClaudeJudge(render, generate), prov, nil
 }
