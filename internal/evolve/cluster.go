@@ -129,7 +129,7 @@ func connectedComponents(members []memberToken, cohMin float64) [][]memberToken 
 	for i := range parent {
 		parent[i] = i
 	}
-	var find func(int) int
+	var find func(int) int //nolint:staticcheck // recursive closure: declaration must precede assignment
 	find = func(x int) int {
 		for parent[x] != x {
 			parent[x] = parent[parent[x]]
