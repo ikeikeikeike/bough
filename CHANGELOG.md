@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **GATE 5 LLM judge never produced a real verdict — every cluster fell
+  back to DOUBT.** `claudecli.GenerateRaw` returns `claude --print
+  --output-format json`'s *result envelope* (a stream-event array, or a
+  `{"type":"result","result":"…"}` object), not the model's answer; the
+  verdict the model returns is a ```json-fenced string nested inside the
+  `result` field. `ClaudeJudge.Judge` unmarshalled that envelope straight
+  into the `Verdict` struct, leaving every field zero → `ValidateVerdict`
+  failed → the pipeline mapped the error to DOUBT for *every* cluster. So
+  `bough evolve --generate` emitted skills purely on the mechanical gates
+  and discarded the LLM's actual PASS/FAIL/DOUBT decision. New
+  `claudecli.ExtractResultJSON` unwraps the envelope (array or object),
+  pulls `.result`, strips the code fence, and hands the bare verdict JSON
+  to the judge. Found by dogfooding a real corpus (31 skills, 100% DOUBT).
+  The unit tests used `FakeExec` with a bare verdict object, so the real
+  `--output-format json` shape was never exercised; `extract_test.go` now
+  pins the live event-array, single-envelope, bare-object, no-fence and
+  no-result-element cases.
+
 ## v0.9.2
 
 The "full loop" release. v0.9.0 shipped the observer (instinct
