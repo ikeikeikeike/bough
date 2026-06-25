@@ -36,12 +36,18 @@ inside the operator's Claude Code subscription. v0.9 hard-caps the
 number of calls per session and per hour to protect the operator's
 interactive session from a runaway observer.`,
 	}
-	cmd.AddCommand(newObserverRunOnceCmd())
+	cmd.AddCommand(
+		newObserverRunOnceCmd(),
+		newObserverStartCmd(),
+		newObserverStopCmd(),
+		newObserverStatusCmd(),
+		newObserverRunDaemonCmd(),
+	)
 	return cmd
 }
 
 const (
-	observerDefaultWindowSize     = 200
+	observerDefaultWindowSize      = 200
 	observerDefaultExistingPreview = 50
 )
 
@@ -383,4 +389,3 @@ func checkInstinctSafety(in *homunculus.Instinct) (string, error) {
 	}
 	return "", nil
 }
-
