@@ -31,11 +31,21 @@ import (
 func TestHooks_EndToEnd_InstallHandleBootstrapDoctorUninstall(t *testing.T) {
 	bin := buildBoughBinary(t)
 	workdir := t.TempDir()
+	// Pin the homunculus the subprocess writes to into a tmpdir. Without
+	// this the real CLI resolves ~/.local/share/bough-homunculus and every
+	// `hook handle` here upserts a TestHooks_EndToEnd_* project into the
+	// operator's live registry (found via dogfooding: the registry had a
+	// dozen /tmp/.../001 turds from past test runs).
+	homDir := t.TempDir()
 
 	run := func(t *testing.T, label string, stdin string, args ...string) (string, string) {
 		t.Helper()
 		cmd := exec.Command(bin, args...)
 		cmd.Dir = workdir
+		// BOUGH_HOMUNCULUS_DIR is NewLayout()'s highest-precedence
+		// override (see internal/homunculus/layout.go), so this keeps the
+		// subprocess corpus inside homDir.
+		cmd.Env = append(os.Environ(), "BOUGH_HOMUNCULUS_DIR="+homDir)
 		if stdin != "" {
 			cmd.Stdin = strings.NewReader(stdin)
 		}
