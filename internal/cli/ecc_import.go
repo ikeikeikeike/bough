@@ -1,0 +1,214 @@
+package cli
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	"github.com/ikeikeikeike/bough/internal/homunculus"
+)
+
+// DefaultECCRoot is the canonical ECC homunculus path. `bough ecc
+// import` reads from here and writes into bough's separate namespace.
+const DefaultECCRoot = "~/.local/share/ecc-homunculus"
+
+// newEccImportCmd wires `bough ecc import` — the migration tool that
+// copies an existing affaan-m/everything-claude-code corpus into
+// bough's `~/.local/share/bough-homunculus/`. The two layouts are
+// structurally identical (= bough mirrored ECC's shape on purpose),
+// so the migration is per-project: copy each project's instincts /
+// cluster-labels / evolved artifacts and re-register it in bough's
+// projects.json.
+//
+// Default is --dry-run: it reports what would be copied without
+// touching bough's namespace. The deliberate namespace separation
+// means an import never clobbers the live ECC corpus.
+func newEccImportCmd() *cobra.Command {
+	var (
+		from   string
+		dryRun bool
+	)
+	cmd := &cobra.Command{
+		Use:   "import",
+		Short: "Migrate an existing ECC homunculus corpus into bough's namespace",
+		Long: `bough ecc import copies an affaan-m/everything-claude-code
+homunculus corpus (default: ~/.local/share/ecc-homunculus) into
+bough's separate ~/.local/share/bough-homunculus/. The ECC corpus is
+never modified — the namespace separation means the two systems keep
+coexisting after the import.
+
+Default is --dry-run; pass --dry-run=false (or --apply) to perform
+the copy.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			eccRoot, err := expandHome(from)
+			if err != nil {
+				return err
+			}
+			if _, err := os.Stat(eccRoot); err != nil {
+				return fmt.Errorf("ecc import: ECC root not found at %s: %w", eccRoot, err)
+			}
+			dst := homunculus.NewLayout()
+			stdout := cmd.OutOrStdout()
+
+			projects, err := readECCProjects(eccRoot)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "ECC root:   %s\n", eccRoot)
+			fmt.Fprintf(stdout, "bough root: %s\n", dst.Root)
+			fmt.Fprintf(stdout, "projects:   %d\n\n", len(projects))
+
+			imported := 0
+			for id, meta := range projects {
+				srcDir := filepath.Join(eccRoot, "projects", id)
+				if _, err := os.Stat(srcDir); err != nil {
+					continue
+				}
+				instCount := countInstincts(filepath.Join(srcDir, "instincts", "personal"))
+				fmt.Fprintf(stdout, "  %s (%s): %d instincts\n", id, meta.Name, instCount)
+				if dryRun {
+					continue
+				}
+				if err := copyProject(srcDir, dst.ProjectDir(id)); err != nil {
+					return fmt.Errorf("ecc import: copy project %s: %w", id, err)
+				}
+				reg := homunculus.NewRegistryRW(dst)
+				if err := reg.WriteUpsert(homunculus.Project{
+					ID: id, Name: meta.Name, Root: meta.Root, Remote: meta.Remote,
+				}); err != nil {
+					return err
+				}
+				imported++
+			}
+
+			if dryRun {
+				fmt.Fprintf(stdout, "\ndry-run: nothing copied. Re-run with --apply to import.\n")
+			} else {
+				fmt.Fprintf(stdout, "\nimported %d projects into %s\n", imported, dst.Root)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&from, "from", DefaultECCRoot, "ECC homunculus root to import from")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", true, "report what would be copied without writing (default true)")
+	// --apply is the inverse of --dry-run for ergonomics.
+	cmd.Flags().BoolFunc("apply", "perform the copy (= --dry-run=false)", func(string) error {
+		dryRun = false
+		return nil
+	})
+	return cmd
+}
+
+type eccProjectMeta struct {
+	Name   string `json:"name"`
+	Root   string `json:"root"`
+	Remote string `json:"remote"`
+}
+
+func readECCProjects(eccRoot string) (map[string]eccProjectMeta, error) {
+	raw, err := os.ReadFile(filepath.Join(eccRoot, "projects.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]eccProjectMeta{}, nil
+		}
+		return nil, fmt.Errorf("ecc import: read projects.json: %w", err)
+	}
+	var out map[string]eccProjectMeta
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("ecc import: parse projects.json: %w", err)
+	}
+	return out, nil
+}
+
+func countInstincts(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".md" {
+			continue
+		}
+		switch e.Name() {
+		case "INSTINCTS.md", "MEMORY.md", "README.md":
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+// copyProject recursively copies the ECC project subtree into bough's
+// project dir. Existing files are overwritten (= a re-import refreshes
+// the corpus). Symlinks in the ECC tree are skipped — bough recreates
+// its own ~/.claude/skills symlinks on the next `bough evolve`.
+func copyProject(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, rerr := filepath.Rel(src, path)
+		if rerr != nil {
+			return rerr
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil // skip symlinks
+		}
+		return copyFile(path, target)
+	})
+}
+
+func copyFile(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	tmp := dst + ".tmp"
+	out, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
+}
+
+func expandHome(p string) (string, error) {
+	if !strings.HasPrefix(p, "~") {
+		return p, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, strings.TrimPrefix(p, "~")), nil
+}
+
+// newEccCmd is the `bough ecc` namespace parent.
+func newEccCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "ecc",
+		Short: "Interoperate with an existing everything-claude-code corpus",
+	}
+	cmd.AddCommand(newEccImportCmd())
+	return cmd
+}
