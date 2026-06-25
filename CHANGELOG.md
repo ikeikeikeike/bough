@@ -4,23 +4,31 @@
 
 ### Fixed
 
-- **GATE 5 LLM judge never produced a real verdict — every cluster fell
-  back to DOUBT.** `claudecli.GenerateRaw` returns `claude --print
-  --output-format json`'s *result envelope* (a stream-event array, or a
-  `{"type":"result","result":"…"}` object), not the model's answer; the
-  verdict the model returns is a ```json-fenced string nested inside the
-  `result` field. `ClaudeJudge.Judge` unmarshalled that envelope straight
-  into the `Verdict` struct, leaving every field zero → `ValidateVerdict`
-  failed → the pipeline mapped the error to DOUBT for *every* cluster. So
-  `bough evolve --generate` emitted skills purely on the mechanical gates
-  and discarded the LLM's actual PASS/FAIL/DOUBT decision. New
-  `claudecli.ExtractResultJSON` unwraps the envelope (array or object),
-  pulls `.result`, strips the code fence, and hands the bare verdict JSON
-  to the judge. Found by dogfooding a real corpus (31 skills, 100% DOUBT).
-  The unit tests used `FakeExec` with a bare verdict object, so the real
-  `--output-format json` shape was never exercised; `extract_test.go` now
-  pins the live event-array, single-envelope, bare-object, no-fence and
-  no-result-element cases.
+- **Neither the observer nor the GATE 5 judge could read `claude --print`'s
+  output — the whole learning loop was inert.** `claude --print
+  --output-format json` returns a *result envelope* (a stream-event array,
+  or a `{"type":"result","result":"…"}` object), not the model's answer;
+  the model's JSON is a ```json-fenced string nested inside `.result`. Both
+  consumers parsed the envelope directly:
+  - `observer run-once` (`claudecli.Generate` → `parseJSON`) found no
+    `instincts` at the envelope's top level, so it minted **zero**
+    instincts from a real session — the first stage of the loop produced
+    nothing.
+  - `evolve --generate` (`ClaudeJudge.Judge`) unmarshalled the envelope
+    into the `Verdict` struct, every field stayed zero, `ValidateVerdict`
+    failed, and the pipeline mapped the error to DOUBT for **every**
+    cluster — GATE 5's PASS/FAIL/DOUBT decision was discarded and skills
+    were emitted on the mechanical gates alone.
+
+  New `claudecli.ExtractResultJSON` unwraps the envelope (array → result
+  element, or object → `.result`), strips the code fence, and returns the
+  bare model JSON; `Generate` and the evolve judge both route through it.
+  Verified on a real corpus: `evolve --generate` now yields PASS verdicts
+  that mint fresh labels where the broken path produced 31/31 DOUBT. The
+  unit tests fed `FakeExec` a bare JSON object, so the real
+  `--output-format json` shape was never exercised; `extract_test.go` +
+  `TestProvider_Generate_UnwrapsRealEnvelope` now pin the live
+  event-array, single-envelope, bare-object, no-fence and no-result cases.
 
 ## v0.9.2
 

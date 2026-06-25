@@ -61,6 +61,26 @@ func TestProvider_Generate_HappyPath(t *testing.T) {
 	}
 }
 
+// TestProvider_Generate_UnwrapsRealEnvelope feeds the shape `claude
+// --print --output-format json` actually emits — a result envelope whose
+// .result holds the model's answer as a fenced string — and asserts
+// Generate unwraps it. Before the fix the observer parsed this envelope
+// directly, found no instincts at its top level, and minted nothing.
+func TestProvider_Generate_UnwrapsRealEnvelope(t *testing.T) {
+	p := NewProvider()
+	p.FakeExec = func(_ context.Context, _ []string, _ []string, _ io.Reader, _ string) ([]byte, error) {
+		return []byte(`{"type":"result","subtype":"success","result":"` + "```json" +
+			`\n{\"instincts\":[{\"id\":\"x\",\"trigger\":\"t\",\"confidence\":0.7,\"domain\":\"workflow\",\"scope\":\"project\",\"action\":\"a\",\"evidence\":[\"e\"]}]}\n` + "```" + `"}`), nil
+	}
+	res, err := p.Generate(context.Background(), GenerateRequest{Template: mkTpl("x")})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if res.Parsed["instincts"] == nil {
+		t.Errorf("envelope was not unwrapped — Parsed missing instincts: %+v", res.Parsed)
+	}
+}
+
 func TestProvider_Generate_RetriesOnEmptyOutput(t *testing.T) {
 	p := NewProvider()
 	calls := 0
