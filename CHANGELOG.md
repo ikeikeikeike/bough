@@ -29,6 +29,26 @@
   `--output-format json` shape was never exercised; `extract_test.go` +
   `TestProvider_Generate_UnwrapsRealEnvelope` now pin the live
   event-array, single-envelope, bare-object, no-fence and no-result cases.
+- **`bough ecc import` silently migrated zero instincts from a re-keyed
+  ECC corpus.** ECC dedups a re-keyed project by symlinking its
+  `instincts/`, `memory/` and `evolved/` dirs at the physical project
+  that still holds the files (`projects/<new-id>/instincts ->
+  ../<old-id>/instincts`). The importer skipped every symlink, so
+  `--apply` reported "1090 instincts" — the count probe reads *through*
+  the link — yet copied none, and `bough evolve` / `inject-context`
+  then saw an empty corpus. Directory symlinks are now followed and
+  materialised as real files; a symlink to a file is copied by value; a
+  dangling link is skipped rather than aborting the migration. Found by
+  dogfooding against a real 1090-instinct corpus. The import path had
+  no test coverage before — `internal/cli/ecc_import_test.go` now pins
+  the dedup-symlink, file-symlink, dangling-symlink and
+  catalog-exclusion cases.
+- **The hooks conformance test polluted the operator's live registry.**
+  `conformance/hooks` drove the real binary without
+  `BOUGH_HOMUNCULUS_DIR`, so every run upserted a `TestHooks_EndToEnd_*`
+  project (rooted at a since-deleted `/tmp/.../001`) into
+  `~/.local/share/bough-homunculus/projects.json`. The subprocess env
+  now pins the corpus to a tmpdir.
 
 ## v0.9.2
 

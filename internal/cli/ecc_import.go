@@ -144,11 +144,31 @@ func countInstincts(dir string) int {
 	return n
 }
 
+// maxSymlinkDepth caps how deep copyProject follows nested directory
+// symlinks so a pathological symlink cycle in a corpus cannot spin the
+// import forever. ECC's real layout nests a single level (a re-keyed
+// project's dirs link to the one physical project that holds the
+// files), so 32 is far beyond any legitimate corpus.
+const maxSymlinkDepth = 32
+
 // copyProject recursively copies the ECC project subtree into bough's
 // project dir. Existing files are overwritten (= a re-import refreshes
-// the corpus). Symlinks in the ECC tree are skipped — bough recreates
-// its own ~/.claude/skills symlinks on the next `bough evolve`.
+// the corpus).
+//
+// Directory symlinks are FOLLOWED, not skipped: ECC dedups storage by
+// symlinking a re-keyed project's instincts/, memory/ and evolved/
+// dirs at the physical project that still holds the files (e.g.
+// projects/<new-id>/instincts -> ../<old-id>/instincts). Skipping those
+// links silently dropped the entire corpus while the count probe — which
+// reads *through* the link — still reported thousands of instincts, so
+// `import --apply` looked like a success yet migrated nothing. A
+// dangling link (e.g. a stale ~/.claude/skills entry pointing outside
+// the tree) is skipped rather than failing the whole import.
 func copyProject(src, dst string) error {
+	return copyTree(src, dst, 0)
+}
+
+func copyTree(src, dst string, depth int) error {
 	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -162,10 +182,33 @@ func copyProject(src, dst string) error {
 			return os.MkdirAll(target, 0o755)
 		}
 		if d.Type()&os.ModeSymlink != 0 {
-			return nil // skip symlinks
+			return copySymlink(path, target, depth)
 		}
 		return copyFile(path, target)
 	})
+}
+
+// copySymlink resolves a symlink and copies the content it points at: a
+// symlink to a directory is walked as if it were a real subtree (the ECC
+// dedup case); a symlink to a file is copied by value (copyFile opens
+// through the link); a dangling or unreadable link is skipped so one bad
+// link never aborts the migration.
+func copySymlink(path, target string, depth int) error {
+	if depth >= maxSymlinkDepth {
+		return fmt.Errorf("ecc import: symlink nesting exceeds %d at %s", maxSymlinkDepth, path)
+	}
+	info, err := os.Stat(path) // Stat follows the link; Lstat would not
+	if err != nil {
+		return nil // dangling / unreadable → skip, don't fail the import
+	}
+	if info.IsDir() {
+		real, rerr := filepath.EvalSymlinks(path)
+		if rerr != nil {
+			return nil
+		}
+		return copyTree(real, target, depth+1)
+	}
+	return copyFile(path, target)
 }
 
 func copyFile(src, dst string) error {
