@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/template"
@@ -102,14 +103,21 @@ func newObserverRunOnceCmd() *cobra.Command {
 				return err
 			}
 
-			obsPath := layout.ObservationsFile(ident.ID)
-			observations, err := observe.TailN(obsPath, windowSize)
-			if err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("observer run-once: read %s: %w", obsPath, err)
+			// Read BOTH the hook inbox (<root>/.bough/observations.jsonl,
+			// where `bough hook handle` appends on every tool use) and the
+			// homunculus archive (where `bough ecc import` writes). Before
+			// v0.9.5 only the archive was read, so observations captured by
+			// the live hook were never minted (the loop's entry point was
+			// disconnected).
+			archivePath := layout.ObservationsFile(ident.ID)
+			inboxPath := filepath.Join(cwd, ".bough", "observations.jsonl")
+			observations, err := observe.TailNMerged(windowSize, archivePath, inboxPath)
+			if err != nil {
+				return fmt.Errorf("observer run-once: read observations: %w", err)
 			}
 			stdout := cmd.OutOrStdout()
 			if len(observations) == 0 {
-				fmt.Fprintf(stdout, "no observations under %s — nothing to extract\n", obsPath)
+				fmt.Fprintf(stdout, "no observations under %s or %s — nothing to extract\n", inboxPath, archivePath)
 				return nil
 			}
 

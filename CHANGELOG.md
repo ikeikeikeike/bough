@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.9.5
+
+### Fixed
+
+- **CRITICAL: the live observe → mint loop was disconnected.** The
+  PostToolUse hook appends observations to `<root>/.bough/observations.jsonl`
+  (the inbox), but `observer run-once` read only the homunculus archive
+  (`~/.local/share/bough-homunculus/projects/<id>/observations.jsonl`),
+  which the hook never writes. So `observer run-once` always reported "no
+  observations" and minted nothing from real hook-captured data — the
+  primary accumulation path for any user. It was masked because the only
+  corpus that ever minted (`bough ecc import`) writes the homunculus
+  archive directly, bypassing the hook. `observer run-once` now reads
+  **both** sources via `observe.TailNMerged` (hook inbox + import archive,
+  merged, tail-windowed); a missing source is skipped. Found by dogfooding
+  a from-scratch monorepo: a real repo had 330 hook-captured observations
+  in `.bough/observations.jsonl` that the observer could never see.
+
 ## v0.9.4
 
 Dogfooding observability follow-ups to v0.9.3: streaming GATE 5 progress
