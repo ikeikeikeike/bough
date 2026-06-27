@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.9.4
+
+Dogfooding observability follow-ups to v0.9.3: streaming GATE 5 progress
+and surfacing the counts (skipped instincts, orphan project dirs, capped
+judgements) that were previously silent.
 
 ### Changed
 
