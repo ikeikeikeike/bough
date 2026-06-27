@@ -1,5 +1,45 @@
 # Changelog
 
+## v0.9.6
+
+### Fixed
+
+- **CRITICAL: the live observe → mint loop rendered hollow prompts —
+  every extraction pass minted zero instincts.** `bough hook handle`
+  stores each Claude Code event verbatim under an envelope
+  `{"ts","event","payload":{…}}`, with the tool name / input / cwd /
+  session id nested inside `payload` under Claude Code's own field names
+  (`tool_name`, `tool_response`). But the observer's `Observation`
+  struct only declared the *flat* schema (`tool`, `tool_input`, `cwd`
+  at top level) that `observe.Writer.Append` / `bough ecc import` emit,
+  so unmarshalling a hook-captured record bound only `ts` + `event` and
+  dropped everything else. `buildObserverData` then re-marshalled those
+  hollow records into the prompt, so Claude received a window of
+  `{"ts","event"}` lines with no substance and correctly minted
+  nothing. Same class as the v0.9.3 / v0.9.5 "loop inert" bugs (a reader
+  that never matched the writer's real shape), and the last blocker for
+  the observe → mint half of the loop on any live-hook corpus — masked
+  because the only corpus that ever minted (`bough ecc import`) writes
+  the flat schema directly. `Observation.UnmarshalJSON` now reads
+  **both** shapes: the nested Claude Code payload backfills whatever the
+  flat layer leaves empty (`tool_name` → Tool, `tool_response` →
+  ToolOutput, plus cwd / session_id and a new `prompt` field for
+  UserPromptSubmit). Found by dogfooding the loop on a real 630-record
+  hook corpus: every record rendered as `{ts,event}` and the pass
+  emitted 0; after the fix the same corpus minted a correct instinct.
+
+### Changed
+
+- **The observation slice sent to Claude is now field-capped.** Making
+  the hook corpus readable also made every record carry its full
+  `tool_input` / `tool_response`; a 200-record window of raw shell
+  output ballooned the rendered prompt ~25× (16 KB → 400 KB).
+  `renderObservationLine` keeps the identity fields whole (ts / event /
+  tool / cwd / session_id) and previews each free-form field to
+  `maxRenderedFieldBytes` (512), holding the same window to ~145 KB so a
+  fuller window cannot blow Haiku's context and silently regress the
+  loop back to zero instincts.
+
 ## v0.9.5
 
 ### Fixed

@@ -58,6 +58,87 @@ type Observation struct {
 	// CWD is the working directory at hook-fire time, used by the
 	// observer to scope per-project analysis.
 	CWD string `json:"cwd,omitempty"`
+
+	// Prompt is the user's submitted text on a UserPromptSubmit
+	// event (empty for tool events). The observer mines it for the
+	// "user corrections of your own tool use" pattern the extraction
+	// prompt explicitly asks for.
+	Prompt string `json:"prompt,omitempty"`
+}
+
+// claudeHookPayload is the subset of the Claude Code hook event JSON
+// that `bough hook handle` stores verbatim under the envelope's
+// "payload" key. Claude Code names the tool `tool_name` and the
+// result `tool_response`, and nests session_id / cwd / tool_input /
+// prompt inside the payload — none of which line up with the flat
+// Observation field names. UnmarshalJSON below maps them across.
+type claudeHookPayload struct {
+	SessionID    string          `json:"session_id"`
+	CWD          string          `json:"cwd"`
+	ToolName     string          `json:"tool_name"`
+	ToolInput    json.RawMessage `json:"tool_input"`
+	ToolResponse json.RawMessage `json:"tool_response"`
+	Prompt       string          `json:"prompt"`
+}
+
+// UnmarshalJSON decodes both observation record shapes into the flat
+// Observation:
+//
+//   - the envelope shape `bough hook handle` writes for live Claude
+//     Code hooks — {"ts","event","payload":{"tool_name",…}} — where
+//     the tool / cwd / session live nested under "payload" using
+//     Claude Code's own field names (tool_name, tool_response);
+//   - the flat shape `observe.Writer.Append` and `bough ecc import`
+//     write — {"ts","event","tool","tool_input",…} at top level.
+//
+// Without this, the observer bound only ts+event from a hook-captured
+// corpus (the "payload" object was ignored and tool_name was never
+// mapped to Tool), so every extraction pass saw a slice of {ts,event}
+// records with no substance and Claude correctly minted zero
+// instincts. Flat fields win when present; the nested payload
+// backfills whatever the flat layer left empty so neither producer
+// leaves the observer blind.
+func (o *Observation) UnmarshalJSON(b []byte) error {
+	// The alias sheds Observation's UnmarshalJSON method so the inner
+	// decode does not recurse into this function.
+	type rawObservation Observation
+	var env struct {
+		rawObservation
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(b, &env); err != nil {
+		return err
+	}
+	*o = Observation(env.rawObservation)
+	if len(env.Payload) == 0 || string(env.Payload) == "null" {
+		return nil
+	}
+	var p claudeHookPayload
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		// A non-object payload (Claude Code spec drift, or a bare
+		// primitive) must not abort the whole read — the
+		// envelope-level ts/event are already set above.
+		return nil
+	}
+	if o.SessionID == "" {
+		o.SessionID = p.SessionID
+	}
+	if o.CWD == "" {
+		o.CWD = p.CWD
+	}
+	if o.Tool == "" {
+		o.Tool = p.ToolName
+	}
+	if len(o.ToolInput) == 0 {
+		o.ToolInput = p.ToolInput
+	}
+	if len(o.ToolOutput) == 0 {
+		o.ToolOutput = p.ToolResponse
+	}
+	if o.Prompt == "" {
+		o.Prompt = p.Prompt
+	}
+	return nil
 }
 
 // Writer appends Observations to the per-project observations.jsonl

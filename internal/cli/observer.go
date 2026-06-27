@@ -207,8 +207,7 @@ func buildObserverData(ident homunculus.ProjectIdentity, observations []observe.
 		if last.IsZero() || o.TS.After(last) {
 			last = o.TS
 		}
-		line, _ := json.Marshal(o)
-		b.Write(line)
+		b.Write(renderObservationLine(o))
 		b.WriteByte('\n')
 	}
 	// build a short, deduplicated existing-id preview so the LLM
@@ -242,6 +241,68 @@ func buildObserverData(ident homunculus.ProjectIdentity, observations []observe.
 		Observations: b.String(),
 		ExistingIDs:  existingBlock,
 	}
+}
+
+// maxRenderedFieldBytes bounds each free-form field (tool_input,
+// tool_output, prompt) in the observation slice sent to Claude. The
+// fix that made the live-hook corpus readable (= mapping the nested
+// payload's tool_name / tool_input / tool_response across to the flat
+// Observation) also made every record carry its full tool_input and
+// tool_response; a 200-record window of raw shell output ballooned the
+// rendered prompt ~25x (16KB → 400KB). Capping each free-form field
+// keeps a pattern-identifying preview while holding the prompt to a
+// few tens of KB so a fuller window cannot blow Haiku's context and
+// silently regress the loop back to zero instincts.
+const maxRenderedFieldBytes = 512
+
+// renderObservationLine marshals one observation for the prompt slice
+// with its free-form fields capped. Identity fields (ts / event /
+// tool / cwd / session_id) are kept whole because they are small and
+// are the primary mining signal; tool_input / tool_output / prompt are
+// previewed so a single huge tool_response cannot dominate the prompt.
+func renderObservationLine(o observe.Observation) []byte {
+	m := map[string]any{
+		"ts":    o.TS.UTC().Format(time.RFC3339Nano),
+		"event": o.Event,
+	}
+	if o.SessionID != "" {
+		m["session_id"] = o.SessionID
+	}
+	if o.Tool != "" {
+		m["tool"] = o.Tool
+	}
+	if o.CWD != "" {
+		m["cwd"] = o.CWD
+	}
+	if len(o.ToolInput) > 0 {
+		m["tool_input"] = previewRawJSON(o.ToolInput)
+	}
+	if len(o.ToolOutput) > 0 {
+		m["tool_output"] = previewRawJSON(o.ToolOutput)
+	}
+	if o.Prompt != "" {
+		m["prompt"] = truncatePreview(o.Prompt)
+	}
+	line, _ := json.Marshal(m)
+	return line
+}
+
+// previewRawJSON keeps a small raw JSON value verbatim (so it stays
+// valid JSON in the slice) but replaces an oversized one with a
+// truncated string preview so a single huge tool_response cannot
+// dominate the prompt.
+func previewRawJSON(r json.RawMessage) any {
+	if len(r) <= maxRenderedFieldBytes {
+		return r
+	}
+	return string(r[:maxRenderedFieldBytes]) + "…(truncated)"
+}
+
+func truncatePreview(s string) string {
+	if len(s) <= maxRenderedFieldBytes {
+		return s
+	}
+	return s[:maxRenderedFieldBytes] + "…(truncated)"
 }
 
 func formatTS(t time.Time) string {
