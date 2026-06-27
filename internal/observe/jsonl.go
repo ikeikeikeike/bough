@@ -145,6 +145,34 @@ func TailN(path string, n int) ([]Observation, error) {
 	return all[len(all)-n:], nil
 }
 
+// TailNMerged returns the last n observations across several files,
+// concatenated in the order given. One observer pass can therefore
+// consume both the hook's project-local inbox
+// (<root>/.bough/observations.jsonl, where `bough hook handle` appends
+// on every tool use) and the homunculus archive (where `bough ecc
+// import` writes). A missing file is skipped — either producer may
+// legitimately not have run yet — so only a real read error aborts.
+func TailNMerged(n int, paths ...string) ([]Observation, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+	var all []Observation
+	for _, p := range paths {
+		obs, err := ReadAll(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		all = append(all, obs...)
+	}
+	if len(all) <= n {
+		return all, nil
+	}
+	return all[len(all)-n:], nil
+}
+
 func parseLines(raw []byte) []Observation {
 	out := []Observation{}
 	start := 0
