@@ -24,6 +24,47 @@ requires editing the host binary.
 
 [services-flake]: https://github.com/juspay/services-flake
 
+## Cost & billing
+
+**As of 2026-06-27, with Claude Code's current subscription model, bough
+runs entirely inside your existing Claude Code subscription — it makes no
+separate Anthropic API call and incurs no separate API billing.** How
+that holds up:
+
+- **The worktree-isolation core** (`bough create`, the engine plugins,
+  `.env.local` rendering) makes **zero** LLM calls — it is pure local
+  infrastructure (git, ports, Nix/Docker).
+- **The continuous-learning feature** (observe → evolve → inject) reaches
+  an LLM **only** by spawning `claude --print` as a subprocess, which
+  reuses your operator subscription auth (`~/.claude.json` oauth token).
+  bough strips `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` /
+  `ANTHROPIC_BASE_URL` / Bedrock / Vertex / `CLAUDE_API_KEY` from the
+  subprocess env, so it cannot silently flip to API-key billing. There is
+  no Anthropic SDK, and no HTTP client to any model endpoint, anywhere in
+  the binary.
+- **The hooks Claude Code fires automatically** — `PreToolUse`,
+  `PostToolUse`, `UserPromptSubmit`, `Stop`, `SessionEnd`, `PreCompact` —
+  are **pure filesystem**: they append an observation line and (for
+  `UserPromptSubmit`) print a small instinct block to stdout. They make
+  **no** LLM call. The `UserPromptSubmit` block is folded into your next
+  turn as ordinary input tokens of your own session — the same as any
+  context — not a separate charge.
+- **LLM calls happen only in the explicit commands** `bough observer
+  run-once` and `bough evolve --generate` (and the opt-in `bough observer
+  start` daemon) — each one `claude --print` under your subscription, hard
+  rate-limited (10 / session, 30 / hour, 3-failure circuit breaker).
+
+Run `bough doctor` to confirm the posture (it warns if an
+`ANTHROPIC_API_KEY`-style variable in your shell would override
+subscription auth).
+
+> ⚠️ This reflects Claude Code's billing model **as of 2026-06-27**. bough
+> relies on `claude --print` subprocess invocations being covered by the
+> Claude Code subscription. If Anthropic changes how Claude Code meters
+> `--print` / subscription usage, this could change — that is outside
+> bough's control, so verify against current Claude Code pricing if it
+> matters to you.
+
 ## Prerequisites
 
 bough binaries themselves are static Go executables (darwin / linux,
