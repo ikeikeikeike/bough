@@ -86,6 +86,23 @@ the copy.`,
 				imported++
 			}
 
+			// Warn on project dirs present on disk but absent from
+			// projects.json. After an ECC re-key the old physical id is
+			// usually unregistered and reached only via a registered
+			// project's symlink (so its instincts still import); but a
+			// genuinely standalone orphan would otherwise be dropped with
+			// no signal.
+			if entries, derr := os.ReadDir(filepath.Join(eccRoot, "projects")); derr == nil {
+				for _, e := range entries {
+					if !e.IsDir() {
+						continue
+					}
+					if _, registered := projects[e.Name()]; !registered {
+						fmt.Fprintf(stdout, "  note: projects/%s is on disk but not in projects.json — skipped (orphan)\n", e.Name())
+					}
+				}
+			}
+
 			if dryRun {
 				fmt.Fprintf(stdout, "\ndry-run: nothing copied. Re-run with --apply to import.\n")
 			} else {
