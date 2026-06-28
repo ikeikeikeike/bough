@@ -199,14 +199,23 @@ type InstinctConfig struct {
 	// operation. Production teams using mem0 / Graphiti typically
 	// want `true` so a transient network blip does not block a CI
 	// run; users debugging an external backend may want `false`.
-	FallbackOnError bool                   `yaml:"fallback_on_error"`
-	Scopes          InstinctScopes         `yaml:"scopes"`
-	Mint            InstinctMint           `yaml:"mint"`
-	Retrieve        InstinctRetrieve       `yaml:"retrieve"`
-	Confidence      InstinctConfidence     `yaml:"confidence"`
-	PoisoningGuard  InstinctPoisoningGuard `yaml:"poisoning_guard"`
-	Observer        InstinctObserver       `yaml:"observer"`
-	PluginSecurity  InstinctPluginSecurity `yaml:"plugin_security"`
+	FallbackOnError bool `yaml:"fallback_on_error"`
+	// EvolveClaudeMDOnSessionEnd, when true, makes the SessionEnd hook
+	// ALSO run `session-evolve-claudemd --write` so CLAUDE.md proposals
+	// land in <monorepoRoot>/.claude/claudemd-proposals.md automatically
+	// (= threecorp ECC's evolve-claudemd.sh SessionEnd behavior). It is
+	// opt-in (default false) because, unlike bough's other hook actions
+	// which write only to the homunculus, this writes into the repo
+	// working tree — so the no-contamination default is preserved unless
+	// the operator explicitly turns it on. Pure filesystem; no LLM.
+	EvolveClaudeMDOnSessionEnd bool                   `yaml:"evolve_claudemd_on_session_end"`
+	Scopes                     InstinctScopes         `yaml:"scopes"`
+	Mint                       InstinctMint           `yaml:"mint"`
+	Retrieve                   InstinctRetrieve       `yaml:"retrieve"`
+	Confidence                 InstinctConfidence     `yaml:"confidence"`
+	PoisoningGuard             InstinctPoisoningGuard `yaml:"poisoning_guard"`
+	Observer                   InstinctObserver       `yaml:"observer"`
+	PluginSecurity             InstinctPluginSecurity `yaml:"plugin_security"`
 }
 
 // InstinctScopes toggles which of the three scope tiers the

@@ -2,12 +2,16 @@ package cli
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
+	"github.com/ikeikeikeike/bough/internal/config"
 	"github.com/ikeikeikeike/bough/internal/homunculus"
 )
 
@@ -117,6 +121,63 @@ func TestRunEvolveClaudeMD_PreviewAndWrite(t *testing.T) {
 	if !strings.Contains(string(body), "### ADD — high-conf-rule") {
 		t.Errorf("proposals file missing ADD:\n%s", body)
 	}
+}
+
+// TestDispatchEvolveClaudeMD_OptIn is the v0.9.14 gate: the SessionEnd
+// dispatch writes .claude/claudemd-proposals.md ONLY when the monorepo's
+// .bough.yaml opts in via instinct.evolve_claudemd_on_session_end. Off
+// (the default) must leave the repo working tree untouched.
+func TestDispatchEvolveClaudeMD_OptIn(t *testing.T) {
+	const baseCfg = `schema_version: 1
+monorepo_root: "."
+repositories:
+  - name: demo-api
+    branch_strategy: develop
+registry:
+  path: ".worktree-ports.json"
+instinct:
+  enabled: true
+`
+	run := func(t *testing.T, flagOn bool) string {
+		t.Helper()
+		t.Setenv("BOUGH_HOMUNCULUS_DIR", t.TempDir())
+		repo := t.TempDir()
+		cfg := baseCfg
+		if flagOn {
+			cfg += "  evolve_claudemd_on_session_end: true\n"
+		}
+		if err := os.WriteFile(filepath.Join(repo, ".bough.yaml"), []byte(cfg), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// precondition: the fixture must be a valid config, else the gate
+		// test would pass for the wrong reason (early return on load error).
+		if _, err := config.Load(filepath.Join(repo, ".bough.yaml")); err != nil {
+			t.Fatalf("test fixture .bough.yaml is invalid: %v", err)
+		}
+		ident, err := homunculus.DetectIdentity(repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeProjInstinct(t, homunculus.NewLayout(), ident.ID, "top-rule", 0.85)
+		t.Chdir(repo)
+		cmd := &cobra.Command{}
+		cmd.SetOut(io.Discard)
+		dispatchEvolveClaudeMD(cmd)
+		return repo
+	}
+
+	t.Run("opt-in on writes proposals", func(t *testing.T) {
+		repo := run(t, true)
+		if _, err := os.Stat(filepath.Join(repo, ".claude", "claudemd-proposals.md")); err != nil {
+			t.Errorf("flag on: proposals file not written: %v", err)
+		}
+	})
+	t.Run("opt-in off writes nothing", func(t *testing.T) {
+		repo := run(t, false)
+		if _, err := os.Stat(filepath.Join(repo, ".claude", "claudemd-proposals.md")); !os.IsNotExist(err) {
+			t.Errorf("flag off: a file was written into the repo (stat err=%v)", err)
+		}
+	})
 }
 
 func ids(in []*homunculus.Instinct) []string {

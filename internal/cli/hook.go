@@ -225,8 +225,8 @@ func runDoctor(c *cobra.Command) error {
 // raw-event capture dispatcher. Claude Code invokes this command
 // (one per registered hook entry, per the install layout) with
 // the event name on the --event flag and the JSON payload on
-// stdin; the dispatcher appends one JSONL record to
-// `.bough/observations.jsonl` and exits cleanly.
+// stdin; the dispatcher appends one JSONL record to the central
+// homunculus observations.jsonl and exits cleanly.
 //
 // Hidden from the human surface because Claude Code is the only
 // expected caller — wrapping it in a `bough hook` namespace lets
@@ -248,7 +248,7 @@ func newHookHandleCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    "handle",
 		Hidden: true,
-		Short:  "Receive a Claude Code hook event payload via stdin and append to .bough/observations.jsonl",
+		Short:  "Receive a Claude Code hook event payload via stdin and append to the central homunculus observations.jsonl",
 		RunE: func(c *cobra.Command, _ []string) error {
 			if event == "" {
 				return fmt.Errorf("--event is required (= called by Claude Code's settings.json wiring; see `bough hook install`)")
@@ -333,6 +333,7 @@ func newHookHandleCmd() *cobra.Command {
 				dispatchInjectContext(c)
 			case string(hooks.EventSessionEnd):
 				_ = runSessionEnd(c.OutOrStdout(), "", "", sessionEndDefaultWindow)
+				dispatchEvolveClaudeMD(c)
 			case string(hooks.EventPreCompact):
 				_ = runPreserveInstincts(c.OutOrStdout(), "")
 			}
@@ -340,7 +341,7 @@ func newHookHandleCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&event, "event", "", "Claude Code hook event name (e.g. PreToolUse)")
-	cmd.Flags().StringVar(&outPath, "out", "", "observation log path (default: .bough/observations.jsonl)")
+	cmd.Flags().StringVar(&outPath, "out", "", "observation log path (default: the resolved monorepo project's homunculus observations.jsonl)")
 	return cmd
 }
 
@@ -432,6 +433,35 @@ func dispatchInjectContext(c *cobra.Command) {
 		return
 	}
 	fmt.Fprint(c.OutOrStdout(), block)
+}
+
+// dispatchEvolveClaudeMD runs the CLAUDE.md proposer in write mode on
+// SessionEnd, but ONLY when the monorepo's .bough.yaml sets
+// instinct.evolve_claudemd_on_session_end: true. This is the single hook
+// action that writes into the repo working tree
+// (<monorepoRoot>/.claude/claudemd-proposals.md), so it is opt-in: every
+// other bough hook action writes only to the homunculus, and that
+// no-contamination default is preserved unless the operator turns it on
+// (= threecorp ECC's automatic evolve-claudemd.sh, made explicit). The
+// config is read from the resolved monorepo root so a sub-repo / worktree
+// session still finds it. Best-effort + pure filesystem: missing config /
+// flag off / resolution errors are silently skipped so SessionEnd never
+// fails the operator's session.
+func dispatchEvolveClaudeMD(c *cobra.Command) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return
+	}
+	root := resolveMonorepoRoot(cwd)
+	cfgPath := filepath.Join(root, ".bough.yaml")
+	if v := os.Getenv("BOUGH_CONFIG"); v != "" {
+		cfgPath = v
+	}
+	cfg, err := loadConfigQuiet(cfgPath)
+	if err != nil || !cfg.Instinct.EvolveClaudeMDOnSessionEnd {
+		return
+	}
+	_ = runEvolveClaudeMD(c.OutOrStdout(), root, "", true, time.Now())
 }
 
 // dispatchQualityGates loads .bough.yaml's quality_gates: section
