@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.9.10
+
+### Changed
+
+- **Observations now live in the central homunculus, never the repo
+  working tree (ECC parity).** `bough hook handle` previously wrote
+  `<cwd>/.bough/observations.jsonl` relative to the session cwd, so a
+  `.bough/` sprouted in every repo / sub-repo / worktree a Claude Code
+  session ran in, and observations fragmented across dozens of tiny
+  files too sparse to cluster. It now resolves the monorepo root — a
+  session inside `.worktrees/` maps to its parent; otherwise walk up to
+  the nearest `.bough.yaml` — and appends to that project's homunculus
+  observations file (`~/.local/share/bough-homunculus/projects/<id>/`),
+  exactly like upstream ECC's `observe.sh` + `observe-wrapper.sh` (which
+  rewrite the hook cwd to the monorepo root so every sub-repo pools into
+  one project). Result: zero working-tree pollution, and all sub-repos /
+  worktrees pool into one rich per-monorepo corpus. An explicit `--out`
+  still overrides (replay / conformance), and capture is best-effort —
+  a write failure never fails the operator's tool call. Verified by
+  dogfooding: a `hook handle` fired from a sub-repo wrote the monorepo's
+  homunculus file and created no `<sub-repo>/.bough/`.
+
 ## v0.9.9
 
 ### Fixed

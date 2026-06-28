@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -267,35 +268,38 @@ func newHookHandleCmd() *cobra.Command {
 					return fmt.Errorf("payload is not valid JSON: %w", err)
 				}
 			}
+			// ECC model (v0.9.10): observations live in the central
+			// homunculus (~/.local/share/bough-homunculus/projects/<id>/),
+			// NEVER in the repo working tree, and every sub-repo / worktree
+			// session pools into the one monorepo project — mirroring
+			// threecorp's observe-wrapper.sh, which rewrites the hook cwd to
+			// the monorepo root. An explicit --out still wins (replay /
+			// conformance). Capture is best-effort: a write failure must
+			// never fail the operator's tool call.
 			if outPath == "" {
-				outPath = filepath.Join(".bough", "observations.jsonl")
+				outPath = resolveHomunculusObsPath()
 			}
-			if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
-				return fmt.Errorf("mkdir %s: %w", filepath.Dir(outPath), err)
-			}
-			record := struct {
-				TS      string          `json:"ts"`
-				Event   string          `json:"event"`
-				Payload json.RawMessage `json:"payload"`
-			}{
-				TS:      time.Now().UTC().Format(time.RFC3339Nano),
-				Event:   event,
-				Payload: json.RawMessage(payload),
-			}
-			if len(record.Payload) == 0 {
-				record.Payload = json.RawMessage(`null`)
-			}
-			line, err := json.Marshal(record)
-			if err != nil {
-				return fmt.Errorf("marshal observation: %w", err)
-			}
-			f, err := os.OpenFile(outPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-			if err != nil {
-				return fmt.Errorf("open %s: %w", outPath, err)
-			}
-			defer f.Close()
-			if _, err := f.Write(append(line, '\n')); err != nil {
-				return fmt.Errorf("append %s: %w", outPath, err)
+			if outPath != "" {
+				record := struct {
+					TS      string          `json:"ts"`
+					Event   string          `json:"event"`
+					Payload json.RawMessage `json:"payload"`
+				}{
+					TS:      time.Now().UTC().Format(time.RFC3339Nano),
+					Event:   event,
+					Payload: json.RawMessage(payload),
+				}
+				if len(record.Payload) == 0 {
+					record.Payload = json.RawMessage(`null`)
+				}
+				if line, merr := json.Marshal(record); merr == nil {
+					if mkerr := os.MkdirAll(filepath.Dir(outPath), 0o755); mkerr == nil {
+						if f, oerr := os.OpenFile(outPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); oerr == nil {
+							_, _ = f.Write(append(line, '\n'))
+							_ = f.Close()
+						}
+					}
+				}
 			}
 			// v0.7.2 wires quality-gate dispatch onto the
 			// observation path: if .bough.yaml declares any gates
@@ -322,6 +326,50 @@ func newHookHandleCmd() *cobra.Command {
 	cmd.Flags().StringVar(&event, "event", "", "Claude Code hook event name (e.g. PreToolUse)")
 	cmd.Flags().StringVar(&outPath, "out", "", "observation log path (default: .bough/observations.jsonl)")
 	return cmd
+}
+
+// resolveHomunculusObsPath returns the central homunculus observations
+// file for the current monorepo project, or "" if no project identity
+// can be resolved — in which case capture is silently skipped rather
+// than polluting the working tree. This is the ECC model: observations
+// never touch the repo working tree (cf. observe.sh writing to
+// PROJECT_DIR under ~/.local/share, never the repo).
+func resolveHomunculusObsPath() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	ident, err := homunculus.DetectIdentity(resolveMonorepoRoot(cwd))
+	if err != nil {
+		return ""
+	}
+	layout := homunculus.NewLayout()
+	if err := layout.EnsureProjectDirs(ident.ID); err != nil {
+		return ""
+	}
+	return layout.ObservationsFile(ident.ID)
+}
+
+// resolveMonorepoRoot mirrors threecorp's detect-project-wrapper.sh so
+// every sub-repo / worktree session pools into the one monorepo project:
+// a session inside a worktree resolves to the monorepo parent (the path
+// before /.worktrees/); otherwise it walks up to the nearest ancestor
+// holding the monorepo marker (.bough.yaml); else it falls back to cwd.
+func resolveMonorepoRoot(cwd string) string {
+	if i := strings.Index(cwd, "/.worktrees/"); i >= 0 {
+		return cwd[:i]
+	}
+	dir := cwd
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".bough.yaml")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return cwd
+		}
+		dir = parent
+	}
 }
 
 // dispatchInjectContext prints the confidence-ranked instinct block
