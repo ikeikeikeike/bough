@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.9.11
+
+### Changed
+
+- **`bough hook handle` fans out to the per-event ECC actions, so the
+  observe → evaluate → preserve loop closes on the default install (ECC
+  parity).** Previously every event routed to the same handler that only
+  appended an observation; the `session-end` / `preserve-instincts`
+  handlers existed but were orphaned (never wired). `hook handle` now
+  dispatches internally: UserPromptSubmit → inject the instinct block
+  (unchanged), **SessionEnd → evaluate instinct confidence**, **PreCompact
+  → preserve top instincts**. bough keeps its single wired command
+  (simpler / more testable than ECC's N-script settings.json fan-out),
+  and LLM extraction stays opt-in via the observer daemon (no surprise
+  `claude --print` on session close). SessionEnd / PreCompact resolve the
+  project via the same monorepo-root logic the hook writes with, so they
+  read the observations the hook actually wrote.
+- **PreCompact preserve now prints the top instincts to stdout** (in
+  addition to the durable `MEMORY.md`) so they fold back into Claude
+  Code's compacted context — the load-bearing ECC behavior bough was
+  missing.
+
 ## v0.9.10
 
 ### Changed

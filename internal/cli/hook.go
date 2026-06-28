@@ -317,8 +317,20 @@ func newHookHandleCmd() *cobra.Command {
 			// therefore both records the observation AND injects —
 			// no separate hook entry needed. Pure filesystem; no
 			// claude --print call on the prompt-submit hot path.
-			if event == string(hooks.EventUserPromptSubmit) {
+			// v0.9.11: the single `hook handle` wiring fans out to the
+			// per-event ECC actions internally (rather than wiring N
+			// separate scripts in settings.json): UserPromptSubmit
+			// injects the instinct block, SessionEnd evaluates instinct
+			// confidence, PreCompact preserves the top instincts to
+			// stdout + MEMORY.md. All pure filesystem; LLM extraction
+			// stays opt-in via the observer daemon.
+			switch event {
+			case string(hooks.EventUserPromptSubmit):
 				dispatchInjectContext(c)
+			case string(hooks.EventSessionEnd):
+				_ = runSessionEnd(c.OutOrStdout(), "", "", sessionEndDefaultWindow)
+			case string(hooks.EventPreCompact):
+				_ = runPreserveInstincts(c.OutOrStdout(), "")
 			}
 			return nil
 		},

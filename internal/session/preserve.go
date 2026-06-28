@@ -20,14 +20,17 @@ const PreservedTopN = 5
 // instincts into the project's instincts dir, so a context
 // compaction does not lose the operator's most-reliable learned
 // patterns. The PreCompact hook calls this; it is pure filesystem,
-// no LLM. Returns the snapshot path.
+// no LLM. Returns the snapshot path AND the rendered top-N block, so
+// the caller can also print the block to stdout — which is what folds
+// it back into Claude Code's compacted context (ECC's load-bearing
+// behavior). bough additionally keeps the durable MEMORY.md file.
 //
 // MEMORY.md is one of the catalog filenames ScanInstincts skips, so
 // the snapshot never gets re-ingested as an instinct.
-func PreserveInstincts(layout homunculus.Layout, projectID string, now time.Time) (string, error) {
+func PreserveInstincts(layout homunculus.Layout, projectID string, now time.Time) (string, string, error) {
 	instincts, _ := homunculus.ScanInstincts(layout.InstinctsDir(projectID))
 	if len(instincts) == 0 {
-		return "", nil
+		return "", "", nil
 	}
 	sort.SliceStable(instincts, func(i, j int) bool {
 		if instincts[i].Confidence != instincts[j].Confidence {
@@ -49,17 +52,17 @@ func PreserveInstincts(layout homunculus.Layout, projectID string, now time.Time
 
 	dir := layout.InstinctsDir(projectID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("session.PreserveInstincts: mkdir: %w", err)
+		return "", "", fmt.Errorf("session.PreserveInstincts: mkdir: %w", err)
 	}
 	path := filepath.Join(dir, "MEMORY.md")
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
-		return "", fmt.Errorf("session.PreserveInstincts: write tmp: %w", err)
+		return "", "", fmt.Errorf("session.PreserveInstincts: write tmp: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return "", fmt.Errorf("session.PreserveInstincts: rename: %w", err)
+		return "", "", fmt.Errorf("session.PreserveInstincts: rename: %w", err)
 	}
-	return path, nil
+	return path, content, nil
 }
 
 // firstActionLine mirrors the inject/evolve helper so session has no

@@ -126,7 +126,7 @@ func TestPreserveInstincts(t *testing.T) {
 		writeInstinct(t, dir, "instinct-"+string(rune('a'+i)), conf, "action "+string(rune('a'+i)))
 	}
 	now := time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)
-	path, err := PreserveInstincts(layout, pid, now)
+	path, block, err := PreserveInstincts(layout, pid, now)
 	if err != nil {
 		t.Fatalf("PreserveInstincts: %v", err)
 	}
@@ -134,6 +134,11 @@ func TestPreserveInstincts(t *testing.T) {
 		t.Errorf("path = %q", path)
 	}
 	body, _ := os.ReadFile(path)
+	// v0.9.11: the returned block (printed to stdout so it folds into
+	// the compacted context) must equal the persisted MEMORY.md.
+	if block != string(body) {
+		t.Errorf("returned block != MEMORY.md content")
+	}
 	// should contain the top 5 (= 0.85, 0.80, 0.75, 0.70, 0.60)
 	if !strings.Contains(string(body), "85%") || !strings.Contains(string(body), "80%") {
 		t.Errorf("MEMORY.md missing top instincts:\n%s", body)
