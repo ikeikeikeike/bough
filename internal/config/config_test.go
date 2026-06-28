@@ -1,10 +1,38 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestLoad_EvolveClaudeMDOnSessionEnd covers the v0.9.14 opt-in flag:
+// it must default to false when absent (= bough's no-repo-contamination
+// default) and parse true when set under instinct:.
+func TestLoad_EvolveClaudeMDOnSessionEnd(t *testing.T) {
+	base, err := os.ReadFile(filepath.Join("testdata", "example.yaml"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	// default: field absent → false
+	cfg, err := LoadFromBytes(base, "example.yaml")
+	if err != nil {
+		t.Fatalf("load base: %v", err)
+	}
+	if cfg.Instinct.EvolveClaudeMDOnSessionEnd {
+		t.Errorf("default should be false when the field is absent")
+	}
+	// opt-in: field true → true
+	withFlag := string(base) + "\ninstinct:\n  enabled: true\n  evolve_claudemd_on_session_end: true\n"
+	cfg2, err := LoadFromBytes([]byte(withFlag), "example+flag.yaml")
+	if err != nil {
+		t.Fatalf("load with flag: %v", err)
+	}
+	if !cfg2.Instinct.EvolveClaudeMDOnSessionEnd {
+		t.Errorf("evolve_claudemd_on_session_end: true did not parse into the struct")
+	}
+}
 
 // TestLoad_validExample feeds the legacy v0.3 testdata fixture into
 // the v0.4 loader, exercising migrateLegacy()'s `databases:` →

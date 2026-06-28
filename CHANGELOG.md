@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.9.14
+
+### Added
+
+- **Opt-in: auto-run CLAUDE.md proposals on SessionEnd
+  (`instinct.evolve_claudemd_on_session_end`).** When set to `true` in
+  `.bough.yaml`, the SessionEnd hook now also runs `session-evolve-claudemd`
+  in write mode, so `<monorepoRoot>/.claude/claudemd-proposals.md` is
+  regenerated every session — matching threecorp ECC's automatic
+  `evolve-claudemd.sh`. Default is `false`: this is the one hook action that
+  writes into the repo working tree (every other bough hook action writes
+  only to the homunculus), so the no-contamination default is preserved
+  unless the operator explicitly opts in. Pure filesystem; no LLM, no
+  billing. The config is read from the resolved monorepo root, so a sub-repo
+  / worktree session still finds it.
+
+### Fixed
+
+- Corrected stale `bough hook handle` help / Short text that still named
+  `.bough/observations.jsonl` as the default observation path — since
+  v0.9.10 the default is the central homunculus `observations.jsonl`.
+
 ## v0.9.13
 
 ### Added
