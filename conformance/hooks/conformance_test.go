@@ -79,15 +79,19 @@ func TestHooks_EndToEnd_InstallHandleBootstrapDoctorUninstall(t *testing.T) {
 	}
 
 	// hook handle captures two observations
+	// v0.9.10 (ECC model): `hook handle` defaults to the central
+	// homunculus, never the working tree. Pass --out to assert the
+	// append mechanism against a known path in the test workdir; the
+	// default homunculus routing is unit-tested in internal/cli.
+	obsPath := filepath.Join(workdir, ".bough", "observations.jsonl")
 	run(t, "hook handle PreToolUse",
 		`{"hook_event_name":"PreToolUse","tool_name":"Edit"}`,
-		"hook", "handle", "--event", "PreToolUse",
+		"hook", "handle", "--event", "PreToolUse", "--out", obsPath,
 	)
 	run(t, "hook handle SessionEnd",
 		`{"hook_event_name":"SessionEnd","reason":"logout"}`,
-		"hook", "handle", "--event", "SessionEnd",
+		"hook", "handle", "--event", "SessionEnd", "--out", obsPath,
 	)
-	obsPath := filepath.Join(workdir, ".bough", "observations.jsonl")
 	obsData, err := os.ReadFile(obsPath)
 	if err != nil {
 		t.Fatalf("observations.jsonl missing: %v", err)
