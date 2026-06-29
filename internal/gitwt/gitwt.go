@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -150,6 +151,58 @@ func (r *Runner) AddOrAttach(ctx context.Context, repoPath, dst, branch, base st
 	return false, fmt.Errorf("gitwt: add %s @ %s failed (new: %v: %s; attach: %v: %s)",
 		branch, dst, newErr, strings.TrimSpace(string(newOut)),
 		attachErr, strings.TrimSpace(string(attachOut)))
+}
+
+// Clone acquires a repo into dst when it is not already present. A
+// remote git URL (git@host:org/repo, https://…, ssh://…, file://…) is
+// cloned over its transport; any other value is treated as a local
+// filesystem path and cloned with `--local` (hardlink-fast, offline). A
+// leading `~` is expanded and a relative local path is resolved against
+// baseDir (the monorepo root) so `source: ../auba-proto` is unambiguous.
+// CombinedOutput is captured so a clone failure surfaces git's message.
+func (r *Runner) Clone(ctx context.Context, source, dst, baseDir string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("gitwt.Clone: mkdir parent of %s: %w", dst, err)
+	}
+	args := []string{"clone"}
+	src := source
+	if !isRemoteURL(source) {
+		src = expandHome(source)
+		if !filepath.IsAbs(src) {
+			src = filepath.Join(baseDir, src)
+		}
+		args = append(args, "--local")
+	}
+	args = append(args, src, dst)
+	if out, err := r.cmd(ctx, "git", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("gitwt.Clone: git clone %s → %s: %w: %s",
+			source, dst, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// isRemoteURL reports whether source is a remote git URL rather than a
+// local filesystem path. Remote = contains "://" (https / ssh / file)
+// or is scp-like `user@host:path` (an `@` followed by a `:` with no
+// earlier `/`). Everything else is a local path → cloned with --local.
+func isRemoteURL(source string) bool {
+	if strings.Contains(source, "://") {
+		return true
+	}
+	at := strings.Index(source, "@")
+	colon := strings.Index(source, ":")
+	slash := strings.Index(source, "/")
+	return at >= 0 && colon > at && (slash < 0 || slash > colon)
+}
+
+// expandHome resolves a leading `~` / `~/` to the user's home directory.
+func expandHome(p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(p[1:], "/"))
+		}
+	}
+	return p
 }
 
 // Remove tears down a worktree via `git worktree remove`. When that

@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.9.16
+
+### Added
+
+- **`repositories[].source` — bough clones a sub-repo it does not have yet.**
+  When `<monorepoRoot>/<name>` is absent and a `source:` is declared,
+  `bough create` acquires it first: a remote git URL (`git@host:org/repo`,
+  `https://…`, `ssh://…`, `file://…`) is cloned over its transport; a local
+  path (`~/…`, `./…`, `../…`, `/abs`) is cloned with `--local`
+  (hardlink-fast, offline). `name` is optional when `source` is set — it is
+  derived from the source basename (`source: git@github.com:org/auba-proto`
+  → name `auba-proto`). Clone is best-effort like the rest of the create
+  loop (a failure logs + skips that repo; `--strict` turns the run
+  non-zero). This lets a `.bough.yaml` be self-contained — no hand-cloning
+  the sub-repos before the first `bough create`.
+
+### Changed
+
+- **`repositories[].branch_strategy` is now optional.** When omitted, bough
+  uses the repo's default branch (origin/HEAD); an explicit value still wins
+  over origin/HEAD (the v0.9.15 fix). Previously it was required. Each
+  repository must still declare `name` **or** `source`.
+
 ## v0.9.15
 
 ### Fixed

@@ -122,8 +122,17 @@ func runCreate(ctx context.Context, stderr, stdout io.Writer, cfg *config.Config
 	// error — the operator can `bough remove` and retry.
 	failedRepos := materializeRepositories(ctx, stderr, cfg, monorepoRoot, worktreeRoot, name, noFetch)
 
+	// Repos that failed to materialise (clone / worktree-add) are skipped
+	// in the env_local + post_create passes below: their worktree dir does
+	// not exist, so rendering a `.env.local` there would only MkdirAll a
+	// bogus directory and run post_create hooks against empty content.
+	skipRepo := make(map[string]bool, len(failedRepos))
+	for _, r := range failedRepos {
+		skipRepo[r] = true
+	}
+
 	// 4. Render + write .env.local per repository.
-	if err := renderEnvLocals(stderr, cfg, worktreeRoot, name, engines, portsCtx); err != nil {
+	if err := renderEnvLocals(stderr, cfg, worktreeRoot, name, engines, portsCtx, skipRepo); err != nil {
 		return err
 	}
 
@@ -131,7 +140,7 @@ func runCreate(ctx context.Context, stderr, stdout io.Writer, cfg *config.Config
 	// reported to stderr but does not unwind the entire create — the
 	// operator usually wants the worktree materialised even when seed
 	// data is missing.
-	failedHooks := runPostCreateHooks(ctx, stderr, cfg, worktreeRoot)
+	failedHooks := runPostCreateHooks(ctx, stderr, cfg, worktreeRoot, skipRepo)
 
 	// 6. stdout — the WorktreeCreate hook contract REQUIRES exactly
 	// the absolute worktree root path on stdout so Claude Code can
@@ -318,14 +327,30 @@ func materializeRepositories(
 	for _, repo := range cfg.Repositories {
 		repoSrc := filepath.Join(monorepoRoot, repo.Name)
 		repoDst := filepath.Join(worktreeRoot, repo.Name)
-		// The declared branch_strategy is authoritative — it is a required
-		// field stating which branch the operator wants worktrees based on.
-		// origin/HEAD auto-detection is only a fallback for when it is
-		// somehow empty. (Previously branch_strategy was passed as
-		// DetectBase's OWN fallback, and DetectBase reads origin/HEAD first,
-		// so a `git clone --local` whose origin/HEAD mirrored the source's
-		// checked-out feature branch silently overrode an explicit
-		// `branch_strategy: develop`.)
+		// Acquire the repo first if it is not already present and a
+		// `source:` is declared (git URL → clone, local path → clone
+		// --local). Best-effort, like the rest of this loop: a clone
+		// failure logs + skips the repo (and --strict turns the run
+		// non-zero). No source + not present → also a per-repo failure.
+		if !isDir(repoSrc) {
+			if repo.Source == "" {
+				logf(stderr, "[bough] %s: not present at %s and no `source:` to clone from", repo.Name, repoSrc)
+				failed = append(failed, repo.Name)
+				continue
+			}
+			if cerr := runner.Clone(ctx, repo.Source, repoSrc, monorepoRoot); cerr != nil {
+				logf(stderr, "[bough] %s: clone from %s FAILED: %v", repo.Name, repo.Source, cerr)
+				failed = append(failed, repo.Name)
+				continue
+			}
+			logf(stderr, "[bough] %s: cloned from %s", repo.Name, repo.Source)
+		}
+		// The declared branch_strategy is authoritative when set; when it
+		// is empty bough falls back to origin/HEAD (the repo's default
+		// branch). branch_strategy must win over origin/HEAD — otherwise a
+		// `git clone --local` whose origin/HEAD mirrored the source's
+		// checked-out feature branch would silently override an explicit
+		// `branch_strategy: develop` (the v0.9.15 fix; see chooseBase).
 		detected, _ := runner.DetectBase(ctx, repoSrc, "")
 		base := chooseBase(repo.BranchStrategy, detected)
 		created, err := runner.AddOrAttach(ctx, repoSrc, repoDst, name, base)
@@ -371,6 +396,13 @@ func chooseBase(branchStrategy, detected string) string {
 	return detected
 }
 
+// isDir reports whether p exists and is a directory — the "is this repo
+// already present?" check before deciding whether to clone its source.
+func isDir(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
+}
+
 // renderEnvLocals walks repositories that declare env_local templates
 // and writes the rendered .env.local. Engine-emitted vars (EnvVars
 // from each plugin) get merged in last so the host can render keys
@@ -381,8 +413,12 @@ func renderEnvLocals(
 	worktreeRoot, name string,
 	engines []engineInstance,
 	portsCtx map[string]int,
+	skip map[string]bool,
 ) error {
 	for _, repo := range cfg.Repositories {
+		if skip[repo.Name] {
+			continue // repo did not materialise; no worktree to write into
+		}
 		if len(repo.EnvLocal) == 0 {
 			continue
 		}
@@ -417,9 +453,12 @@ func renderEnvLocals(
 // declaration order. Failures log to stderr and the loop continues —
 // a failed migration should not unwind the entire create, since the
 // worktree materialisation itself is still valuable to the operator.
-func runPostCreateHooks(ctx context.Context, stderr io.Writer, cfg *config.Config, worktreeRoot string) []string {
+func runPostCreateHooks(ctx context.Context, stderr io.Writer, cfg *config.Config, worktreeRoot string, skip map[string]bool) []string {
 	var failed []string
 	for _, repo := range cfg.Repositories {
+		if skip[repo.Name] {
+			continue // repo did not materialise; nothing to run hooks against
+		}
 		if len(repo.PostCreate) == 0 {
 			continue
 		}
