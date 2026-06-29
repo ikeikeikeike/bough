@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.9.17
+
+Retrospective /review of merged PRs #44 / #46 / #47 (which shipped without a pre-merge review).
+
+### Fixed
+
+- **`bough observer stop` no longer risks killing an unrelated process (recycled-pid kill).**
+  `daemonRunning` trusted the pid-file value on a bare signal-0 liveness check; a crash/SIGKILL leaves
+  a stale pid file, and if the OS recycled that pid, `stop` would SIGTERM/SIGKILL whatever now holds it
+  (e.g. the operator's editor). It now verifies the pid's command line is an
+  `observer _run-daemon --root <root>` before trusting it (shared `daemonLineMatches`).
+- **Observer stop/status resolve the monorepo root consistently** (`resolveObserverProject` now
+  canonicalizes via the monorepo root), so a daemon started from the repo root is still found when
+  stop/status run from a sub-dir / worktree — the lookup-key asymmetry no longer orphans daemons.
+- **Prompt-preview truncation is rune-safe.** `truncatePreview` / `previewRawJSON` cut on a rune
+  boundary, not bytes, so a Japanese (3 bytes/char) field over the cap is no longer sliced into a
+  U+FFFD mojibake char (matches scrub.go).
+- **`bough create` fails clearly when a repo has no `branch_strategy` and no detectable default branch**
+  (origin/HEAD unset) instead of an opaque `git worktree add -b … ""` exit-128.
+- Minor: the daemon's authoritative pid-file self-write ensures the project dir exists first.
+
 ## v0.9.16
 
 ### Added

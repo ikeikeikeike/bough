@@ -63,7 +63,7 @@ rate.`,
 				return err
 			}
 			pidPath := observerPidFile(layout, ident.ID)
-			if running, pid := daemonRunning(pidPath); running {
+			if running, pid := daemonRunning(pidPath, ident.Root); running {
 				return fmt.Errorf("observer already running (pid %d); `bough observer stop` first", pid)
 			}
 			// Re-exec ourselves in --daemon mode as a detached child.
@@ -103,7 +103,7 @@ func newObserverStopCmd() *cobra.Command {
 				return err
 			}
 			pidPath := observerPidFile(layout, ident.ID)
-			running, pid := daemonRunning(pidPath)
+			running, pid := daemonRunning(pidPath, ident.Root)
 			if !running {
 				// The pid file is stale or missing, but a daemon may
 				// still be alive with a pid the file never captured (a
@@ -153,7 +153,7 @@ func newObserverStatusCmd() *cobra.Command {
 				return err
 			}
 			pidPath := observerPidFile(layout, ident.ID)
-			running, pid := daemonRunning(pidPath)
+			running, pid := daemonRunning(pidPath, ident.Root)
 			if !running {
 				if dpid, ok := findDaemonByRoot(ident.Root); ok {
 					running, pid = true, dpid
@@ -190,7 +190,10 @@ func newObserverRunDaemonCmd() *cobra.Command {
 			// Own the pid file: record our REAL pid so `observer stop`
 			// / `status` always target the live daemon even if `start`
 			// captured a different pid (a spawn race) or the daemon was
-			// launched out-of-band. This is the authoritative writer.
+			// launched out-of-band. This is the authoritative writer; ensure
+			// the project dir exists first so an out-of-band launch (where
+			// start never ran EnsureProjectDirs) still leaves a pid file.
+			_ = layout.EnsureProjectDirs(ident.ID)
 			_ = os.WriteFile(observerPidFile(layout, ident.ID), []byte(strconv.Itoa(os.Getpid())), 0o644)
 			logPath := layout.ObserverLog(ident.ID)
 			if interval < 60 {
@@ -236,6 +239,11 @@ func resolveObserverProject(root string) (homunculus.ProjectIdentity, homunculus
 		}
 		cwd = w
 	}
+	// Canonicalise to the monorepo root so start (from the repo root) and
+	// stop (possibly from a sub-dir / worktree) resolve the SAME root —
+	// otherwise the daemon records `--root <repoRoot>` while stop's
+	// findDaemonByRoot looks for `--root <subdir>` and orphans it.
+	cwd = resolveMonorepoRoot(cwd)
 	ident, err := homunculus.DetectIdentity(cwd)
 	if err != nil {
 		return homunculus.ProjectIdentity{}, homunculus.Layout{}, err
@@ -243,10 +251,15 @@ func resolveObserverProject(root string) (homunculus.ProjectIdentity, homunculus
 	return ident, homunculus.NewLayout(), nil
 }
 
-// daemonRunning reads the PID file and checks whether that process is
-// alive (= signal 0). A stale PID file (process gone) reads as not
-// running.
-func daemonRunning(pidPath string) (bool, int) {
+// daemonRunning reads the PID file and reports whether that pid is a LIVE
+// observer daemon for this root. Signal-0 liveness alone is not enough: a
+// crash/SIGKILL leaves a stale pid file, and if the OS has recycled that
+// pid, signalling it would hit an unrelated process — so `stop` must not
+// trust the file's pid without verifying it is actually our daemon. The
+// command-line check closes that recycled-pid kill. A pid that exists but
+// is not our daemon reads as not running (and `stop` then falls through to
+// findDaemonByRoot, which verifies the same way).
+func daemonRunning(pidPath, root string) (bool, int) {
 	raw, err := os.ReadFile(pidPath)
 	if err != nil {
 		return false, 0
@@ -256,9 +269,32 @@ func daemonRunning(pidPath string) (bool, int) {
 		return false, 0
 	}
 	if err := syscall.Kill(pid, 0); err != nil {
-		return false, pid
+		return false, pid // process gone
+	}
+	if !pidIsObserverDaemon(pid, root) {
+		return false, pid // pid exists but is not our daemon (stale file / recycled pid)
 	}
 	return true, pid
+}
+
+// pidIsObserverDaemon reports whether pid's command line is an
+// `observer _run-daemon --root <root>` — the identity gate that keeps
+// daemonRunning from trusting a recycled pid.
+func pidIsObserverDaemon(pid int, root string) bool {
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	if err != nil {
+		return false
+	}
+	return daemonLineMatches(strings.TrimSpace(string(out)), root)
+}
+
+// daemonLineMatches is the pure marker check shared by parseDaemonPID and
+// pidIsObserverDaemon: the line is an observer daemon bound to root. The
+// root is matched as `--root <root> ` (trailing space) so a path that is a
+// prefix of another cannot match, and `--interval` always follows --root
+// so the trailing space is present.
+func daemonLineMatches(line, root string) bool {
+	return strings.Contains(line, "observer _run-daemon") && strings.Contains(line, "--root "+root+" ")
 }
 
 // waitGone polls until pid is no longer signalable (= the process is
@@ -299,10 +335,9 @@ func findDaemonByRoot(root string) (int, bool) {
 // prefix of another root cannot match by mistake (the daemon always has
 // ` --interval` after --root, so a trailing space is always present).
 func parseDaemonPID(psOutput, root string, self int, alive func(int) bool) (int, bool) {
-	marker := "--root " + root + " "
 	for _, line := range strings.Split(psOutput, "\n") {
 		line = strings.TrimSpace(line)
-		if !strings.Contains(line, "observer _run-daemon") || !strings.Contains(line, marker) {
+		if !daemonLineMatches(line, root) {
 			continue
 		}
 		fields := strings.Fields(line)

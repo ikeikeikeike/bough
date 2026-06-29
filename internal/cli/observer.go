@@ -295,14 +295,20 @@ func previewRawJSON(r json.RawMessage) any {
 	if len(r) <= maxRenderedFieldBytes {
 		return r
 	}
-	return string(r[:maxRenderedFieldBytes]) + "…(truncated)"
+	return truncatePreview(string(r))
 }
 
+// truncatePreview caps an oversized field at maxRenderedFieldBytes,
+// cutting on a RUNE boundary (not a byte boundary) so a multi-byte field
+// — Japanese is 3 bytes/char and the primary language here — is never
+// sliced mid-rune into a U+FFFD mojibake char. Matches the rune-safe
+// truncation in scrub.go.
 func truncatePreview(s string) string {
-	if len(s) <= maxRenderedFieldBytes {
+	runes := []rune(s)
+	if len(runes) <= maxRenderedFieldBytes {
 		return s
 	}
-	return s[:maxRenderedFieldBytes] + "…(truncated)"
+	return string(runes[:maxRenderedFieldBytes]) + "…(truncated)"
 }
 
 func formatTS(t time.Time) string {
