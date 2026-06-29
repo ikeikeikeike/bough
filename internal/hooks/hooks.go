@@ -463,7 +463,7 @@ func (r *DoctorReport) Render(w io.Writer) {
 	if r.Observer.Configured {
 		fmt.Fprintf(w, "  observations: %s (%d lines)\n", r.Observer.Path, r.Observer.LineCount)
 	} else {
-		fmt.Fprintln(w, "  observations: not yet capturing (no observations recorded yet for this project)")
+		fmt.Fprintln(w, "  observations: not yet capturing (no observations.jsonl recorded yet for this project)")
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Cost meter:")
