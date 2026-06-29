@@ -353,6 +353,15 @@ func materializeRepositories(
 		// `branch_strategy: develop` (the v0.9.15 fix; see chooseBase).
 		detected, _ := runner.DetectBase(ctx, repoSrc, "")
 		base := chooseBase(repo.BranchStrategy, detected)
+		if base == "" {
+			// No branch_strategy AND origin/HEAD unset (a repo with a
+			// remote but no `git remote set-head`). Fail with a clear
+			// message instead of `git worktree add -b <branch> ""` →
+			// `fatal: invalid reference` (the opaque exit-128 class).
+			logf(stderr, "[bough] %s: no branch_strategy and could not detect a default branch (origin/HEAD unset) — set repositories[].branch_strategy", repo.Name)
+			failed = append(failed, repo.Name)
+			continue
+		}
 		created, err := runner.AddOrAttach(ctx, repoSrc, repoDst, name, base)
 		if err != nil {
 			logf(stderr, "[bough] %s: worktree add FAILED: %v", repo.Name, err)
