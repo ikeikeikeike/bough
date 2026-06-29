@@ -111,6 +111,50 @@ func TestSanitizeObservation_EmptyAndCombined(t *testing.T) {
 	}
 }
 
+// TestSanitizeObservation_NeverDropsValidPayload is the v0.9.18 regression for
+// the data-loss bug: scrubbing a secret-keyed UNQUOTED scalar used to yield
+// invalid JSON (`{"token":12345678}` → `{"token":[REDACTED]}`), which
+// json.Marshal(record) then rejected — silently dropping the whole
+// observation. sanitizeObservation must always return valid JSON for a valid
+// input so the record is never lost.
+func TestSanitizeObservation_NeverDropsValidPayload(t *testing.T) {
+	cases := []string{
+		`{"token":12345678}`,                          // unquoted numeric secret (the repro)
+		`{"tool_input":{"api_key":98765432101234}}`,   // nested unquoted numeric
+		`{"password":true,"token":12345678}`,          // mixed scalar types
+		`{"authorization":"Bearer eyJ0eXAiOiJKV1Qi"}`, // ordinary quoted secret stays valid
+	}
+	for _, in := range cases {
+		t.Run(in, func(t *testing.T) {
+			if !json.Valid([]byte(in)) {
+				t.Fatalf("test input itself is not valid JSON: %s", in)
+			}
+			out := sanitizeObservation([]byte(in))
+			if !json.Valid(out) {
+				t.Fatalf("sanitize turned a valid payload into invalid JSON (record would be dropped):\n  in:  %s\n  out: %s", in, out)
+			}
+		})
+	}
+}
+
+// TestScrubSecrets_EscapedJSONStringValue is the v0.9.18 regression for the
+// recall gap: a secret inside an ESCAPED JSON string value (a tool whose
+// stdout is itself a JSON body) used to slip past redaction because the `\"`
+// between key and value broke the contiguous separator match.
+func TestScrubSecrets_EscapedJSONStringValue(t *testing.T) {
+	in := `{"tool_response":{"stdout":"{\"access_token\":\"AKIA1234567890SECRET\"}"}}`
+	out := string(scrubSecrets([]byte(in)))
+	if strings.Contains(out, "AKIA1234567890SECRET") {
+		t.Errorf("scrub leaked a secret in an escaped-JSON string value:\n  out: %s", out)
+	}
+	if !strings.Contains(out, "[REDACTED]") {
+		t.Errorf("scrub did not redact the escaped-JSON secret:\n  out: %s", out)
+	}
+	if !json.Valid([]byte(out)) {
+		t.Errorf("scrub produced invalid JSON: %s", out)
+	}
+}
+
 func tail(s string, n int) string {
 	r := []rune(s)
 	if len(r) <= n {

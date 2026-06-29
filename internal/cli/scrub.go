@@ -32,8 +32,14 @@ const truncMarker = "…[truncated]"
 // beats precision (over-redacting a prose word is cheaper than leaking a
 // credential), so ECC's pattern is kept as-is including its occasional
 // false positive on prose like "token bucket algorithm".
+//
+// The separator class includes a backslash so a secret living inside an
+// *escaped* JSON string value — a tool whose stdout is itself a JSON body,
+// e.g. `{"stdout":"{\"access_token\":\"AKIA…\"}"}` — is still redacted; the
+// `\"` between key and value would otherwise break the contiguous match
+// and leak the credential (a recall gap over ECC's original class).
 var secretPattern = regexp.MustCompile(
-	`(?i)(api[_-]?key|token|secret|password|authorization|credentials?|auth)(["'\s:=]+)([A-Za-z]+\s+)?([A-Za-z0-9_\-/.+=]{8,})`,
+	`(?i)(api[_-]?key|token|secret|password|authorization|credentials?|auth)(["'\s:=\\]+)([A-Za-z]+\s+)?([A-Za-z0-9_\-/.+=]{8,})`,
 )
 
 // scrubSecrets redacts secret tokens in the raw observation bytes. The
@@ -111,6 +117,21 @@ func walkTruncate(v any) (any, bool) {
 // per-field length (structure-aware). The in-memory payload used for
 // quality-gate matching is left untouched — only the persisted copy is
 // sanitized.
+//
+// Data-loss guard: the string-level redaction keeps quoted `"key":"secret"`
+// values valid JSON (the token class excludes the closing quote), but an
+// *unquoted* scalar under a secret-named key — `{"token":12345678}` →
+// `{"token":[REDACTED]}` — becomes INVALID JSON. The caller hands the result
+// to json.Marshal as a RawMessage, which would reject it and silently drop
+// the entire observation, starving the corpus. So if redaction turned a
+// payload that parsed cleanly going in into one that no longer parses, fall
+// back to truncation alone and keep the (still-valid) observation. Such
+// numeric-valued secrets are rare, and the homunculus is a private,
+// out-of-repo store, so preserving the record beats redacting that one field.
 func sanitizeObservation(b []byte) []byte {
-	return truncateLongStrings(scrubSecrets(b))
+	scrubbed := truncateLongStrings(scrubSecrets(b))
+	if len(b) > 0 && json.Valid(b) && !json.Valid(scrubbed) {
+		return truncateLongStrings(b)
+	}
+	return scrubbed
 }
