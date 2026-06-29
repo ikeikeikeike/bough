@@ -69,6 +69,12 @@ func (c *Config) validateSemantic() error {
 
 	seenRepo := map[string]bool{}
 	for i, r := range c.Repositories {
+		// Name is normalized from Source before validation, so an empty
+		// Name here means neither was supplied.
+		if r.Name == "" && r.Source == "" {
+			errs = append(errs, fmt.Errorf("config: repositories[%d] needs 'name' or 'source'", i))
+			continue
+		}
 		if seenRepo[r.Name] {
 			errs = append(errs, fmt.Errorf("config: repositories[%d].name=%q is duplicated", i, r.Name))
 		}

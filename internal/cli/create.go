@@ -318,14 +318,30 @@ func materializeRepositories(
 	for _, repo := range cfg.Repositories {
 		repoSrc := filepath.Join(monorepoRoot, repo.Name)
 		repoDst := filepath.Join(worktreeRoot, repo.Name)
-		// The declared branch_strategy is authoritative — it is a required
-		// field stating which branch the operator wants worktrees based on.
-		// origin/HEAD auto-detection is only a fallback for when it is
-		// somehow empty. (Previously branch_strategy was passed as
-		// DetectBase's OWN fallback, and DetectBase reads origin/HEAD first,
-		// so a `git clone --local` whose origin/HEAD mirrored the source's
-		// checked-out feature branch silently overrode an explicit
-		// `branch_strategy: develop`.)
+		// Acquire the repo first if it is not already present and a
+		// `source:` is declared (git URL → clone, local path → clone
+		// --local). Best-effort, like the rest of this loop: a clone
+		// failure logs + skips the repo (and --strict turns the run
+		// non-zero). No source + not present → also a per-repo failure.
+		if !isDir(repoSrc) {
+			if repo.Source == "" {
+				logf(stderr, "[bough] %s: not present at %s and no `source:` to clone from", repo.Name, repoSrc)
+				failed = append(failed, repo.Name)
+				continue
+			}
+			if cerr := runner.Clone(ctx, repo.Source, repoSrc, monorepoRoot); cerr != nil {
+				logf(stderr, "[bough] %s: clone from %s FAILED: %v", repo.Name, repo.Source, cerr)
+				failed = append(failed, repo.Name)
+				continue
+			}
+			logf(stderr, "[bough] %s: cloned from %s", repo.Name, repo.Source)
+		}
+		// The declared branch_strategy is authoritative when set; when it
+		// is empty bough falls back to origin/HEAD (the repo's default
+		// branch). branch_strategy must win over origin/HEAD — otherwise a
+		// `git clone --local` whose origin/HEAD mirrored the source's
+		// checked-out feature branch would silently override an explicit
+		// `branch_strategy: develop` (the v0.9.15 fix; see chooseBase).
 		detected, _ := runner.DetectBase(ctx, repoSrc, "")
 		base := chooseBase(repo.BranchStrategy, detected)
 		created, err := runner.AddOrAttach(ctx, repoSrc, repoDst, name, base)
@@ -369,6 +385,13 @@ func chooseBase(branchStrategy, detected string) string {
 		return branchStrategy
 	}
 	return detected
+}
+
+// isDir reports whether p exists and is a directory — the "is this repo
+// already present?" check before deciding whether to clone its source.
+func isDir(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
 }
 
 // renderEnvLocals walks repositories that declare env_local templates

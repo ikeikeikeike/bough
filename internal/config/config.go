@@ -27,6 +27,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/go-playground/validator/v10"
 	"gopkg.in/yaml.v3"
@@ -90,8 +91,22 @@ type QualityGateCfg struct {
 //     -- up`. Exactly one repository per Config carries this role
 //     when at least one `engines:` entry is present.
 type Repository struct {
-	Name           string            `yaml:"name" validate:"required"`
-	BranchStrategy string            `yaml:"branch_strategy" validate:"required"`
+	// Name is the sub-directory under the monorepo root (and under each
+	// worktree) this repo lives in. Optional when Source is set — it is
+	// then derived from the Source basename (e.g. source
+	// git@github.com:org/auba-proto → name "auba-proto"). At least one of
+	// Name / Source must be present.
+	Name string `yaml:"name"`
+	// Source, when set, is where bough acquires the repo from if
+	// <monorepoRoot>/<name> does not already exist: a remote git URL
+	// (git@host:org/repo, https://…, ssh://…) → `git clone`, or a local
+	// path (~/…, ./…, ../…, /abs) → `git clone --local`. Empty = the repo
+	// must already be present (the historical behaviour).
+	Source string `yaml:"source"`
+	// BranchStrategy is the branch new worktrees are cut from. Optional:
+	// when empty, bough uses the repo's default branch (origin/HEAD). An
+	// explicit value is authoritative over origin/HEAD (see chooseBase).
+	BranchStrategy string            `yaml:"branch_strategy"`
 	Direnv         bool              `yaml:"direnv"`
 	Role           string            `yaml:"role" validate:"omitempty,oneof=engine-provider db-provider"`
 	Symlinks       []SymlinkSpec     `yaml:"symlinks" validate:"dive"`
@@ -654,9 +669,37 @@ func migrateLegacy(lc *LegacyConfig) (*Config, []string) {
 // semantic rules in validate.go. Exported so unit tests and the
 // `bough config validate` CLI subcommand can reuse it.
 func (c *Config) Validate() error {
+	c.normalizeRepositories()
 	v := validator.New(validator.WithRequiredStructEnabled())
 	if err := v.Struct(c); err != nil {
 		return err
 	}
 	return c.validateSemantic()
+}
+
+// normalizeRepositories fills each repository's Name from its Source
+// basename when Name is empty, so a `- source: …` entry with no explicit
+// name still resolves to a sub-directory. Idempotent; runs before every
+// Validate so all downstream code (create / remove / envwriter) can rely
+// on Name being populated.
+func (c *Config) normalizeRepositories() {
+	for i := range c.Repositories {
+		r := &c.Repositories[i]
+		if r.Name == "" && r.Source != "" {
+			r.Name = deriveRepoName(r.Source)
+		}
+	}
+}
+
+// deriveRepoName extracts a repo directory name from a Source URL/path:
+// the last path segment, with any trailing slash and `.git` suffix
+// stripped. Handles git@host:org/repo, https://host/org/repo, and local
+// paths (~/…, ./…, /abs) alike.
+func deriveRepoName(source string) string {
+	s := strings.TrimRight(strings.TrimSpace(source), "/")
+	s = strings.TrimSuffix(s, ".git")
+	if i := strings.LastIndexAny(s, "/:"); i >= 0 {
+		s = s[i+1:]
+	}
+	return s
 }

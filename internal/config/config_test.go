@@ -7,6 +7,65 @@ import (
 	"testing"
 )
 
+func TestDeriveRepoName(t *testing.T) {
+	cases := map[string]string{
+		"git@github.com:eiicon-company/auba-proto":           "auba-proto",
+		"git@github.com:eiicon-company/auba-proto.git":       "auba-proto",
+		"https://github.com/eiicon-company/auba-dbmigration": "auba-dbmigration",
+		"ssh://git@host/org/repo.git":                        "repo",
+		"~/src/eiicon-company/claude/auba-proto":             "auba-proto",
+		"../auba-proto/":                                     "auba-proto",
+		"/abs/path/to/repo.git":                              "repo",
+	}
+	for in, want := range cases {
+		if got := deriveRepoName(in); got != want {
+			t.Errorf("deriveRepoName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestLoad_SourceAndOptionalBranchStrategy: a source-only repo (no name,
+// no branch_strategy) must load — name is derived from the source
+// basename and branch_strategy is now optional (v0.9.16).
+func TestLoad_SourceAndOptionalBranchStrategy(t *testing.T) {
+	y := `schema_version: 2
+monorepo_root: "."
+repositories:
+  - source: git@github.com:eiicon-company/auba-proto
+registry:
+  path: ".bough-ports.json"
+`
+	cfg, err := LoadFromBytes([]byte(y), "t.yaml")
+	if err != nil {
+		t.Fatalf("load source-only: %v", err)
+	}
+	if len(cfg.Repositories) != 1 || cfg.Repositories[0].Name != "auba-proto" {
+		t.Fatalf("name not derived from source: %+v", cfg.Repositories)
+	}
+	if cfg.Repositories[0].BranchStrategy != "" {
+		t.Errorf("branch_strategy should be empty (optional), got %q", cfg.Repositories[0].BranchStrategy)
+	}
+}
+
+// TestLoad_RepoNeedsNameOrSource: a repo with neither name nor source is
+// rejected with a clear semantic error.
+func TestLoad_RepoNeedsNameOrSource(t *testing.T) {
+	y := `schema_version: 2
+monorepo_root: "."
+repositories:
+  - direnv: true
+registry:
+  path: ".bough-ports.json"
+`
+	_, err := LoadFromBytes([]byte(y), "t.yaml")
+	if err == nil {
+		t.Fatalf("expected error for repo with neither name nor source")
+	}
+	if !strings.Contains(err.Error(), "name") || !strings.Contains(err.Error(), "source") {
+		t.Errorf("error should mention name/source: %v", err)
+	}
+}
+
 // TestLoad_EvolveClaudeMDOnSessionEnd covers the v0.9.14 opt-in flag:
 // it must default to false when absent (= bough's no-repo-contamination
 // default) and parse true when set under instinct:.
