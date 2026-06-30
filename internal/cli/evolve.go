@@ -168,9 +168,9 @@ func persistEvolveOutcome(stdout, stderr io.Writer, ident homunculus.ProjectIden
 	skillsWritten := 0
 	for _, s := range out.Skills {
 		art := evolve.RenderSkill(s.Label, s.Description, s.Cluster, th, now)
-		// symlinkDir="" — linking is done project-scoped by deployProjectSkills
-		// below, not into the global ~/.claude/skills.
-		if _, err := evolve.WriteSkill(skillsDir, "", art); err != nil {
+		// Linking is done project-scoped by deployProjectSkills below,
+		// not into the global ~/.claude/skills.
+		if _, err := evolve.WriteSkill(skillsDir, art); err != nil {
 			fmt.Fprintf(stderr, "  skill %s: %v\n", s.Label, err)
 			continue
 		}
