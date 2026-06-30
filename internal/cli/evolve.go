@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"text/template"
 	"time"
 
@@ -210,10 +209,9 @@ func persistEvolveOutcome(stdout, stderr io.Writer, ident homunculus.ProjectIden
 
 	// Deploy the evolved skills into the monorepo's PROJECT-scoped .claude/skills
 	// (not the global ~/.claude/skills): a bough-evolved skill is specific to the
-	// repo it was learned from, so global linking pollutes every repo and lets a
-	// generic slug from one project silently clobber another's same-named skill.
-	// Also prunes leftover global links from the pre-v0.9.20 behavior. Homunculus
-	// stays the single source of truth (symlinks, no copies).
+	// repo it was learned from, so global linking would pollute every repo and let
+	// a generic slug from one project silently clobber another's same-named skill.
+	// Homunculus stays the single source of truth (symlinks, no copies).
 	if !noSymlink {
 		deployProjectSkills(stdout, stderr, skillsDir, ident.Root)
 	}
@@ -224,27 +222,12 @@ func persistEvolveOutcome(stdout, stderr io.Writer, ident homunculus.ProjectIden
 }
 
 // deployProjectSkills symlinks every evolved skill in evolvedSkillsDir into the
-// monorepo's <monorepoRoot>/.claude/skills (project scope), and prunes leftover
-// ~/.claude/skills symlinks that point into this project's evolved tree (the
-// pre-v0.9.20 global-scope behavior). All best-effort: the worktree session +
-// the global prune must never fail the evolve. Homunculus is the single source
-// of truth — these are symlinks, not copies.
+// monorepo's <monorepoRoot>/.claude/skills (project scope, NOT the global
+// ~/.claude/skills): a bough-evolved skill is specific to the repo it was
+// learned from. Homunculus stays the single source of truth — these are
+// symlinks, not copies. Best-effort: never fails the evolve.
 func deployProjectSkills(stdout, stderr io.Writer, evolvedSkillsDir, monorepoRoot string) {
 	projectDir := filepath.Join(monorepoRoot, ".claude", "skills")
-	globalDir := ""
-	if home, err := os.UserHomeDir(); err == nil {
-		globalDir = filepath.Join(home, ".claude", "skills")
-	}
-	deploySkills(stdout, stderr, evolvedSkillsDir, projectDir, globalDir)
-}
-
-// deploySkills links every evolved skill into projectDir and prunes stale links
-// from globalDir. Split out (with explicit dirs) for testability. The prune is
-// SKIPPED when globalDir == projectDir — e.g. the monorepo root resolves to
-// $HOME — because otherwise it would delete the very project links just created
-// (their targets are in evolvedSkillsDir → they match the prune prefix), so
-// skills would silently never deploy.
-func deploySkills(stdout, stderr io.Writer, evolvedSkillsDir, projectDir, globalDir string) {
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		fmt.Fprintf(stderr, "  deploy skills: mkdir %s: %v\n", projectDir, err)
 		return
@@ -270,50 +253,6 @@ func deploySkills(stdout, stderr io.Writer, evolvedSkillsDir, projectDir, global
 	}
 	if linked > 0 {
 		fmt.Fprintf(stdout, "  linked %d skill(s) into %s\n", linked, projectDir)
-	}
-	if globalDir != "" && filepath.Clean(globalDir) != filepath.Clean(projectDir) {
-		pruneStaleGlobalSkillLinks(stdout, globalDir, evolvedSkillsDir)
-	}
-}
-
-// pruneStaleGlobalSkillLinks removes globalDir/<slug> symlinks whose target is
-// inside evolvedSkillsDir — leftovers from the pre-v0.9.20 global scope. The
-// strict target-prefix match means it never touches hand-authored skills (real
-// dirs), other projects' links, or unrelated symlinks (e.g. playwright pointing
-// into nvm). globalDir is a parameter (not hardcoded to ~/.claude/skills) so it
-// is testable without touching the operator's real skills. Best-effort.
-func pruneStaleGlobalSkillLinks(stdout io.Writer, globalDir, evolvedSkillsDir string) {
-	entries, err := os.ReadDir(globalDir)
-	if err != nil {
-		return
-	}
-	evolvedAbs, err := filepath.Abs(evolvedSkillsDir)
-	if err != nil {
-		return
-	}
-	prefix := evolvedAbs + string(os.PathSeparator)
-	pruned := 0
-	for _, e := range entries {
-		link := filepath.Join(globalDir, e.Name())
-		info, err := os.Lstat(link)
-		if err != nil || info.Mode()&os.ModeSymlink == 0 {
-			continue // leave real dirs / files alone
-		}
-		target, err := os.Readlink(link)
-		if err != nil {
-			continue
-		}
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(globalDir, target)
-		}
-		if strings.HasPrefix(target, prefix) {
-			if err := os.Remove(link); err == nil {
-				pruned++
-			}
-		}
-	}
-	if pruned > 0 {
-		fmt.Fprintf(stdout, "  pruned %d stale global skill link(s) from %s\n", pruned, globalDir)
 	}
 }
 

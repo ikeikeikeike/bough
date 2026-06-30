@@ -10,10 +10,8 @@
   bough-evolved skill is specific to the repo it was learned from, so global linking polluted every repo
   and let a generic slug from one project silently clobber another's same-named skill. The per-worktree
   symlink is required because `claude --worktree` cd's into the worktree — a non-git container whose git
-  walk-up cannot reach the monorepo root's `.claude/skills`. Leftover global links from prior versions are
-  pruned automatically on the next `evolve` (strictly: only symlinks pointing into this project's evolved
-  tree — hand-authored skills and unrelated symlinks are never touched). The homunculus stays the single
-  source of truth (symlinks, no copies). `--no-symlink` still opts out.
+  walk-up cannot reach the monorepo root's `.claude/skills`. The homunculus stays the single source of
+  truth (symlinks, no copies). `--no-symlink` still opts out.
 
 ### Fixed
 
