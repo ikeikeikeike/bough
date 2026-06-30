@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/template"
 	"time"
 
@@ -46,7 +47,7 @@ Default is preview: GATE 1-4 run mechanically, surviving clusters
 are listed, and NO claude --print call is made. Pass --generate to
 run GATE 5 (= one claude --print per gate-passing cluster, inside
 your Claude Code subscription) and write evolved/skills/<slug>/
-SKILL.md (+ ~/.claude/skills symlink), evolved/agents/<slug>.md,
+SKILL.md (+ <repo>/.claude/skills symlink), evolved/agents/<slug>.md,
 evolved/commands/<slug>.md.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -61,7 +62,11 @@ evolved/commands/<slug>.md.`,
 				}
 				cwd = w
 			}
-			ident, err := homunculus.DetectIdentity(cwd)
+			// Resolve identity from the MONOREPO ROOT, not raw cwd, so evolve
+			// reads the same instinct corpus the writer/observer pool into
+			// (DetectIdentity(resolveMonorepoRoot(cwd))). Run from a sub-repo /
+			// worktree the raw-cwd id would diverge and read an empty corpus.
+			ident, err := homunculus.DetectIdentity(resolveMonorepoRoot(cwd))
 			if err != nil {
 				return err
 			}
@@ -125,7 +130,7 @@ evolved/commands/<slug>.md.`,
 	cmd.Flags().BoolVar(&generate, "generate", false, "run GATE 5 (claude --print) + write artifacts (default: preview only)")
 	cmd.Flags().StringVar(&judge, "judge", "claude", "GATE 5 backend: claude (= claude --print)")
 	cmd.Flags().StringVar(&model, "model", "", "override the claude model for GATE 5 (default: sonnet — a stronger judge than the observer's haiku)")
-	cmd.Flags().BoolVar(&noSymlink, "no-symlink", false, "do not create ~/.claude/skills symlinks for generated skills")
+	cmd.Flags().BoolVar(&noSymlink, "no-symlink", false, "do not symlink generated skills into <repo>/.claude/skills (project scope)")
 	cmd.Flags().IntVar(&maxCalls, "max-calls", 0, "override the per-session GATE 5 call cap")
 	return cmd
 }
@@ -157,12 +162,6 @@ func runEvolvePreview(w io.Writer, ident homunculus.ProjectIdentity, instincts [
 
 func persistEvolveOutcome(stdout, stderr io.Writer, ident homunculus.ProjectIdentity, layout homunculus.Layout, labels *evolve.ClusterLabels, labelsPath string, out evolve.Outcome, th evolve.Thresholds, noSymlink bool, _ *claudecli.Provider) error {
 	now := time.Now()
-	symlinkDir := ""
-	if !noSymlink {
-		if home, err := os.UserHomeDir(); err == nil {
-			symlinkDir = filepath.Join(home, ".claude", "skills")
-		}
-	}
 	skillsDir := layout.EvolvedSkillsDir(ident.ID)
 	agentsDir := layout.EvolvedAgentsDir(ident.ID)
 	commandsDir := layout.EvolvedCommandsDir(ident.ID)
@@ -170,7 +169,9 @@ func persistEvolveOutcome(stdout, stderr io.Writer, ident homunculus.ProjectIden
 	skillsWritten := 0
 	for _, s := range out.Skills {
 		art := evolve.RenderSkill(s.Label, s.Description, s.Cluster, th, now)
-		if _, err := evolve.WriteSkill(skillsDir, symlinkDir, art); err != nil {
+		// symlinkDir="" — linking is done project-scoped by deployProjectSkills
+		// below, not into the global ~/.claude/skills.
+		if _, err := evolve.WriteSkill(skillsDir, "", art); err != nil {
 			fmt.Fprintf(stderr, "  skill %s: %v\n", s.Label, err)
 			continue
 		}
@@ -207,9 +208,99 @@ func persistEvolveOutcome(stdout, stderr io.Writer, ident homunculus.ProjectIden
 		return fmt.Errorf("evolve: save cluster-labels: %w", err)
 	}
 
+	// Deploy the evolved skills into the monorepo's PROJECT-scoped .claude/skills
+	// (not the global ~/.claude/skills): a bough-evolved skill is specific to the
+	// repo it was learned from, so global linking pollutes every repo and lets a
+	// generic slug from one project silently clobber another's same-named skill.
+	// Also prunes leftover global links from the pre-v0.9.20 behavior. Homunculus
+	// stays the single source of truth (symlinks, no copies).
+	if !noSymlink {
+		deployProjectSkills(stdout, stderr, skillsDir, ident.Root)
+	}
+
 	fmt.Fprintf(stdout, "\nwrote skills=%d agents=%d commands=%d (rejected clusters=%d)\n",
 		skillsWritten, agentsWritten, commandsWritten, len(out.Rejected))
 	return nil
+}
+
+// deployProjectSkills symlinks every evolved skill in evolvedSkillsDir into the
+// monorepo's <monorepoRoot>/.claude/skills (project scope), and prunes leftover
+// ~/.claude/skills symlinks that point into this project's evolved tree (the
+// pre-v0.9.20 global-scope behavior). All best-effort: the worktree session +
+// the global prune must never fail the evolve. Homunculus is the single source
+// of truth — these are symlinks, not copies.
+func deployProjectSkills(stdout, stderr io.Writer, evolvedSkillsDir, monorepoRoot string) {
+	projectDir := filepath.Join(monorepoRoot, ".claude", "skills")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		fmt.Fprintf(stderr, "  deploy skills: mkdir %s: %v\n", projectDir, err)
+		return
+	}
+	entries, err := os.ReadDir(evolvedSkillsDir)
+	if err != nil {
+		return // no evolved skills yet — nothing to deploy
+	}
+	linked := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		src := filepath.Join(evolvedSkillsDir, e.Name())
+		if _, err := os.Stat(filepath.Join(src, "SKILL.md")); err != nil {
+			continue // not a skill dir
+		}
+		if err := ensureSymlink(src, filepath.Join(projectDir, e.Name())); err != nil {
+			fmt.Fprintf(stderr, "  deploy skill %s: %v\n", e.Name(), err)
+			continue
+		}
+		linked++
+	}
+	if linked > 0 {
+		fmt.Fprintf(stdout, "  linked %d skill(s) into %s\n", linked, projectDir)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		pruneStaleGlobalSkillLinks(stdout, filepath.Join(home, ".claude", "skills"), evolvedSkillsDir)
+	}
+}
+
+// pruneStaleGlobalSkillLinks removes globalDir/<slug> symlinks whose target is
+// inside evolvedSkillsDir — leftovers from the pre-v0.9.20 global scope. The
+// strict target-prefix match means it never touches hand-authored skills (real
+// dirs), other projects' links, or unrelated symlinks (e.g. playwright pointing
+// into nvm). globalDir is a parameter (not hardcoded to ~/.claude/skills) so it
+// is testable without touching the operator's real skills. Best-effort.
+func pruneStaleGlobalSkillLinks(stdout io.Writer, globalDir, evolvedSkillsDir string) {
+	entries, err := os.ReadDir(globalDir)
+	if err != nil {
+		return
+	}
+	evolvedAbs, err := filepath.Abs(evolvedSkillsDir)
+	if err != nil {
+		return
+	}
+	prefix := evolvedAbs + string(os.PathSeparator)
+	pruned := 0
+	for _, e := range entries {
+		link := filepath.Join(globalDir, e.Name())
+		info, err := os.Lstat(link)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			continue // leave real dirs / files alone
+		}
+		target, err := os.Readlink(link)
+		if err != nil {
+			continue
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(globalDir, target)
+		}
+		if strings.HasPrefix(target, prefix) {
+			if err := os.Remove(link); err == nil {
+				pruned++
+			}
+		}
+	}
+	if pruned > 0 {
+		fmt.Fprintf(stdout, "  pruned %d stale global skill link(s) from %s\n", pruned, globalDir)
+	}
 }
 
 // evolveJudgeDefaultModel is the GATE 5 judge model when --model is not
