@@ -131,10 +131,10 @@ func runCreate(ctx context.Context, stderr, stdout io.Writer, cfg *config.Config
 		skipRepo[r] = true
 	}
 
-	// 4. Render + write .env.local per repository.
-	if err := renderEnvLocals(stderr, cfg, worktreeRoot, name, engines, portsCtx, skipRepo); err != nil {
-		return err
-	}
+	// 4. Render + write .env.local per repository. Best-effort like
+	// post_create: a bad template / unwritable repo must not abort before the
+	// worktree-path stdout emit + failure summary below.
+	failedEnv := renderEnvLocals(stderr, cfg, worktreeRoot, name, engines, portsCtx, skipRepo)
 
 	// 5. post_create hooks. Best-effort: a failing migration here is
 	// reported to stderr but does not unwind the entire create — the
@@ -152,17 +152,20 @@ func runCreate(ctx context.Context, stderr, stdout io.Writer, cfg *config.Config
 	// returns success once the worktree exists (the hook's cd
 	// contract); --strict turns any worktree-add or post_create
 	// failure into a non-zero exit for CI / scripted callers.
-	if n := len(failedRepos) + len(failedHooks); n > 0 {
+	if n := len(failedRepos) + len(failedEnv) + len(failedHooks); n > 0 {
 		logf(stderr, "[bough] WARNING: create finished with %d problem(s); the worktree exists but its environment may be incomplete:", n)
 		for _, r := range failedRepos {
 			logf(stderr, "[bough]   - worktree add failed: %s", r)
+		}
+		for _, e := range failedEnv {
+			logf(stderr, "[bough]   - env_local failed: %s", e)
 		}
 		for _, h := range failedHooks {
 			logf(stderr, "[bough]   - post_create failed: %s", h)
 		}
 		if strict {
-			return fmt.Errorf("create %s: %d post-setup problem(s) (worktree add: %d, post_create: %d) with --strict",
-				name, n, len(failedRepos), len(failedHooks))
+			return fmt.Errorf("create %s: %d post-setup problem(s) (worktree add: %d, env_local: %d, post_create: %d) with --strict",
+				name, n, len(failedRepos), len(failedEnv), len(failedHooks))
 		}
 	}
 	return nil
@@ -426,7 +429,8 @@ func renderEnvLocals(
 	engines []engineInstance,
 	portsCtx map[string]int,
 	skip map[string]bool,
-) error {
+) []string {
+	var failed []string
 	for _, repo := range cfg.Repositories {
 		if skip[repo.Name] {
 			continue // repo did not materialise; no worktree to write into
@@ -443,7 +447,12 @@ func renderEnvLocals(
 		}
 		rendered, err := envwriter.Render(repo.EnvLocal, envCtx)
 		if err != nil {
-			return fmt.Errorf("%s env_local render: %w", repo.Name, err)
+			// Best-effort, like runPostCreateHooks: a bad env_local template
+			// must not abort the create before the worktree-path stdout emit +
+			// failure summary. Record it and carry on.
+			logf(stderr, "[bough] %s: env_local render failed: %v", repo.Name, err)
+			failed = append(failed, fmt.Sprintf("%s (render: %v)", repo.Name, err))
+			continue
 		}
 		for _, e := range engines {
 			for k, v := range e.envVars {
@@ -454,11 +463,13 @@ func renderEnvLocals(
 		}
 		dst := filepath.Join(repoDst, ".env.local")
 		if err := envwriter.Write(dst, rendered); err != nil {
-			return fmt.Errorf("%s .env.local write: %w", repo.Name, err)
+			logf(stderr, "[bough] %s: .env.local write failed: %v", repo.Name, err)
+			failed = append(failed, fmt.Sprintf("%s (write: %v)", repo.Name, err))
+			continue
 		}
 		logf(stderr, "[bough] %s: .env.local written (%d keys)", repo.Name, len(rendered))
 	}
-	return nil
+	return failed
 }
 
 // runPostCreateHooks fires each repository's `post_create:` lines in

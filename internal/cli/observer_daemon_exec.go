@@ -38,6 +38,19 @@ func runObserverOnceQuiet(ctx context.Context, root string) {
 	c.Stdout = nil
 	c.Stderr = nil
 	c.Env = os.Environ()
+	// Run the pass in its own process group (Setpgid) so that, on daemon
+	// shutdown (ctx cancel), we kill the WHOLE group — the run-once child AND
+	// the `claude --print` grandchild it spawned. CommandContext's default
+	// cancel kills only the direct child, leaving the grandchild (and its
+	// in-flight subscription call) orphaned to init after `observer stop`.
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	c.Cancel = func() error {
+		if c.Process == nil {
+			return os.ErrProcessDone
+		}
+		// Negative pid → signal the process group led by the child.
+		return syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+	}
 	// Best-effort: a failed pass logs via the run-once path; the
 	// daemon loop continues regardless.
 	_ = c.Run()
