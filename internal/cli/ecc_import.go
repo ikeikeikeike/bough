@@ -212,7 +212,12 @@ func copyTree(src, dst string, depth int) error {
 // link never aborts the migration.
 func copySymlink(path, target string, depth int) error {
 	if depth >= maxSymlinkDepth {
-		return fmt.Errorf("ecc import: symlink nesting exceeds %d at %s", maxSymlinkDepth, path)
+		// A nesting this deep is a cycle, not a real corpus (ECC nests a
+		// single level). Skip this one link rather than returning an error:
+		// a pathological/cyclic link must not abort the WHOLE import — the
+		// same tolerance the dangling/unreadable cases below already apply.
+		// Shallower levels were already copied, so no real data is lost.
+		return nil
 	}
 	info, err := os.Stat(path) // Stat follows the link; Lstat would not
 	if err != nil {

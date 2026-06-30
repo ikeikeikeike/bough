@@ -35,10 +35,12 @@ type SkillResult struct {
 }
 
 // AgentResult is an agent-eligible cluster (a superset relationship:
-// every agent is also a skill cluster). Label reuses the skill label.
+// every agent is also a skill cluster). Label + Description reuse the
+// resolved skill label/description so the agent and skill never diverge.
 type AgentResult struct {
-	Cluster Cluster
-	Label   string
+	Cluster     Cluster
+	Label       string
+	Description string
 }
 
 // CommandResult is a workflow instinct eligible for a slash command.
@@ -51,7 +53,7 @@ type CommandResult struct {
 type RejectedCluster struct {
 	Cluster Cluster
 	Gate    GateVerdict
-	Verdict *Verdict // non-nil only when it reached + failed GATE 5
+	Verdict *Verdict // non-nil when it reached GATE 5 and FAILED, or the judge errored (recorded, not minted)
 }
 
 // Pipeline runs the full evolve flow over a corpus. Judge is the
@@ -126,12 +128,14 @@ func (p Pipeline) Run(ctx context.Context, instincts []*homunculus.Instinct, lab
 			Gate:              gate,
 		})
 		if err != nil {
-			// Judge failure → treat as DOUBT so the operator reviews
-			// rather than the cluster silently disappearing.
+			// Judge unavailable (rate-limit / cap / transport). Shape a
+			// DOUBT verdict for the preview's rejected-cluster section, but
+			// the cluster is RECORDED AS REJECTED below (not minted) — we
+			// never actually judged it.
 			verdict = Verdict{
 				Decision:   DecisionDoubt,
 				Confidence: 0.3,
-				Reason:     "GATE 5 judge errored; surfaced as DOUBT for operator review: " + err.Error(),
+				Reason:     "GATE 5 judge errored; recorded as rejected (not minted): " + err.Error(),
 			}
 		}
 
@@ -147,6 +151,18 @@ func (p Pipeline) Run(ctx context.Context, instincts []*homunculus.Instinct, lab
 			})
 		}
 
+		// Judge UNAVAILABLE (rate-limit / parse / transport / circuit) is
+		// NOT a model decision. Do not mint a skill from a cluster we never
+		// actually judged, or a capped run permanently pollutes the catalog.
+		// Record it as rejected (the OnJudge line + errCapped note already
+		// surfaced it). A real DOUBT (err == nil) still flows to the switch.
+		if err != nil {
+			vCopy := verdict
+			out.Rejected = append(out.Rejected, RejectedCluster{Cluster: c, Gate: gate, Verdict: &vCopy})
+			continue
+		}
+
+		var skillLabel, skillDesc string
 		switch verdict.Decision {
 		case DecisionFail:
 			vCopy := verdict
@@ -154,26 +170,23 @@ func (p Pipeline) Run(ctx context.Context, instincts []*homunculus.Instinct, lab
 			continue
 		case DecisionDoubt:
 			label, desc, newLabel := resolveDoubtLabel(verdict, c, labels)
+			skillLabel, skillDesc = label, desc
 			out.Skills = append(out.Skills, SkillResult{
 				Cluster: c, Gate: gate, Verdict: verdict,
 				Label: label, Description: desc, NewLabel: newLabel,
 			})
 		case DecisionPass:
+			skillLabel, skillDesc = verdict.Label, verdict.Description
 			out.Skills = append(out.Skills, SkillResult{
 				Cluster: c, Gate: gate, Verdict: verdict,
 				Label: verdict.Label, Description: verdict.Description, NewLabel: true,
 			})
 		}
 
-		// Agent eligibility is checked on every accepted cluster.
-		if AgentEligible(c) {
-			label := verdict.Label
-			if label == "" {
-				label = resolveDoubtLabelOnly(verdict, c)
-			}
-			if IsValidLabel(label) {
-				out.Agents = append(out.Agents, AgentResult{Cluster: c, Label: label})
-			}
+		// Agent reuses the SAME label + description the skill resolved, so
+		// evolved/agents/<slug>.md and evolved/skills/<slug>/ never diverge.
+		if AgentEligible(c) && IsValidLabel(skillLabel) {
+			out.Agents = append(out.Agents, AgentResult{Cluster: c, Label: skillLabel, Description: skillDesc})
 		}
 	}
 
@@ -204,16 +217,6 @@ func resolveDoubtLabel(v Verdict, c Cluster, labels *ClusterLabels) (label, desc
 	}
 	_, exists := labels.Labels[label]
 	return label, desc, !exists
-}
-
-func resolveDoubtLabelOnly(v Verdict, c Cluster) string {
-	if c.NearestPrior != nil {
-		return c.NearestPrior.Label
-	}
-	if IsValidLabel(v.Label) {
-		return v.Label
-	}
-	return Slugify(firstMemberID(c))
 }
 
 func priorLabel(p *Prior) string {

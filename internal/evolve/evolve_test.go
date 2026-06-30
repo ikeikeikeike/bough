@@ -60,6 +60,47 @@ func TestDiscover_GroupsSimilar(t *testing.T) {
 	}
 }
 
+func TestDiscover_DeterministicClusterOrder(t *testing.T) {
+	// Two equal-size (2-member) clusters with disjoint vocab. Member-count
+	// alone cannot order them, so the Members[0].ID tiebreak must — and the
+	// order must be identical across runs despite connectedComponents
+	// ranging a (randomized) Go map.
+	instincts := []*homunculus.Instinct{
+		mkI("io-a", "io lives in the data layer wrapper interface"),
+		mkI("io-b", "io lives in data layer wrapper via interface"),
+		mkI("auth-a", "authorization guard policy capability assertion token"),
+		mkI("auth-b", "authorization policy guard capability assertion scope"),
+	}
+	th := Thresholds{MemberMin: 2, CohesionMin: 0.10, LexiconCoverageMax: 0.99, RelIsolationMin: 0.0}
+	var want []string
+	for run := 0; run < 40; run++ {
+		clusters := Discover(instincts, nil, th)
+		got := make([]string, len(clusters))
+		for i, c := range clusters {
+			got[i] = c.Members[0].ID
+		}
+		if run == 0 {
+			want = got
+			if len(want) < 2 {
+				t.Fatalf("expected >=2 clusters to exercise the tiebreak, got %d", len(want))
+			}
+			continue
+		}
+		if len(got) != len(want) {
+			t.Fatalf("run %d cluster count %d != %d", run, len(got), len(want))
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Fatalf("run %d order %v != run 0 %v (nondeterministic cluster order)", run, got, want)
+			}
+		}
+	}
+	// equal-size clusters must be ascending by Members[0].ID
+	if want[0] >= want[1] {
+		t.Errorf("equal-size tiebreak not ascending by min id: %v", want)
+	}
+}
+
 func TestEvaluateGates_RejectsSingleton(t *testing.T) {
 	c := Cluster{Members: []*homunculus.Instinct{mkI("solo", "single instinct")}}
 	c.memberTokens = []map[string]struct{}{Tokenize("single instinct")}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -417,18 +418,26 @@ func mapToInstinct(m map[string]any, ident homunculus.ProjectIdentity, now time.
 }
 
 func readConfidence(v any) float64 {
+	var f float64
 	switch n := v.(type) {
 	case float64:
-		return n
+		f = n
 	case json.Number:
-		f, _ := n.Float64()
-		return f
+		f, _ = n.Float64()
 	case string:
-		var f float64
 		_, _ = fmt.Sscanf(n, "%f", &f)
-		return f
 	}
-	return 0
+	// The observer LLM occasionally emits an out-of-range confidence
+	// (e.g. 5.0) or, via the string path, a non-numeric "NaN". Clamp to
+	// [0,1] at this single entry point so one bad record cannot dominate
+	// the injection ranking or render as "[500%]" / "NaN%".
+	if math.IsNaN(f) || f < 0 {
+		return 0
+	}
+	if f > 1 {
+		return 1
+	}
+	return f
 }
 
 func buildInstinctBody(action string, evidence []any) string {

@@ -9,6 +9,26 @@ import (
 	"github.com/ikeikeikeike/bough/internal/prompts"
 )
 
+func TestReadConfidence_Clamps(t *testing.T) {
+	cases := []struct {
+		in   any
+		want float64
+	}{
+		{0.7, 0.7},
+		{5.0, 1.0},  // hallucinated over-range → clamp to 1
+		{-2.0, 0.0}, // negative → clamp to 0
+		{1.0, 1.0},
+		{0.0, 0.0},
+		{"0.85", 0.85},
+		{"3", 1.0}, // string over-range → clamp
+	}
+	for _, c := range cases {
+		if got := readConfidence(c.in); got != c.want {
+			t.Errorf("readConfidence(%v) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
 func TestCheckInstinctSafety(t *testing.T) {
 	cases := []struct {
 		name string

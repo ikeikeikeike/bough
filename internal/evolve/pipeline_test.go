@@ -2,6 +2,7 @@ package evolve
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -163,11 +164,17 @@ func TestPipeline_DoubtReusesPriorLabel(t *testing.T) {
 	if s.NewLabel {
 		t.Errorf("DOUBT with a nearest prior should reuse, not mint: %+v", s)
 	}
+	// The agent (if eligible) reuses the SAME resolved label as the skill,
+	// so evolved/agents/<slug> and evolved/skills/<slug> never diverge even
+	// though the judge's verdict.Label was overridden by the prior reuse.
+	if len(out.Agents) > 0 && out.Agents[0].Label != s.Label {
+		t.Errorf("agent label %q != skill label %q (must reuse)", out.Agents[0].Label, s.Label)
+	}
 }
 
-func TestPipeline_JudgeErrorBecomesDoubt(t *testing.T) {
+func TestPipeline_JudgeUnavailableSkipsEmit(t *testing.T) {
 	p := Pipeline{
-		Judge: stubJudge{err: context.DeadlineExceeded},
+		Judge: stubJudge{err: context.DeadlineExceeded}, // judge unavailable
 		Now:   func() time.Time { return time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC) },
 	}
 	labels := &ClusterLabels{Labels: map[string]string{}}
@@ -175,12 +182,22 @@ func TestPipeline_JudgeErrorBecomesDoubt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	// Judge error → DOUBT → skill with no prior → minted with a
-	// slugified fallback label.
-	if len(out.Skills) != 1 {
-		t.Fatalf("Skills = %d, want 1 (judge error → DOUBT)", len(out.Skills))
+	// A judge we never actually reached (rate-limit / cap / transport error)
+	// must NOT mint a placeholder skill — that permanently pollutes the
+	// catalog. It is recorded as rejected so the preview still surfaces it.
+	if len(out.Skills) != 0 {
+		t.Fatalf("Skills = %d, want 0 (judge unavailable must not mint)", len(out.Skills))
 	}
-	if out.Skills[0].Verdict.Decision != DecisionDoubt {
-		t.Errorf("verdict = %q, want DOUBT", out.Skills[0].Verdict.Decision)
+	if len(out.Agents) != 0 {
+		t.Errorf("Agents = %d, want 0 (no skill → no agent)", len(out.Agents))
+	}
+	found := false
+	for _, r := range out.Rejected {
+		if r.Verdict != nil && strings.Contains(r.Verdict.Reason, "judge errored") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("an un-judged cluster must be recorded as rejected with the judge error: %+v", out.Rejected)
 	}
 }

@@ -342,7 +342,11 @@ func materializeRepositories(
 		// --local). Best-effort, like the rest of this loop: a clone
 		// failure logs + skips the repo (and --strict turns the run
 		// non-zero). No source + not present → also a per-repo failure.
-		if !isDir(repoSrc) {
+		// Presence is "is a git repo" (a `.git` entry), NOT merely "is a
+		// directory": a stray/empty/partial-clone leftover dir must not
+		// shadow the source: clone — otherwise every future create runs git
+		// ops against a non-repo and fails with an opaque exit-128 forever.
+		if !isGitRepo(repoSrc) {
 			if repo.Source == "" {
 				logf(stderr, "[bough] %s: not present at %s and no `source:` to clone from", repo.Name, repoSrc)
 				failed = append(failed, repo.Name)
@@ -418,11 +422,21 @@ func chooseBase(branchStrategy, detected string) string {
 	return strings.TrimSpace(detected)
 }
 
-// isDir reports whether p exists and is a directory — the "is this repo
-// already present?" check before deciding whether to clone its source.
+// isDir reports whether p exists and is a directory.
 func isDir(p string) bool {
 	fi, err := os.Stat(p)
 	return err == nil && fi.IsDir()
+}
+
+// isGitRepo reports whether p is (the root of) a git repository — i.e. a
+// `.git` entry is present (a dir for a normal clone/checkout, a gitfile
+// for a worktree/submodule). This is the "is this repo already acquired?"
+// guard before cloning a declared `source:` — deliberately stricter than
+// isDir so a stray, empty, or partial-clone leftover directory does not
+// masquerade as the repo and permanently shadow the clone.
+func isGitRepo(p string) bool {
+	_, err := os.Lstat(filepath.Join(p, ".git"))
+	return err == nil
 }
 
 // ensureSymlink makes linkPath an absolute symlink to target, idempotently. An

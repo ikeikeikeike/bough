@@ -66,6 +66,32 @@ registry:
 	}
 }
 
+// TestLoad_RejectsUnusableSource: a source whose basename derives to an
+// empty or traversing name must be rejected, not silently leave Name=""
+// (→ filepath.Join(root,"")=root) or Name=".."/"." (→ parent/root).
+func TestLoad_RejectsUnusableSource(t *testing.T) {
+	for _, src := range []string{".git", "/", "   ", ".", ".."} {
+		y := "schema_version: 2\nmonorepo_root: \".\"\nrepositories:\n  - source: \"" + src + "\"\nregistry:\n  path: \".bough-ports.json\"\n"
+		if _, err := LoadFromBytes([]byte(y), "t.yaml"); err == nil {
+			t.Errorf("source %q should be rejected (derives empty/traversing name)", src)
+		}
+	}
+}
+
+// TestLoad_RejectsTraversalName: a name (typed or derived) that is not a
+// single path segment must be rejected so worktree / `bough remove` git
+// ops can never escape to the monorepo root, its parent, or elsewhere.
+func TestLoad_RejectsTraversalName(t *testing.T) {
+	// single-quoted YAML so a literal backslash survives (double-quoted
+	// "a\b" would be parsed as a backspace escape, not the separator).
+	for _, name := range []string{".", "..", "a/b", `a\b`} {
+		y := "schema_version: 2\nmonorepo_root: \".\"\nrepositories:\n  - name: '" + name + "'\n    branch_strategy: develop\nregistry:\n  path: \".bough-ports.json\"\n"
+		if _, err := LoadFromBytes([]byte(y), "t.yaml"); err == nil {
+			t.Errorf("name %q should be rejected (not a single segment)", name)
+		}
+	}
+}
+
 // TestLoad_EvolveClaudeMDOnSessionEnd covers the v0.9.14 opt-in flag:
 // it must default to false when absent (= bough's no-repo-contamination
 // default) and parse true when set under instinct:.

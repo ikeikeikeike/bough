@@ -183,16 +183,19 @@ func (r *Runner) Clone(ctx context.Context, source, dst, baseDir string) error {
 
 // isRemoteURL reports whether source is a remote git URL rather than a
 // local filesystem path. Remote = contains "://" (https / ssh / file)
-// or is scp-like `user@host:path` (an `@` followed by a `:` with no
-// earlier `/`). Everything else is a local path → cloned with --local.
+// or is scp-like `[user@]host:path` — a ':' that appears before any '/'.
+// git's scp syntax does NOT require a user, so a userless `host:org/repo`
+// and an ssh-config alias `gh:org/repo` are remotes too (the previous
+// `@`-required heuristic misrouted those to --local). A local path's
+// first ':' (if any) only appears after a '/' (e.g. /a/b:c) or not at
+// all. Everything else is a local path → cloned with --local.
 func isRemoteURL(source string) bool {
 	if strings.Contains(source, "://") {
 		return true
 	}
-	at := strings.Index(source, "@")
 	colon := strings.Index(source, ":")
 	slash := strings.Index(source, "/")
-	return at >= 0 && colon > at && (slash < 0 || slash > colon)
+	return colon >= 0 && (slash < 0 || colon < slash)
 }
 
 // expandHome resolves a leading `~` / `~/` to the user's home directory.
