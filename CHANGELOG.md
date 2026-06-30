@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.9.19
+
+Follow-up to v0.9.18: the three items deferred from the #48–#54 review are now fixed
+(no carryover).
+
+### Fixed
+
+- **Confidence demotion no longer fires on ordinary task prompts.** The correction-marker
+  set drops the task-dominant "error" / "fix" / "correct" (which dominate normal task
+  prompts like "fix the bug" / "there's an error"), keeping only words that read as a
+  correction of the assistant ("wrong" / "mistake" / "incorrect" / "undo" / "revert" /
+  "broke" / "broken"). With the v0.9.18 prompt-scope + whole-word matching, a good instinct
+  is now demoted only when the user actually corrected bough.
+- **`bough create` no longer aborts on a bad env_local template.** A failed `.env.local`
+  render/write is now best-effort (like `post_create`): it is recorded and surfaced in the
+  partial-failure summary, but the worktree-path stdout emit (the WorktreeCreate cd
+  contract) and `--strict` accounting still happen, so Claude Code still lands in the
+  worktree.
+- **The observer daemon reaps its `claude --print` grandchild on shutdown.** The run-once
+  pass now runs in its own process group (Setpgid) and the daemon kills the whole group on
+  cancel, so a `claude --print` spawned by an in-flight pass is no longer orphaned to init
+  after `observer stop`.
+
 ## v0.9.18
 
 Retrospective /review of the merged continuous-learning PRs #48–#54 (which shipped

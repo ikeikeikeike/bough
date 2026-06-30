@@ -33,12 +33,15 @@ import (
 // demotion toward removal (ECC clamps to [0.1, 0.95]).
 var confidenceBands = []float64{0.30, 0.40, 0.50, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85}
 
-// correctionMarkerRE matches ECC's correction markers as WHOLE WORDS
-// (case-insensitive). Whole-word anchoring is essential: a naked substring
-// scan flags "0 errors" (error), "prefix"/"suffix"/"fixture"/"fixed" (fix),
-// and "correctly"/"incorrect" (correct) — tokens that appear in nearly every
-// session — which demoted good instincts every session (v0.9.18 review).
-var correctionMarkerRE = regexp.MustCompile(`(?i)\b(error|mistake|wrong|fix|correct|undo)\b`)
+// correctionMarkerRE matches a USER correction of the assistant as a whole
+// word (case-insensitive). It deliberately DIVERGES from ECC's set
+// (error|mistake|wrong|fix|correct|undo): "error", "fix" and "correct"
+// dominate ordinary TASK prompts ("fix the bug", "there's an error", "correct
+// the value") rather than corrections of the assistant, so they are dropped;
+// the kept set leans to words that, in a prompt, mean "you (the assistant) did
+// something wrong". Whole-word anchoring also stops sub-word false positives
+// ("prefix"/"fixture"/"correctly"/"undone").
+var correctionMarkerRE = regexp.MustCompile(`(?i)\b(wrong|mistake|incorrect|undo|revert|broke|broken)\b`)
 
 // ReinforceDelta / ContradictDelta are how many bands an instinct
 // moves on a reinforcement / contradiction. ECC moves one band each
@@ -209,15 +212,15 @@ func instinctOverlap(in *homunculus.Instinct, obsTokens map[string]struct{}) flo
 // by …", or JSON like `{"error":null}` are not corrections, yet they appear
 // in essentially every session — so the demotion branch fired constantly and
 // good instincts decayed out of the injected set. A correction is something
-// the user TYPED ("no, that's wrong" / "undo that" / "fix this"), which lives
-// in the prompt.
+// the user TYPED, which lives in the prompt.
 //
-// Residual (documented, not yet addressed): a marker can still sit in an
-// opening TASK prompt ("fix the login bug") rather than a correction, so this
-// is conservative-but-imperfect. A precise "user is correcting the assistant"
-// signal (correction phrases, or markers only in 2nd+ prompts) is a candidate
-// refinement; demotion is one band, token-overlap-gated, and re-reinforced on
-// the next clean exercise, so the residual is bounded.
+// Marker precision: the marker set (correctionMarkerRE) drops the task-dominant
+// "error"/"fix"/"correct", so an ordinary TASK prompt ("fix the login bug",
+// "there's an error in X") no longer demotes — only a prompt that reads as a
+// correction of the assistant ("that's wrong", "undo that", "you broke it")
+// does. It is still a keyword heuristic, not perfect; demotion is one band,
+// token-overlap-gated, and re-reinforced on the next clean exercise, so any
+// residual over-fire is bounded.
 func sessionHadCorrection(obs []observe.Observation) bool {
 	for _, o := range obs {
 		if o.Prompt == "" {

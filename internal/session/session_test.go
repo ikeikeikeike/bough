@@ -182,6 +182,21 @@ func TestSessionHadCorrection_PromptScopedWordBoundary(t *testing.T) {
 			[]observe.Observation{{Event: "UserPromptSubmit", Prompt: "undo that change"}},
 			true,
 		},
+		{
+			"task prompt 'fix the bug' is NOT a correction (v0.9.19 marker narrowing)",
+			[]observe.Observation{{Event: "UserPromptSubmit", Prompt: "fix the login bug"}},
+			false,
+		},
+		{
+			"task prompt 'there is an error' is NOT a correction",
+			[]observe.Observation{{Event: "UserPromptSubmit", Prompt: "there is an error in the parser, please handle it"}},
+			false,
+		},
+		{
+			"prompt 'you broke it' is a correction",
+			[]observe.Observation{{Event: "UserPromptSubmit", Prompt: "you broke the build"}},
+			true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
