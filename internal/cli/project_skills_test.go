@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -36,11 +37,21 @@ func TestEnsureSymlink(t *testing.T) {
 	if got, _ := os.Readlink(link); got != target2 {
 		t.Errorf("repointed = %q, want %q", got, target2)
 	}
-	// refuse to clobber a real (non-symlink) dir
+	// refuse to clobber a real (non-symlink) dir, citing the reason
 	realDir := filepath.Join(tmp, "real")
 	_ = os.MkdirAll(realDir, 0o755)
-	if err := ensureSymlink(target, realDir); err == nil {
-		t.Errorf("ensureSymlink must refuse to clobber a real dir")
+	if err := ensureSymlink(target, realDir); err == nil || !strings.Contains(err.Error(), "not a symlink") {
+		t.Errorf("ensureSymlink must refuse to clobber a real dir: got %v", err)
+	}
+	// refuse to clobber a real (non-symlink) FILE a maintainer hand-authored,
+	// and leave its contents intact
+	realFile := filepath.Join(tmp, "hand-authored")
+	_ = os.WriteFile(realFile, []byte("operator's skill"), 0o644)
+	if err := ensureSymlink(target, realFile); err == nil || !strings.Contains(err.Error(), "not a symlink") {
+		t.Errorf("ensureSymlink must refuse to clobber a real file: got %v", err)
+	}
+	if b, _ := os.ReadFile(realFile); string(b) != "operator's skill" {
+		t.Errorf("hand-authored file content was modified")
 	}
 }
 

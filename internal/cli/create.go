@@ -429,6 +429,14 @@ func isDir(p string) bool {
 // already-correct symlink is a no-op; a stale symlink is repointed; a real
 // (non-symlink) file/dir is refused so a hand-authored path is never clobbered.
 func ensureSymlink(target, linkPath string) error {
+	// Guarantee an absolute target so the link resolves the same regardless of
+	// the reader's CWD (the contract above). Evolved-skill sources can be
+	// relative when BOUGH_HOMUNCULUS_DIR is set to a relative path; a raw
+	// os.Symlink of a relative target would resolve against linkPath's dir and
+	// dangle.
+	if abs, err := filepath.Abs(target); err == nil {
+		target = abs
+	}
 	if info, err := os.Lstat(linkPath); err == nil {
 		if info.Mode()&os.ModeSymlink == 0 {
 			return fmt.Errorf("%s exists and is not a symlink", linkPath)

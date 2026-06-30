@@ -20,6 +20,20 @@
   observer / writer pool into. It now uses `resolveMonorepoRoot(cwd)`, consistent with inject / session-end
   / observer.
 
+### Internal
+
+- Dropped `WriteSkill`'s now-dead `symlinkDir` parameter and the `refreshSymlink` helper from
+  `internal/evolve`. Project-scope symlinking moved to `cli.ensureSymlink` / `cli.deployProjectSkills`,
+  so the in-emitter symlink path was unreachable. `ensureSymlink` now also resolves its target to an
+  absolute path so a relative `BOUGH_HOMUNCULUS_DIR` cannot produce a dangling link.
+
+### Notes
+
+- The project `<repo>/.claude/skills/<slug>` entries are symlinks into your per-user homunculus
+  (`~/.local/share/bough-homunculus/...`), so their targets are **machine- and user-specific**. If your
+  monorepo root is under version control, do not commit them — add `.claude/skills/` to `.gitignore` (or
+  keep the bough root out of git, as the auba monorepo does). `bough evolve` regenerates them.
+
 ## v0.9.19
 
 Follow-up to v0.9.18: the three items deferred from the #48–#54 review are now fixed
