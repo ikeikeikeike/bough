@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -427,10 +428,10 @@ func readConfidence(v any) float64 {
 		_, _ = fmt.Sscanf(n, "%f", &f)
 	}
 	// The observer LLM occasionally emits an out-of-range confidence
-	// (e.g. 5.0). Clamp to [0,1] at this single entry point so one
-	// hallucinated record cannot dominate the injection ranking or render
-	// as "[500%]".
-	if f < 0 {
+	// (e.g. 5.0) or, via the string path, a non-numeric "NaN". Clamp to
+	// [0,1] at this single entry point so one bad record cannot dominate
+	// the injection ranking or render as "[500%]" / "NaN%".
+	if math.IsNaN(f) || f < 0 {
 		return 0
 	}
 	if f > 1 {

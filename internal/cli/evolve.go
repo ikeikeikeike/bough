@@ -120,7 +120,7 @@ evolved/commands/<slug>.md.`,
 				return err
 			}
 			if errCapped > 0 {
-				fmt.Fprintf(stderr, "note: %d cluster(s) could not be LLM-judged (cap/parse) and defaulted to DOUBT — re-run with a higher --max-calls to judge them\n", errCapped)
+				fmt.Fprintf(stderr, "note: %d cluster(s) could not be LLM-judged (cap/parse) and were skipped (no skill written) — re-run with a higher --max-calls to judge them\n", errCapped)
 			}
 			return persistEvolveOutcome(stdout, stderr, ident, layout, labels, labelsPath, out, th, noSymlink, prov)
 		},

@@ -53,7 +53,7 @@ type CommandResult struct {
 type RejectedCluster struct {
 	Cluster Cluster
 	Gate    GateVerdict
-	Verdict *Verdict // non-nil only when it reached + failed GATE 5
+	Verdict *Verdict // non-nil when it reached GATE 5 and FAILED, or the judge errored (recorded, not minted)
 }
 
 // Pipeline runs the full evolve flow over a corpus. Judge is the
@@ -128,12 +128,14 @@ func (p Pipeline) Run(ctx context.Context, instincts []*homunculus.Instinct, lab
 			Gate:              gate,
 		})
 		if err != nil {
-			// Judge failure → treat as DOUBT so the operator reviews
-			// rather than the cluster silently disappearing.
+			// Judge unavailable (rate-limit / cap / transport). Shape a
+			// DOUBT verdict for the preview's rejected-cluster section, but
+			// the cluster is RECORDED AS REJECTED below (not minted) — we
+			// never actually judged it.
 			verdict = Verdict{
 				Decision:   DecisionDoubt,
 				Confidence: 0.3,
-				Reason:     "GATE 5 judge errored; surfaced as DOUBT for operator review: " + err.Error(),
+				Reason:     "GATE 5 judge errored; recorded as rejected (not minted): " + err.Error(),
 			}
 		}
 
