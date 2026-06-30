@@ -53,6 +53,15 @@ func TestEnsureSymlink(t *testing.T) {
 	if b, _ := os.ReadFile(realFile); string(b) != "operator's skill" {
 		t.Errorf("hand-authored file content was modified")
 	}
+	// a RELATIVE target is stored as an ABSOLUTE link, so the link resolves the
+	// same regardless of the reader's CWD (ensureSymlink's documented contract)
+	relLink := filepath.Join(tmp, "rel-link")
+	if err := ensureSymlink("rel/ative/target", relLink); err != nil {
+		t.Fatalf("relative target: %v", err)
+	}
+	if got, _ := os.Readlink(relLink); !filepath.IsAbs(got) {
+		t.Errorf("relative target was not made absolute: %q", got)
+	}
 }
 
 // TestDeployProjectSkills verifies evolved skills are symlinked into the
