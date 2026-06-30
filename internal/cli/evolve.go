@@ -110,7 +110,7 @@ evolved/commands/<slug>.md.`,
 					marker := pr.Decision
 					if pr.Err != nil {
 						errCapped++
-						marker = "DOUBT (judge unavailable — rate-limit/parse, not the model's call)"
+						marker = fmt.Sprintf("DOUBT (judge unavailable: %v — not the model's call)", pr.Err)
 					}
 					fmt.Fprintf(stderr, "  [GATE5] %d: %s (%d members) → %s\n", pr.Index, pr.Sample, pr.Members, marker)
 				},
@@ -183,7 +183,7 @@ func persistEvolveOutcome(stdout, stderr io.Writer, ident homunculus.ProjectIden
 
 	agentsWritten := 0
 	for _, a := range out.Agents {
-		art := evolve.RenderAgent(a.Label, a.Cluster, now)
+		art := evolve.RenderAgent(a.Label, a.Description, a.Cluster, now)
 		if _, err := evolve.WriteAgent(agentsDir, art); err != nil {
 			fmt.Fprintf(stderr, "  agent %s: %v\n", a.Label, err)
 			continue

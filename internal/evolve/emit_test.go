@@ -82,15 +82,17 @@ func TestAgentEligible(t *testing.T) {
 
 func TestRenderAgent(t *testing.T) {
 	c := mkCluster(0.8, 0.8, 0.8)
-	art := RenderAgent("diagnostic-batching", c, time.Now())
-	if !strings.Contains(art.Body, "model: sonnet") {
-		t.Errorf("agent missing model line")
-	}
-	if !strings.Contains(art.Body, "tools: Read, Grep, Glob") {
-		t.Errorf("agent missing read-only tools line")
-	}
-	if !strings.Contains(art.Body, "avg confidence: 80%") {
-		t.Errorf("agent missing avg confidence: %s", art.Body)
+	art := RenderAgent("diagnostic-batching", "Apply when batching diagnostics", c, time.Now())
+	for _, want := range []string{
+		"name: diagnostic-batching",                    // REQUIRED for Claude Code to load the agent
+		"description: Apply when batching diagnostics", // ditto
+		"model: sonnet",
+		"tools: Read, Grep, Glob",
+		"avg confidence: 80%",
+	} {
+		if !strings.Contains(art.Body, want) {
+			t.Errorf("agent missing %q:\n%s", want, art.Body)
+		}
 	}
 }
 

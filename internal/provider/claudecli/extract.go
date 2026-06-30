@@ -56,33 +56,25 @@ func ExtractResultJSON(raw []byte) ([]byte, error) {
 }
 
 // resultTextFromEvents finds the "type":"result" element of the event
-// array and returns its "result" field as bytes. Falls back to the last
-// "assistant" event carrying a result if no terminal result element is
-// present (a truncated / max-turns-bounded stream).
+// array and returns its "result" field as bytes. (An "assistant" event
+// carries its text under "message", never a top-level "result", so there
+// is no assistant-level fallback to attempt — a stream with no terminal
+// result element is a genuine error.)
 func resultTextFromEvents(arr []byte) ([]byte, error) {
 	var events []map[string]json.RawMessage
 	if err := json.Unmarshal(arr, &events); err != nil {
 		return nil, fmt.Errorf("claudecli.ExtractResultJSON: event array: %w", err)
 	}
-	var lastAssistant []byte
 	for _, ev := range events {
 		typ := ""
 		if t, ok := ev["type"]; ok {
 			_ = json.Unmarshal(t, &typ)
 		}
-		switch typ {
-		case "result":
+		if typ == "result" {
 			if r, ok := ev["result"]; ok {
 				return unquoteResult(r), nil
 			}
-		case "assistant":
-			if r, ok := ev["result"]; ok {
-				lastAssistant = unquoteResult(r)
-			}
 		}
-	}
-	if lastAssistant != nil {
-		return lastAssistant, nil
 	}
 	return nil, fmt.Errorf("claudecli.ExtractResultJSON: no result element in %d events", len(events))
 }

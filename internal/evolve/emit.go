@@ -98,15 +98,23 @@ func AgentEligible(c Cluster) bool {
 	return avgConfidence(c.Members) >= AgentMinConfidence
 }
 
-// RenderAgent builds an evolved/agents/<slug>.md body. The shape
-// mirrors ECC's agent frontmatter (model + tools) followed by the
-// source-instinct list. Tools default to the read-only set since a
-// learned agent should not gain write capability without operator
-// review.
-func RenderAgent(label string, c Cluster, now time.Time) SkillArtifact {
+// RenderAgent builds an evolved/agents/<slug>.md body. The frontmatter
+// carries name + description (REQUIRED — Claude Code will not load a
+// subagent without them) plus model + tools, followed by the source-
+// instinct list. Tools default to the read-only set since a learned
+// agent should not gain write capability without operator review. The
+// label + description are the same the skill resolved, so the agent and
+// skill never diverge.
+func RenderAgent(label, description string, c Cluster, now time.Time) SkillArtifact {
 	ids := memberIDs(c)
+	desc := description
+	if desc == "" && len(c.Members) > 0 {
+		desc = firstActionLine(c.Members[0].Body)
+	}
 	var b strings.Builder
 	b.WriteString("---\n")
+	fmt.Fprintf(&b, "name: %s\n", label)
+	fmt.Fprintf(&b, "description: %s\n", yamlOneLine(desc))
 	b.WriteString("model: sonnet\n")
 	b.WriteString("tools: Read, Grep, Glob\n")
 	fmt.Fprintf(&b, "generated_by: bough-evolve@v0.9.1\n")
@@ -118,7 +126,7 @@ func RenderAgent(label string, c Cluster, now time.Time) SkillArtifact {
 	for _, id := range ids {
 		fmt.Fprintf(&b, "- %s\n", id)
 	}
-	return SkillArtifact{Slug: label, Body: b.String(), Members: ids}
+	return SkillArtifact{Slug: label, Description: desc, Body: b.String(), Members: ids}
 }
 
 // WriteAgent persists an agent body to <agentsDir>/<slug>.md.

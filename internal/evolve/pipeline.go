@@ -35,10 +35,12 @@ type SkillResult struct {
 }
 
 // AgentResult is an agent-eligible cluster (a superset relationship:
-// every agent is also a skill cluster). Label reuses the skill label.
+// every agent is also a skill cluster). Label + Description reuse the
+// resolved skill label/description so the agent and skill never diverge.
 type AgentResult struct {
-	Cluster Cluster
-	Label   string
+	Cluster     Cluster
+	Label       string
+	Description string
 }
 
 // CommandResult is a workflow instinct eligible for a slash command.
@@ -147,6 +149,18 @@ func (p Pipeline) Run(ctx context.Context, instincts []*homunculus.Instinct, lab
 			})
 		}
 
+		// Judge UNAVAILABLE (rate-limit / parse / transport / circuit) is
+		// NOT a model decision. Do not mint a skill from a cluster we never
+		// actually judged, or a capped run permanently pollutes the catalog.
+		// Record it as rejected (the OnJudge line + errCapped note already
+		// surfaced it). A real DOUBT (err == nil) still flows to the switch.
+		if err != nil {
+			vCopy := verdict
+			out.Rejected = append(out.Rejected, RejectedCluster{Cluster: c, Gate: gate, Verdict: &vCopy})
+			continue
+		}
+
+		var skillLabel, skillDesc string
 		switch verdict.Decision {
 		case DecisionFail:
 			vCopy := verdict
@@ -154,26 +168,23 @@ func (p Pipeline) Run(ctx context.Context, instincts []*homunculus.Instinct, lab
 			continue
 		case DecisionDoubt:
 			label, desc, newLabel := resolveDoubtLabel(verdict, c, labels)
+			skillLabel, skillDesc = label, desc
 			out.Skills = append(out.Skills, SkillResult{
 				Cluster: c, Gate: gate, Verdict: verdict,
 				Label: label, Description: desc, NewLabel: newLabel,
 			})
 		case DecisionPass:
+			skillLabel, skillDesc = verdict.Label, verdict.Description
 			out.Skills = append(out.Skills, SkillResult{
 				Cluster: c, Gate: gate, Verdict: verdict,
 				Label: verdict.Label, Description: verdict.Description, NewLabel: true,
 			})
 		}
 
-		// Agent eligibility is checked on every accepted cluster.
-		if AgentEligible(c) {
-			label := verdict.Label
-			if label == "" {
-				label = resolveDoubtLabelOnly(verdict, c)
-			}
-			if IsValidLabel(label) {
-				out.Agents = append(out.Agents, AgentResult{Cluster: c, Label: label})
-			}
+		// Agent reuses the SAME label + description the skill resolved, so
+		// evolved/agents/<slug>.md and evolved/skills/<slug>/ never diverge.
+		if AgentEligible(c) && IsValidLabel(skillLabel) {
+			out.Agents = append(out.Agents, AgentResult{Cluster: c, Label: skillLabel, Description: skillDesc})
 		}
 	}
 
@@ -204,16 +215,6 @@ func resolveDoubtLabel(v Verdict, c Cluster, labels *ClusterLabels) (label, desc
 	}
 	_, exists := labels.Labels[label]
 	return label, desc, !exists
-}
-
-func resolveDoubtLabelOnly(v Verdict, c Cluster) string {
-	if c.NearestPrior != nil {
-		return c.NearestPrior.Label
-	}
-	if IsValidLabel(v.Label) {
-		return v.Label
-	}
-	return Slugify(firstMemberID(c))
 }
 
 func priorLabel(p *Prior) string {

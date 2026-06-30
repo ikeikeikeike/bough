@@ -28,11 +28,11 @@ type Prior struct {
 // survived discovery. The mechanical gates score it; the LLM judge
 // labels it.
 type Cluster struct {
-	Members          []*homunculus.Instinct
-	memberTokens     []map[string]struct{}
-	candidateTokens  map[string]struct{}
-	NearestPrior     *Prior
-	NearestOverlap   float64
+	Members         []*homunculus.Instinct
+	memberTokens    []map[string]struct{}
+	candidateTokens map[string]struct{}
+	NearestPrior    *Prior
+	NearestOverlap  float64
 }
 
 // instinctSurface concatenates the fields ECC tokenizes for
@@ -92,14 +92,30 @@ func Discover(instincts []*homunculus.Instinct, priors []Prior, th Thresholds) [
 	}
 
 	// Largest clusters first so preview output + audit surface the
-	// most-evidenced candidates at the top.
+	// most-evidenced candidates at the top. Tiebreak by Members[0].ID (each
+	// cluster's min id; clusters partition the corpus → keys are unique) so
+	// the order is TOTAL and deterministic — otherwise equal-size clusters
+	// kept the random map-iteration order, and under the GATE-5 call cap
+	// which clusters got judged (vs defaulted to DOUBT) changed per run.
 	sort.SliceStable(clusters, func(i, j int) bool {
-		return len(clusters[i].Members) > len(clusters[j].Members)
+		if li, lj := len(clusters[i].Members), len(clusters[j].Members); li != lj {
+			return li > lj
+		}
+		return clusters[i].Members[0].ID < clusters[j].Members[0].ID
 	})
 	return clusters
 }
 
 func buildCluster(comp []memberToken, priors []Prior) Cluster {
+	// Order members by id so Members[0] is the cluster's min-id member
+	// regardless of caller input order (connectedComponents builds
+	// components by ranging a map, which Go randomizes per run). This makes
+	// the cluster's identity — and the Discover tiebreak — deterministic.
+	// comp is a fresh per-component slice with no other reader, so an
+	// in-place sort is safe.
+	sort.SliceStable(comp, func(i, j int) bool {
+		return comp[i].Instinct.ID < comp[j].Instinct.ID
+	})
 	c := Cluster{
 		Members:      make([]*homunculus.Instinct, 0, len(comp)),
 		memberTokens: make([]map[string]struct{}, 0, len(comp)),
