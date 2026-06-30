@@ -15,9 +15,14 @@ func TestIsRemoteURL(t *testing.T) {
 		"https://github.com/org/repo",
 		"ssh://git@host/path",
 		"file:///abs/path",
+		// userless scp short-syntax + ssh-config Host alias (user is
+		// optional in git's scp grammar) — must be remote, not --local.
+		"github.com:org/repo",
+		"gh:org/repo",
 	}
 	local := []string{
 		"~/src/repo", "./repo", "../repo", "/abs/repo", "repo", "path/to/repo",
+		"/a/b:c", // a colon AFTER a slash is a local path, not scp
 	}
 	for _, s := range remote {
 		if !isRemoteURL(s) {

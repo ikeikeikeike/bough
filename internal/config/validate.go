@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // validateSemantic enforces cross-field rules that go-playground/
@@ -69,10 +70,25 @@ func (c *Config) validateSemantic() error {
 
 	seenRepo := map[string]bool{}
 	for i, r := range c.Repositories {
-		// Name is normalized from Source before validation, so an empty
-		// Name here means neither was supplied.
-		if r.Name == "" && r.Source == "" {
-			errs = append(errs, fmt.Errorf("config: repositories[%d] needs 'name' or 'source'", i))
+		// Name is normalized from Source before validation. An empty Name
+		// here means neither was supplied OR the Source did not yield a
+		// usable basename (e.g. ".git", "/", "   " all derive to "").
+		if r.Name == "" {
+			if r.Source == "" {
+				errs = append(errs, fmt.Errorf("config: repositories[%d] needs 'name' or 'source'", i))
+			} else {
+				errs = append(errs, fmt.Errorf("config: repositories[%d].source=%q does not yield a repo name; set 'name' explicitly", i, r.Source))
+			}
+			continue
+		}
+		// Name becomes a path segment under the monorepo root AND each
+		// worktree (filepath.Join(root, Name)). Reject anything that is not
+		// a single, non-traversing segment so a stray "." / ".." / "a/b"
+		// — whether typed or derived from Source — can never resolve the
+		// worktree-add / `bough remove` git ops (incl. `branch -D`) onto the
+		// monorepo root, its parent, or an arbitrary path.
+		if r.Name == "." || r.Name == ".." || strings.ContainsAny(r.Name, `/\`) {
+			errs = append(errs, fmt.Errorf("config: repositories[%d].name=%q must be a single path segment (no '.', '..', '/' or '\\')", i, r.Name))
 			continue
 		}
 		if seenRepo[r.Name] {
