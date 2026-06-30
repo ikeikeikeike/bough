@@ -231,6 +231,20 @@ func persistEvolveOutcome(stdout, stderr io.Writer, ident homunculus.ProjectIden
 // of truth — these are symlinks, not copies.
 func deployProjectSkills(stdout, stderr io.Writer, evolvedSkillsDir, monorepoRoot string) {
 	projectDir := filepath.Join(monorepoRoot, ".claude", "skills")
+	globalDir := ""
+	if home, err := os.UserHomeDir(); err == nil {
+		globalDir = filepath.Join(home, ".claude", "skills")
+	}
+	deploySkills(stdout, stderr, evolvedSkillsDir, projectDir, globalDir)
+}
+
+// deploySkills links every evolved skill into projectDir and prunes stale links
+// from globalDir. Split out (with explicit dirs) for testability. The prune is
+// SKIPPED when globalDir == projectDir — e.g. the monorepo root resolves to
+// $HOME — because otherwise it would delete the very project links just created
+// (their targets are in evolvedSkillsDir → they match the prune prefix), so
+// skills would silently never deploy.
+func deploySkills(stdout, stderr io.Writer, evolvedSkillsDir, projectDir, globalDir string) {
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		fmt.Fprintf(stderr, "  deploy skills: mkdir %s: %v\n", projectDir, err)
 		return
@@ -257,8 +271,8 @@ func deployProjectSkills(stdout, stderr io.Writer, evolvedSkillsDir, monorepoRoo
 	if linked > 0 {
 		fmt.Fprintf(stdout, "  linked %d skill(s) into %s\n", linked, projectDir)
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		pruneStaleGlobalSkillLinks(stdout, filepath.Join(home, ".claude", "skills"), evolvedSkillsDir)
+	if globalDir != "" && filepath.Clean(globalDir) != filepath.Clean(projectDir) {
+		pruneStaleGlobalSkillLinks(stdout, globalDir, evolvedSkillsDir)
 	}
 }
 

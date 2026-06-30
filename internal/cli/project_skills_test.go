@@ -81,6 +81,53 @@ func TestPruneStaleGlobalSkillLinks(t *testing.T) {
 	}
 }
 
+// TestDeploySkills_SelfCancelGuard is the v0.9.20 self-review fix: when the
+// project dir and the global dir are the same (the monorepo root resolves to
+// $HOME), the prune must be SKIPPED so it does not delete the project links just
+// created (otherwise skills would silently never deploy).
+func TestDeploySkills_SelfCancelGuard(t *testing.T) {
+	tmp := t.TempDir()
+	evolved := filepath.Join(tmp, "homunculus", "evolved", "skills")
+	_ = os.MkdirAll(filepath.Join(evolved, "myskill"), 0o755)
+	_ = os.WriteFile(filepath.Join(evolved, "myskill", "SKILL.md"), []byte("# myskill\n"), 0o644)
+
+	dir := filepath.Join(tmp, "claude", "skills") // projectDir == globalDir
+	deploySkills(io.Discard, io.Discard, evolved, dir, dir)
+
+	link := filepath.Join(dir, "myskill")
+	got, err := os.Readlink(link)
+	if err != nil {
+		t.Fatalf("project skill link was wrongly removed by a self-cancelling prune: %v", err)
+	}
+	if want := filepath.Join(evolved, "myskill"); got != want {
+		t.Errorf("link = %q, want %q", got, want)
+	}
+}
+
+// TestDeploySkills_LinksAndPrunes covers the normal path: link the evolved skill
+// into projectDir and prune a stale link from a distinct globalDir.
+func TestDeploySkills_LinksAndPrunes(t *testing.T) {
+	tmp := t.TempDir()
+	evolved := filepath.Join(tmp, "evolved", "skills")
+	_ = os.MkdirAll(filepath.Join(evolved, "s1"), 0o755)
+	_ = os.WriteFile(filepath.Join(evolved, "s1", "SKILL.md"), []byte("# s1\n"), 0o644)
+	projectDir := filepath.Join(tmp, "proj", ".claude", "skills")
+	globalDir := filepath.Join(tmp, "global")
+	_ = os.MkdirAll(globalDir, 0o755)
+	if err := os.Symlink(filepath.Join(evolved, "s1"), filepath.Join(globalDir, "s1")); err != nil {
+		t.Fatal(err)
+	}
+
+	deploySkills(io.Discard, io.Discard, evolved, projectDir, globalDir)
+
+	if got, err := os.Readlink(filepath.Join(projectDir, "s1")); err != nil || got != filepath.Join(evolved, "s1") {
+		t.Errorf("project link not created correctly: got=%q err=%v", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(globalDir, "s1")); !os.IsNotExist(err) {
+		t.Errorf("stale global link not pruned")
+	}
+}
+
 // TestLinkWorktreeSkills verifies the worktree gets an absolute symlink to the
 // monorepo's project-scoped skills, and a pre-existing real dir is not clobbered.
 func TestLinkWorktreeSkills(t *testing.T) {
