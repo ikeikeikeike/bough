@@ -252,27 +252,36 @@ func startEngines(
 		resources := toResourceSpecs(eng.InitialResources)
 		dataDir := filepath.Join(worktreeRoot, fmt.Sprintf(".local/%s-data", eng.Kind))
 
-		if err := prov.Up(ctx, &engineapi.UpReq{
-			Ports:            ports,
-			Datadir:          dataDir,
-			WorktreeRoot:     engineProviderWorktree,
-			SocketDir:        eng.SocketDir,
-			InitialResources: resources,
-			Extras:           extras,
-		}); err != nil {
-			return engines, fmt.Errorf("%s Up: %w", eng.Kind, err)
-		}
-		ready, err := prov.ReadyCheck(ctx, []int{port}, eng.ReadyTimeoutSec)
-		if err != nil || !ready {
-			return engines, fmt.Errorf("%s ReadyCheck: %w", eng.Kind, err)
-		}
-		vars, err := prov.EnvVars(ctx, &engineapi.EnvVarsReq{
-			Ports:            ports,
-			InitialResources: resources,
-			SocketDir:        eng.SocketDir,
-		})
+		// Up + ReadyCheck can block for seconds (image pull, the mysql
+		// temp→final mysqld restart, ES bootstrap). Animate a spinner for
+		// the whole wait so an interactive operator sees liveness instead
+		// of a frozen prompt; the closure lets one deferred Stop() cover
+		// every exit path. On the hook (non-TTY) the spinner is inert.
+		sp := startSpinner(stderr, fmt.Sprintf("%s: starting on port %d", eng.Kind, port))
+		vars, err := func() (map[string]string, error) {
+			defer sp.Stop()
+			if err := prov.Up(ctx, &engineapi.UpReq{
+				Ports:            ports,
+				Datadir:          dataDir,
+				WorktreeRoot:     engineProviderWorktree,
+				SocketDir:        eng.SocketDir,
+				InitialResources: resources,
+				Extras:           extras,
+			}); err != nil {
+				return nil, fmt.Errorf("%s Up: %w", eng.Kind, err)
+			}
+			ready, err := prov.ReadyCheck(ctx, []int{port}, eng.ReadyTimeoutSec)
+			if err != nil || !ready {
+				return nil, fmt.Errorf("%s ReadyCheck: %w", eng.Kind, err)
+			}
+			return prov.EnvVars(ctx, &engineapi.EnvVarsReq{
+				Ports:            ports,
+				InitialResources: resources,
+				SocketDir:        eng.SocketDir,
+			})
+		}()
 		if err != nil {
-			return engines, fmt.Errorf("%s EnvVars: %w", eng.Kind, err)
+			return engines, err
 		}
 		engines[len(engines)-1].envVars = vars
 		logf(stderr, "[bough] %s: ready on port %d", eng.Kind, port)
@@ -352,7 +361,13 @@ func materializeRepositories(
 				failed = append(failed, repo.Name)
 				continue
 			}
-			if cerr := runner.Clone(ctx, repo.Source, repoSrc, monorepoRoot); cerr != nil {
+			// A first-time clone of a large repo is the longest silent gap
+			// in create (the user sees nothing between engines-ready and
+			// the worktree appearing); animate a spinner across it.
+			sp := startSpinner(stderr, fmt.Sprintf("%s: cloning from %s", repo.Name, repo.Source))
+			cerr := runner.Clone(ctx, repo.Source, repoSrc, monorepoRoot)
+			sp.Stop()
+			if cerr != nil {
 				logf(stderr, "[bough] %s: clone from %s FAILED: %v", repo.Name, repo.Source, cerr)
 				failed = append(failed, repo.Name)
 				continue
