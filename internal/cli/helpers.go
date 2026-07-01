@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// hookRemoveGracefulSecs mirrors newRemoveCmd's --graceful-timeout
+// default for the WorktreeRemove hook dispatch, which has no flag.
+const hookRemoveGracefulSecs = 10
+
 // hookInput is the shape Claude Code's WorktreeCreate / WorktreeRemove
 // hook contracts emit on stdin.
 type hookInput struct {
@@ -21,18 +26,81 @@ type hookInput struct {
 }
 
 func readHookStdin(cmd *cobra.Command) (hookInput, error) {
-	var in hookInput
 	raw, err := io.ReadAll(cmd.InOrStdin())
 	if err != nil {
-		return in, fmt.Errorf("read stdin: %w", err)
+		return hookInput{}, fmt.Errorf("read stdin: %w", err)
 	}
 	if len(raw) == 0 {
-		return in, fmt.Errorf("--stdin-json was set but stdin was empty")
+		return hookInput{}, fmt.Errorf("--stdin-json was set but stdin was empty")
 	}
+	return parseHookInput(raw)
+}
+
+// parseHookInput decodes a WorktreeCreate / WorktreeRemove payload.
+// Shared by the --stdin-json path (readHookStdin) and the unified
+// `bough hook handle --event Worktree*` dispatch, which has already
+// drained the payload bytes off stdin before it routes.
+func parseHookInput(raw []byte) (hookInput, error) {
+	var in hookInput
 	if err := json.Unmarshal(raw, &in); err != nil {
-		return in, fmt.Errorf("parse stdin JSON: %w", err)
+		return in, fmt.Errorf("parse hook JSON: %w", err)
 	}
 	return in, nil
+}
+
+// dispatchWorktreeCreate runs the full create pipeline from a
+// WorktreeCreate hook payload and prints the worktree root path to
+// stdout — the contract Claude Code reads to cd into the new tree.
+//
+// This is the fix for the dogfood bug where `bough hook install` wires
+// WorktreeCreate → `bough hook handle --event WorktreeCreate` but the
+// handler's switch had no WorktreeCreate case: the hook returned exit 0
+// with empty stdout, so Claude Code aborted with "hook succeeded but
+// returned no worktree path" and no worktree was ever created.
+func dispatchWorktreeCreate(cmd *cobra.Command, payload []byte) error {
+	in, err := parseHookInput(payload)
+	if err != nil {
+		return err
+	}
+	if in.Name == "" {
+		return errors.New("WorktreeCreate hook payload has no worktree name")
+	}
+	monorepoRoot, cfg, err := loadConfigAndRoot(cmd, in.Cwd)
+	if err != nil {
+		return err
+	}
+	return runCreate(cmd.Context(), cmd.ErrOrStderr(), cmd.OutOrStdout(), cfg, monorepoRoot, in.Name, false, false)
+}
+
+// dispatchWorktreeRemove is the WorktreeRemove twin: it tears down the
+// worktree named by the payload (worktree_path preferred, else name),
+// mirroring newRemoveCmd's resolution.
+func dispatchWorktreeRemove(cmd *cobra.Command, payload []byte) error {
+	in, err := parseHookInput(payload)
+	if err != nil {
+		return err
+	}
+	var monorepoRoot, wtName, path string
+	switch {
+	case in.WorktreePath != "":
+		path = in.WorktreePath
+		wtName = filepath.Base(path)
+		monorepoRoot = filepath.Dir(filepath.Dir(path))
+	case in.Name != "":
+		monorepoRoot = in.Cwd
+		if monorepoRoot == "" {
+			monorepoRoot, _ = os.Getwd()
+		}
+		wtName = in.Name
+		path = filepath.Join(monorepoRoot, ".worktrees", in.Name)
+	default:
+		return errors.New("WorktreeRemove hook payload has no worktree_path or name")
+	}
+	abs, cfg, err := loadConfigAndRoot(cmd, monorepoRoot)
+	if err != nil {
+		return err
+	}
+	return runRemove(cmd.Context(), cmd.ErrOrStderr(), cfg, abs, wtName, path, hookRemoveGracefulSecs)
 }
 
 // resolveConfigPath answers "where does the bough YAML live?" in the

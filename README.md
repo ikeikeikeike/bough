@@ -230,6 +230,7 @@ per sub-repo → registry cleanup → datadir teardown.
 ## CLI surface
 
 ```
+# Worktree isolation
 bough create [--config PATH] [--name NAME] [--stdin-json] [--cwd PATH]
 bough remove [--config PATH] [--name NAME | --path PATH] [--stdin-json]
 bough verify <worktree-name>            # registry vs declared ranges vs .env.local
@@ -238,6 +239,17 @@ bough list                              # registry table (kinds dynamic)
 bough backfill                          # register pre-existing .worktrees/*
 bough config validate [PATH]            # strict YAML schema check
 bough plugins list                      # glob $PATH for bough-plugin-*
+
+# Continuous learning (opt-in; instinct.enabled: true)
+bough hook install | uninstall          # Claude Code hook wiring in .claude/settings.json
+bough doctor                            # hook wiring + observer capture + cost posture
+bough observer run-once | start         # mint instincts via claude --print
+bough instinct list | show <id>         # inspect the captured corpus
+bough evolve --generate                 # cluster instincts → skills / agents / commands
+bough ecc import                        # interop with an everything-claude-code corpus
+bough inject-context                    # UserPromptSubmit instinct block (hook)
+bough preserve-instincts                # PreCompact snapshot (hook)
+bough session-end                       # SessionEnd summary + confidence (hook)
 ```
 
 ## Repository layout
@@ -250,16 +262,26 @@ bough/
 │   ├── bough-plugin-postgres/              PostgreSQL plugin entrypoint
 │   ├── bough-plugin-redis/                 Redis plugin entrypoint
 │   └── bough-plugin-elasticsearch/         Elasticsearch plugin entrypoint
-├── internal/
+├── internal/                              # worktree isolation core
 │   ├── cli/                                cobra subcommands
-│   ├── config/                             YAML schema (validator/v10)
+│   ├── config/                             .bough.yaml schema (validator/v10)
 │   ├── allocator/                          crc32 + linear-probing port allocator
-│   ├── registry/                           .bough-ports.json atomic R/W (legacy .worktree-ports.json read on fallback)
+│   ├── registry/                           .bough-ports.json atomic R/W (legacy read fallback)
 │   ├── gitwt/                              `git worktree` wrapper
 │   ├── envwriter/                          text/template + Sprig .env.local generator
 │   ├── hooks/                              post_create / pre_remove hook runner
-│   ├── mcp/                                ~/.claude.json projects upsert
-│   └── pluginhost/                         go-plugin discovery + lifecycle
+│   ├── backend/                            nix / docker backend auto-detect
+│   ├── pluginhost/                         go-plugin discovery + lifecycle
+│   ├── pluginsign/                         plugin binary signature verification
+│   │                                       # continuous learning (v0.9)
+│   ├── homunculus/                         instinct corpus (~/.local/share/bough-homunculus/)
+│   ├── observe/                            observations.jsonl writer + Anthropic-env scrub
+│   ├── prompts/                            //go:embed prompt templates + 3-layer override
+│   ├── provider/claudecli/                 `claude --print` subprocess + rate limiter
+│   ├── evolve/                             instinct → skill / agent / command 5-gate pipeline
+│   ├── qualitygate/                        operator-supplied lint / typecheck gates
+│   ├── inject/                             UserPromptSubmit context-block builder
+│   └── session/                            SessionEnd summary + confidence update
 ├── plugins/
 │   └── engine/
 │       ├── api/                            gRPC EngineProvider contract + Go interface
@@ -274,139 +296,80 @@ bough/
 └── .github/workflows/                      ci.yml + release.yml
 ```
 
-## Instincts (v0.5+)
+## Continuous learning (v0.9)
 
-> **bough is not an agent memory system. bough is a per-worktree memory orchestration layer.**
+> **bough is not an agent memory system. bough is a per-worktree
+> memory-orchestration layer.** The continuous-learning loop is a
+> verbatim Go port of the [everything-claude-code][ecc] reference
+> architecture, so every LLM call stays inside your Claude Code
+> subscription (see [Cost & billing](#cost--billing)).
 
-v0.5 adds an opt-in instinct subsystem: behavioural rules and
-observations the host accumulates per worktree, repo, and global
-scope. Memory intelligence is delegated to external OSS backends
-(mem0 / Graphiti / Letta, v0.6+); bough provides the canonical
-schemas, scope model, safety pipeline (redaction, poisoning
-guard, dedupe, decay), and the conformance contract every backend
-honours.
+[ecc]: https://github.com/affaan-m/everything-claude-code
 
-bough operates in **Layer C (artifact compile chain)**. Layer A
-(memory architecture: short / long / archival hierarchy, CRUD
-policy) is delegated to the chosen `MemoryBackend` plugin. Layer B
-(runtime skill invocation) is the host AI's job. The seven Layer C
-compile targets — memory, rule, skill, command, tool, agent,
-evaluator — are **parallel** sinks, not a chain; `instinct → skill
-→ command → agent` as a forced sequence was rejected in round 1.
-See [docs/CONCEPTS.md](docs/CONCEPTS.md) for the three-layer split
-and how bough relates to ECC, Letta, Anthropic Skills, mem0, and
-the 2026 anti-pattern literature.
+The loop is **observe → evolve → inject**, entirely opt-in and off by
+default:
 
-## Bootstrap (v0.7+)
-
-v0.7.0 adds the safety floor for the Bootstrap loop — Claude Code
-hook auto-wire, raw-event capture, transparency reporting, and
-dry-run proposal output — without calling any external LLM. The
-live (= LLM-judge driven) path lands in v0.7.1.
+1. **Observe.** Claude Code hooks (`SessionEnd`, `PreCompact`,
+   `UserPromptSubmit`, …) append raw session events to
+   `observations.jsonl` and mint *instincts* — confidence-scored
+   behavioural rules — into an on-disk corpus (the "homunculus") under
+   `~/.local/share/bough-homunculus/<project-id>/` (`project-id` =
+   `sha256[:12]` of the credential-stripped git remote, else the repo
+   path). Env scrubbing strips every `ANTHROPIC_*` / Bedrock / Vertex
+   key so a spawned `claude --print` can never flip to API billing.
+2. **Evolve.** `bough evolve --generate` clusters related instincts
+   through a 5-gate pipeline (the final gate is an LLM judge via
+   `claude --print --output-format json`) and emits Claude Code
+   artifacts — `SKILL.md`, agents, and commands — into the repo's
+   `.claude/` (project-scope since v0.9.20; `bough create` symlinks
+   each worktree's `.claude/skills` at the monorepo copy). Generated
+   artifacts cite a resolvable source-instinct path so a reader can
+   trace a skill back to the instincts it came from (v0.9.22).
+3. **Inject.** The `UserPromptSubmit` hook prints a confidence-ranked
+   instinct block into your next turn as ordinary input tokens — no
+   separate call.
 
 ```sh
-# Wire bough handlers into .claude/settings.json (idempotent;
-# hand-edited entries are preserved).
+# Wire bough's hook handlers into .claude/settings.json (idempotent;
+# hand-edited rows are preserved) and inspect the posture.
 bough hook install
+bough doctor                     # hook wiring + observer capture + cost meter
 
-# Inspect what is wired + what the observer has captured + what
-# the cost meter reports.
-bough doctor
+# Mint instincts from recent observations, then review the corpus.
+bough observer run-once          # one claude --print pass
+bough instinct list              # confidence-ranked corpus
+bough instinct show <id>
 
-# Replay a recorded payload through the wired handler for
-# debugging.
-bough hook replay --event PreToolUse --fixture internal/hooks/testdata/PreToolUse.json
+# Cluster the corpus into skills / agents / commands.
+bough evolve --generate          # 5-gate pipeline; writes <repo>/.claude/*
 
-# Read observations.jsonl + write candidate proposals under
-# .bough/proposals/<timestamp>/*.md for git-diff review.
-bough bootstrap --dry-run
-
-# Remove bough's hook entries (hand-edited rows survive).
-bough hook uninstall
+# Interop with an existing everything-claude-code corpus.
+bough ecc import
 ```
 
-The MCP server surface gains opt-in write tools:
-
-```sh
-# Enable memory.store + memory.forget. The host wires worktree-only
-# scope, 60 writes/minute, append-only audit log automatically.
-bough-mcp-server --allow-write
-```
-
-See [docs/ROADMAP.md](docs/ROADMAP.md) for the v0.7.0 sub-phases
-that shipped (O-1.1 through O-1.8) and the v0.7.1+ plan.
-
-The subsystem is **off by default**. Enable it by setting
-`instinct.enabled: true` in `.bough.yaml`:
+Enable it per-monorepo in `.bough.yaml` (off by default):
 
 ```yaml
 instinct:
   enabled: true
-  default_memory_backend: sqlite
-
-memory_backends:
-  - kind: sqlite
-    role: reference-fallback
-    path: ".bough/memory/reference.db"
-    fts: true
-    wal: true
 ```
 
-The PRIMARY ingest path is stdin:
+LLM calls happen **only** in the explicit `bough observer run-once` /
+`bough evolve --generate` (and the opt-in `bough observer start`
+daemon) — each a `claude --print` subprocess under your subscription,
+hard rate-limited (10 / session, 30 / hour, 3-failure circuit
+breaker). Everything else — hooks, ingest, clustering gates 1-4 — is
+pure local filesystem.
 
-```sh
-make test 2>&1 | bough instinct ingest --stdin --source test_failure
-bough instinct query --term "early returns"
-bough instinct approve <id>
-```
+See [docs/CONCEPTS.md](docs/CONCEPTS.md) for the layering model,
+[docs/INSTINCTS.md](docs/INSTINCTS.md) for the instinct lifecycle, and
+[docs/EVOLVE.md](docs/EVOLVE.md) for the 5-gate evolve pipeline.
 
-The Claude `.jsonl` file watch observer is opt-in beta because of
-fsnotify cross-platform fragility (macOS FSEvents vs Linux inotify
-divergence, log rotation, truncate).
-
-See [docs/INSTINCTS.md](docs/INSTINCTS.md) for the full lifecycle,
-[docs/BACKENDS.md](docs/BACKENDS.md) for choosing a backend,
-[docs/EXTERNAL_MEMORY_BACKENDS.md](docs/EXTERNAL_MEMORY_BACKENDS.md)
-for wiring mem0 / Graphiti, [docs/SECURITY.md](docs/SECURITY.md)
-for plugin trust, and [docs/ROADMAP.md](docs/ROADMAP.md) for
-v0.6 / v0.7+.
-
-## Capability compiler + MCP (v0.6+)
-
-v0.6 turns the v0.5 instinct subsystem into a publishing surface.
-Approved instincts compile into Anthropic Agent Skills, GitHub
-Agent Skills, or MCP tool / resource / prompt entries, and the
-companion `bough-mcp-server` binary exposes the memory backend
-read-only to MCP clients (Claude Desktop, Cursor, etc.).
-
-```sh
-# Compile every active instinct into agent-skill markdown.
-bough capability compile --out-dir ./skills
-
-# Same, but render Claude-compatible SKILL.md.
-bough capability compile --to claude-skill --profile claude-code \
-    --out-dir ~/.claude/skills/bough
-
-# Render MCP tool definitions.
-bough capability compile --to mcp --out-dir ./mcp-tools
-```
-
-`agent-skill` is the v0.6 default because bough is a host-neutral
-OSS layer. The MCP server ships read-only first — write tools
-(`memory.store`, `memory.forget`, `memory.promote`) land in v0.6.x
-behind an `--allow-write` flag, and the server's capabilities
-advertise the policy so clients can probe it before the first tool
-call.
-
-Real-mem0 support arrives in v0.6.0 with the official
-`bough-plugin-memory-mem0` adapter; Graphiti is deferred to v0.6.x
-as a separate GoReleaser archive (`examples/memory-plugin-
-graphiti-skeleton/` covers the bring-up today).
-
-See
-[docs/CAPABILITY_COMPILER.md](docs/CAPABILITY_COMPILER.md),
-[docs/MCP_SERVER.md](docs/MCP_SERVER.md), and
-[docs/SIGNING.md](docs/SIGNING.md) for the v0.6 contracts.
+> **v0.5-v0.8 removed.** Earlier releases shipped bough-designed memory
+> backends, a capability compiler, an MCP server, and evaluator
+> adapters. v0.9.0 deleted that surface wholesale and reset to the ECC
+> verbatim port above; pin **v0.8.1** if you depend on it. See the
+> v0.9.0 [CHANGELOG](CHANGELOG.md) entry.
 
 ## Roadmap
 
@@ -417,21 +380,30 @@ See
 | v0.2.0    | Docker backend, hybrid `backend:` selector — explicit `nix` / `docker` in YAML, or auto-detect (Nix-with-flakes present → Nix, else Docker daemon → Docker, else clear error) when the field is omitted |
 | v0.3.0    | Plugin conformance suite + CI matrix on real Docker — plugin authors verify their contract end-to-end with one test func, four bough-internal plugins are gated on `ubuntu-24.04` + `ubuntu-24.04-arm` × `mysql` / `postgres` / `redis` / `elasticsearch` |
 | v0.4.0    | Generic engine plugin orchestrator (was: DB-only). `DBProvider` → `EngineProvider`, `plugins/db/` → `plugins/engine/`, YAML schema v2 (`.bough.yaml` / `engines:` / `port_ranges:` per role / `initial_resources:`). Multi-port engines (rabbitmq AMQP+Management, kafka broker+controller, NATS client+monitor+cluster) are first-class; v0.4.x reads every v0.3 surface with a deprecation warning, removed in v0.5.0 |
-| v0.5.0    | Per-worktree memory orchestration layer (`instinct.enabled: true`, opt-in). 4 plugin contracts frozen: `MemoryBackend` (7 RPCs) + `InstinctMinter` (1 RPC) ship working; `CapabilityCompiler` + `SkillEvaluator` frozen as stubs for v0.6/v0.7+. SQLite reference-fallback plugin (`modernc.org/sqlite` pure Go + FTS5 + WAL). Stdin ingest as primary observer; `.jsonl` file watch opt-in beta. v0.3 pluginhost fallback removed (breaking for v0.3.x plugin binaries). See [docs/INSTINCTS.md](docs/INSTINCTS.md). |
-| v0.6+     | mem0 official memory plugin, Graphiti optional plugin, `CapabilityCompiler` materialised + `bough capability compile` + Claude Skills / Agent Skills / MCP export (round 3 AI #3: tools/resources/prompts split), `bough-mcp-server` companion. Plugin signing enforcement. Reference rabbitmq / kafka / NATS / minio engine plugins. Homebrew tap. |
+| v0.5.0-v0.8.0 | (superseded) A bough-designed memory-orchestration layer — `MemoryBackend` / `InstinctMinter` plugin contracts, SQLite + mem0 + Graphiti backends, a capability compiler, `bough-mcp-server`, evaluator adapters. **Removed wholesale in v0.9.0**; pin v0.8.1 to keep it |
+| v0.9.0    | The "ECC verbatim port" reset. Deleted the v0.5-v0.8 surface and rebuilt continuous learning as a faithful Go port of [everything-claude-code](https://github.com/affaan-m/everything-claude-code): the `~/.local/share/bough-homunculus/` corpus, `observations.jsonl`, and a subscription-only `claude --print` mechanism (no Anthropic API, no separate billing) |
+| v0.9.1-v0.9.22 | The observe → evolve → inject loop: `bough evolve --generate` 5-gate clustering into skills / agents / commands, `UserPromptSubmit` instinct injection, `SessionEnd` / `PreCompact` hooks, secret-scrub at capture, project-scope evolved skills (v0.9.20), resolvable source-instinct paths (v0.9.22), plus a retrospective `/review` bug-fix sweep of the merged infra PRs |
+| next      | Reference rabbitmq / kafka / NATS / minio engine plugins, Homebrew tap |
 
 [embedded-postgres]: https://github.com/fergusstrange/embedded-postgres
 
 ## Status
 
-v0.4.0 (current). The four bundled engine plugins
-(`bough-plugin-{mysql,postgres,redis,elasticsearch}`) are battle-tested
-in a real Go + Rails + Remix multi-sub-repo monorepo (MySQL 8.4 LTS +
-Redis 7 + Elasticsearch 7) on the Docker backend; the Nix backend
-remains supported via auto-detect and is the default when nix-with-
-flakes is on `PATH`. The Postgres plugin is integration-test-only.
-Multi-port engines (rabbitmq / kafka / NATS) are first-class in the
-contract from v0.4.0 onward — reference plugins land in v0.5+.
+v0.9.22 (current; v0.9.23 in progress). The four bundled engine
+plugins (`bough-plugin-{mysql,postgres,redis,elasticsearch}`) are
+battle-tested in a real Go + Rails + Remix multi-sub-repo monorepo
+(MySQL 8.4 LTS + Redis 7 + Elasticsearch 7) on the Docker backend; the
+Nix backend remains supported via auto-detect and is the default when
+nix-with-flakes is on `PATH`. The Postgres plugin is
+integration-test-only. Multi-port engines (rabbitmq / kafka / NATS) are
+first-class in the contract — reference plugins are not yet bundled.
+
+The worktree-isolation core has been stable since v0.4.0. v0.5 onward
+layers on the opt-in [continuous-learning loop](#continuous-learning-v09).
+v0.9.0 reset that loop to a verbatim Go port of the
+everything-claude-code reference architecture (subscription-only, no
+API billing) and **removed the v0.5-v0.8 memory / capability / MCP
+surface wholesale** — pin v0.8.1 if you depend on it.
 
 ## Plugin conformance
 
