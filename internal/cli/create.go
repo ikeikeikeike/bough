@@ -376,19 +376,19 @@ func materializeRepositories(
 			failed = append(failed, repo.Name)
 			continue
 		}
-		created, err := runner.AddOrAttach(ctx, repoSrc, repoDst, name, base)
+		created, effectiveBase, err := runner.AddOrAttach(ctx, repoSrc, repoDst, name, base)
 		if err != nil {
 			logf(stderr, "[bough] %s: worktree add FAILED: %v", repo.Name, err)
 			failed = append(failed, repo.Name)
 			continue
 		}
 		sha, _ := runner.HeadSHA(ctx, repoDst)
-		baseLabel := base
-		if runner.Fetch {
-			baseLabel = "origin/" + base
-		}
 		if created {
-			logf(stderr, "[bough] %s: created (%s from %s @ %s)", repo.Name, name, baseLabel, sha)
+			// effectiveBase is what AddOrAttach actually branched from —
+			// origin/<base> only when the fetch truly succeeded, else the
+			// local <base>. Logging runner.Fetch's intent instead would
+			// claim "from origin/<base>" even on an offline fallback.
+			logf(stderr, "[bough] %s: created (%s from %s @ %s)", repo.Name, name, effectiveBase, sha)
 		} else {
 			logf(stderr, "[bough] %s: attached (%s @ %s)", repo.Name, name, sha)
 		}
