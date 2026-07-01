@@ -88,14 +88,12 @@ func TestUnescapeInstinct_protectsLiteralBackslash(t *testing.T) {
 	}
 }
 
-func TestUnescapeInstinct_stripsJSONWrapperQuoteLines(t *testing.T) {
-	// A JSON string wrapper can leave a bare `"` on its own line at the
-	// head/tail; those must be stripped so the frontmatter starts at ---.
-	got := unescapeInstinct(`"\n---\nid: foo\n---\n\nbody\n"`)
-	if !strings.HasPrefix(got, "---\n") {
-		t.Errorf("leading wrapper quote not stripped:\n%q", got)
-	}
-	if strings.Contains(got, "\n\"\n") || strings.HasSuffix(got, "\"\n") {
-		t.Errorf("trailing wrapper quote not stripped:\n%q", got)
+func TestUnescapeInstinct_keepsBareQuoteBodyLine(t *testing.T) {
+	// Regression: the old normalizer stripped any leading/trailing bare
+	// `"` line as a JSON wrapper, silently deleting a legitimate body
+	// line whose only content is a double-quote. It must survive now.
+	got := unescapeInstinct(`---\nid: foo\n---\n\n"\nquoted\n`)
+	if !strings.Contains(got, "\n\"\n") {
+		t.Errorf("a bare-quote body line was dropped:\n%q", got)
 	}
 }

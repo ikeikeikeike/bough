@@ -271,14 +271,23 @@ func startEngines(
 				return nil, fmt.Errorf("%s Up: %w", eng.Kind, err)
 			}
 			ready, err := prov.ReadyCheck(ctx, []int{port}, eng.ReadyTimeoutSec)
-			if err != nil || !ready {
+			if err != nil {
 				return nil, fmt.Errorf("%s ReadyCheck: %w", eng.Kind, err)
 			}
-			return prov.EnvVars(ctx, &engineapi.EnvVarsReq{
+			if !ready {
+				// (ready=false, err=nil) is a timeout; format a real message
+				// rather than `%w`-ing the nil error into `%!w(<nil>)`.
+				return nil, fmt.Errorf("%s ReadyCheck: not ready within %ds", eng.Kind, eng.ReadyTimeoutSec)
+			}
+			vars, err := prov.EnvVars(ctx, &engineapi.EnvVarsReq{
 				Ports:            ports,
 				InitialResources: resources,
 				SocketDir:        eng.SocketDir,
 			})
+			if err != nil {
+				return nil, fmt.Errorf("%s EnvVars: %w", eng.Kind, err)
+			}
+			return vars, nil
 		}()
 		if err != nil {
 			return engines, err

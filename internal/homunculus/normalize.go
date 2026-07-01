@@ -27,23 +27,20 @@ func IsCorruptInstinct(raw []byte) bool {
 // unescapeInstinct converts the literal escape sequences (`\n`, `\t`,
 // `\r`, `\"`, `\'`) back to their real bytes, protecting an already-
 // escaped backslash (`\\`) first so a genuine literal backslash in the
-// body survives. It also strips a stray leading/trailing bare `"` line
-// left by a JSON string wrapper. Mirrors the shipped Python normalizer
-// referenced in the handover.
+// body survives. It deliberately does NOT strip stray bare-`"` lines the
+// way the reference Python normalizer did: that could silently delete a
+// legitimate first/last body line whose only content is a double-quote,
+// and NormalizeInstinct already refuses to write a repair whose
+// frontmatter does not re-parse — so a genuinely JSON-string-wrapped
+// file is copied verbatim (and surfaces as skipped) rather than
+// healed-and-corrupted.
 func unescapeInstinct(s string) string {
 	s = strings.TrimSuffix(s, "\n")
 	const sentinel = "\x00"
 	s = strings.ReplaceAll(s, `\\`, sentinel) // protect escaped backslashes first
 	s = strings.NewReplacer(`\n`, "\n", `\t`, "\t", `\r`, "\r", `\"`, `"`, `\'`, "'").Replace(s)
 	s = strings.ReplaceAll(s, sentinel, `\`)
-	lines := strings.Split(s, "\n")
-	for len(lines) > 0 && strings.TrimSpace(lines[0]) == `"` {
-		lines = lines[1:]
-	}
-	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == `"` {
-		lines = lines[:len(lines)-1]
-	}
-	return strings.Trim(strings.Join(lines, "\n"), "\n") + "\n"
+	return strings.Trim(s, "\n") + "\n"
 }
 
 // NormalizeInstinct heals a single-physical-line escaped instinct file
