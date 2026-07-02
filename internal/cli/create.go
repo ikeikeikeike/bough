@@ -114,7 +114,7 @@ func runCreate(ctx context.Context, stderr, stdout io.Writer, cfg *config.Config
 	// every started subprocess on the way out — even partial-start
 	// engines from a mid-loop error are caught because startEngines
 	// returns whatever it managed to bring up.
-	engines, err := startEngines(ctx, stderr, cfg, worktreeRoot, enginePorts)
+	engines, err := startEngines(ctx, stderr, cfg, worktreeRoot, enginePorts, pluginhost.Discover)
 	defer func() {
 		for _, e := range engines {
 			e.kill()
@@ -234,12 +234,17 @@ func allocateAllPorts(cfg *config.Config, monorepoRoot, name string) (map[string
 // The backend auto-detect runs at most once per `bough create`: the
 // result is reused across every engine whose YAML left Backend
 // empty; explicit YAML values bypass it entirely.
+//
+// discover is the plugin lookup (production: pluginhost.Discover),
+// injected so tests can substitute a fake EngineProvider and pin the
+// per-phase error wrapping without spawning subprocesses (#68).
 func startEngines(
 	ctx context.Context,
 	stderr io.Writer,
 	cfg *config.Config,
 	worktreeRoot string,
 	enginePorts map[string]int,
+	discover func(kind string) (engineapi.EngineProvider, func(), error),
 ) ([]engineInstance, error) {
 	engineProviderWorktree := worktreeRoot
 	if provider := engineProviderRepo(cfg); provider != nil {
@@ -254,7 +259,7 @@ func startEngines(
 	engines := make([]engineInstance, 0, len(cfg.Engines))
 	for _, eng := range cfg.Engines {
 		port := enginePorts[eng.Kind]
-		prov, kill, err := pluginhost.Discover(eng.Kind)
+		prov, kill, err := discover(eng.Kind)
 		if err != nil {
 			return engines, fmt.Errorf("discover %s plugin: %w", eng.Kind, err)
 		}
