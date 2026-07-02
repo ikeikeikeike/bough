@@ -590,6 +590,14 @@ func renderEnvLocals(
 // a failed migration should not unwind the entire create, since the
 // worktree materialisation itself is still valuable to the operator.
 func runPostCreateHooks(ctx context.Context, stderr io.Writer, cfg *config.Config, worktreeRoot string, skip map[string]bool) []string {
+	// Hook children must inherit the raw fd, not the SyncWriter: a
+	// non-*os.File writer makes os/exec insert a pipe + copy goroutine
+	// whose EOF only arrives once every inheriting descendant closes it
+	// — a post_create that backgrounds a long-lived process would hang
+	// create forever, and children would lose TTY-ness. No spinner is
+	// active while hooks run, so direct fd writes cannot garble a
+	// status line.
+	hookOut := termio.ExecWriter(stderr)
 	var failed []string
 	for _, repo := range cfg.Repositories {
 		if skip[repo.Name] {
@@ -605,8 +613,8 @@ func runPostCreateHooks(ctx context.Context, stderr io.Writer, cfg *config.Confi
 			c := exec.CommandContext(ctx, "bash", "-c", line)
 			c.Dir = repoDst
 			c.Env = append(os.Environ(), fileEnv...)
-			c.Stdout = stderr
-			c.Stderr = stderr
+			c.Stdout = hookOut
+			c.Stderr = hookOut
 			if err := c.Run(); err != nil {
 				logf(stderr, "[bough] %s post_create FAILED: %v", repo.Name, err)
 				failed = append(failed, fmt.Sprintf("%s: %s", repo.Name, line))

@@ -25,8 +25,13 @@ const spinnerInterval = 100 * time.Millisecond
 // shell redirect — the spinner is INERT: no goroutine, no bytes written,
 // so the plain [bough] lines remain the entire, greppable log. That
 // inertness is the contract the hook path relies on.
+//
+// Every frame is registered as the SyncWriter's status line, so
+// concurrent writers sharing the same wrapper — pluginhost's hclog
+// forwarding go-plugin subprocess lines — erase and repaint it around
+// their own lines instead of garbling the row (issue #67).
 type spinner struct {
-	w        io.Writer
+	w        *termio.SyncWriter
 	tty      bool
 	stop     chan struct{}
 	done     chan struct{}
@@ -35,9 +40,12 @@ type spinner struct {
 
 // startSpinner begins animating msg on w and returns a handle whose
 // Stop() halts the animation and clears the line. Stop() is safe to call
-// on a non-TTY (inert) spinner.
+// on a non-TTY (inert) spinner. w is normalized through termio.Wrap so
+// there is exactly one paint path; a raw os.Stderr maps onto the shared
+// termio.Stderr singleton the plugin logger also writes through.
 func startSpinner(w io.Writer, msg string) *spinner {
-	s := &spinner{w: w, tty: isInteractive(w)}
+	sw := termio.Wrap(w)
+	s := &spinner{w: sw, tty: isInteractive(sw)}
 	if !s.tty {
 		return s
 	}
@@ -53,7 +61,7 @@ func (s *spinner) run(msg string) {
 	defer t.Stop()
 	// Paint frame 0 immediately so there is no interval-long blank before
 	// the first tick.
-	s.paint(fmt.Sprintf("%c %s", spinnerFrames[0], msg))
+	s.w.SetStatus(fmt.Sprintf("%c %s", spinnerFrames[0], msg))
 	i := 0
 	for {
 		select {
@@ -61,39 +69,15 @@ func (s *spinner) run(msg string) {
 			return
 		case <-t.C:
 			i = (i + 1) % len(spinnerFrames)
-			s.paint(fmt.Sprintf("%c %s", spinnerFrames[i], msg))
+			s.w.SetStatus(fmt.Sprintf("%c %s", spinnerFrames[i], msg))
 		}
 	}
 }
 
-// paint draws one frame. Through a termio.SyncWriter (the production
-// stderr path) the frame is registered as the writer's status line so
-// concurrent writers — pluginhost's hclog forwarding go-plugin
-// subprocess lines — erase and repaint it around their own lines
-// instead of garbling the row (issue #67). A plain writer gets the
-// bare CR redraw, byte-identical to the pre-termio behaviour.
-func (s *spinner) paint(frame string) {
-	if sw, ok := s.w.(*termio.SyncWriter); ok {
-		sw.SetStatus(frame)
-		return
-	}
-	fmt.Fprintf(s.w, "\r%s", frame)
-}
-
-// clear erases the spinner line on the way out, deregistering the
-// status frame when the writer is a termio.SyncWriter so later log
-// lines stop repainting it.
-func (s *spinner) clear() {
-	if sw, ok := s.w.(*termio.SyncWriter); ok {
-		sw.ClearStatus()
-		return
-	}
-	fmt.Fprint(s.w, "\r\033[K")
-}
-
-// Stop halts the animation and erases the spinner line (CR + clear-to-
-// end-of-line) so the caller's next [bough] line starts on a clean row.
-// No-op for an inert (non-TTY) spinner.
+// Stop halts the animation and erases the spinner line (deregistering
+// the status frame so later log lines stop repainting it) — the
+// caller's next [bough] line starts on a clean row. No-op for an inert
+// (non-TTY) spinner.
 func (s *spinner) Stop() {
 	if !s.tty {
 		return
@@ -104,7 +88,7 @@ func (s *spinner) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stop)
 		<-s.done
-		s.clear()
+		s.w.ClearStatus()
 	})
 }
 

@@ -73,19 +73,37 @@ func TestSyncWriter_StatusErasedAndRepaintedAroundWrite(t *testing.T) {
 	}
 }
 
-// TestSyncWriter_PartialLineDoesNotRepaint guards the glue case: a
-// write without a trailing newline must not get the status frame
-// appended to it (the next status tick repaints instead).
-func TestSyncWriter_PartialLineDoesNotRepaint(t *testing.T) {
+// TestSyncWriter_PartialLineSuspendsStatus guards the mid-line case: a
+// write without a trailing newline must not get the status frame glued
+// onto it, subsequent status ticks must not paint over the unfinished
+// row (SetStatus records, ClearStatus only forgets), and the repaint
+// resumes — with the newest frame — once a later write completes the
+// line.
+func TestSyncWriter_PartialLineSuspendsStatus(t *testing.T) {
 	var buf bytes.Buffer
 	sw := NewSyncWriter(&buf)
 
-	sw.SetStatus("⠋ spin")
-	fmt.Fprint(sw, "partial")
+	sw.SetStatus("F1")
+	fmt.Fprint(sw, "partial") // erase F1, start a foreign line, suspend repaints
+	sw.SetStatus("F2")        // tick mid-line: recorded, NOT painted
+	fmt.Fprint(sw, "rest\n")  // completes the line → repaint the newest frame
 
-	want := "\r\x1b[K⠋ spin" + "\r\x1b[K" + "partial"
+	want := "\r\x1b[KF1" + // initial paint
+		"\r\x1b[K" + "partial" + // erase + first chunk (no repaint)
+		"rest\n" + "F2" // completion chunk appended untouched, then repaint
 	if got := buf.String(); got != want {
 		t.Errorf("byte stream mismatch:\n got %q\nwant %q", got, want)
+	}
+
+	// ClearStatus while a foreign line is mid-flight must not erase the
+	// row — the text there is not the status frame.
+	buf.Reset()
+	sw.SetStatus("F3")
+	fmt.Fprint(sw, "unfinished")
+	sw.ClearStatus()
+	want = "\r\x1b[KF3" + "\r\x1b[K" + "unfinished"
+	if got := buf.String(); got != want {
+		t.Errorf("ClearStatus mid-line mismatch:\n got %q\nwant %q", got, want)
 	}
 }
 
@@ -120,10 +138,15 @@ func TestSyncWriter_ClearStatusIdempotent(t *testing.T) {
 
 // TestWrap_Identity pins Wrap's routing: os.Stderr maps onto the one
 // shared singleton (mutex identity is the fix), an existing SyncWriter
-// passes through unchanged, anything else gets a fresh wrapper.
+// passes through unchanged, anything else gets a fresh wrapper. The
+// singleton's Unwrap must surface the real *os.File so TTY detection
+// and exec fd inheritance work through it.
 func TestWrap_Identity(t *testing.T) {
 	if Wrap(os.Stderr) != Stderr {
 		t.Errorf("Wrap(os.Stderr) did not return the shared Stderr singleton")
+	}
+	if Stderr.Unwrap() != io.Writer(os.Stderr) {
+		t.Errorf("Stderr.Unwrap() = %T, want the current os.Stderr", Stderr.Unwrap())
 	}
 	var buf bytes.Buffer
 	sw := NewSyncWriter(&buf)
@@ -136,5 +159,51 @@ func TestWrap_Identity(t *testing.T) {
 	}
 	if fresh.Unwrap() != io.Writer(&buf) {
 		t.Errorf("Wrap(buffer) does not wrap the buffer")
+	}
+}
+
+// TestExecWriter pins the exec-child contract: a SyncWriter must never
+// reach os/exec (a non-*os.File writer forces a pipe + copy goroutine
+// whose EOF a backgrounded grandchild can hold open forever, hanging
+// create) — ExecWriter hands the child the fd underneath instead.
+func TestExecWriter(t *testing.T) {
+	if got := ExecWriter(Stderr); got != io.Writer(os.Stderr) {
+		t.Errorf("ExecWriter(Stderr) = %T, want os.Stderr", got)
+	}
+	var buf bytes.Buffer
+	if got := ExecWriter(NewSyncWriter(&buf)); got != io.Writer(&buf) {
+		t.Errorf("ExecWriter(SyncWriter(buf)) = %T, want the buffer", got)
+	}
+	if got := ExecWriter(&buf); got != io.Writer(&buf) {
+		t.Errorf("ExecWriter(plain writer) = %T, want it unchanged", got)
+	}
+}
+
+// TestStderrSingleton_FollowsStderrSwap: the singleton resolves
+// os.Stderr per write instead of latching the fd at init, so the
+// standard capture pattern (swap os.Stderr around code under test)
+// keeps seeing plugin log lines.
+func TestStderrSingleton_FollowsStderrSwap(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
+	if _, err := io.WriteString(Stderr, "captured line\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	os.Stderr = orig
+	_ = w.Close()
+
+	got, err := io.ReadAll(r)
+	_ = r.Close()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != "captured line\n" {
+		t.Errorf("swap capture got %q, want %q", got, "captured line\n")
 	}
 }

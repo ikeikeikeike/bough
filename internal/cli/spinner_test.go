@@ -145,7 +145,7 @@ func TestSpinner_StopOnInertIsSafe(t *testing.T) {
 // and stay panic-free on a second call (the sync.Once guard).
 func TestSpinner_AnimatesAndStops(t *testing.T) {
 	pr, pw := io.Pipe()
-	s := &spinner{w: pw, tty: true, stop: make(chan struct{}), done: make(chan struct{})}
+	s := &spinner{w: termio.NewSyncWriter(pw), tty: true, stop: make(chan struct{}), done: make(chan struct{})}
 
 	got := make(chan []byte, 1)
 	go func() {
