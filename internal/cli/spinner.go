@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/mattn/go-isatty"
+
+	"github.com/ikeikeikeike/bough/internal/termio"
 )
 
 // spinnerFrames is the braille progress cycle painted during a long
@@ -51,7 +53,7 @@ func (s *spinner) run(msg string) {
 	defer t.Stop()
 	// Paint frame 0 immediately so there is no interval-long blank before
 	// the first tick.
-	fmt.Fprintf(s.w, "\r%c %s", spinnerFrames[0], msg)
+	s.paint(fmt.Sprintf("%c %s", spinnerFrames[0], msg))
 	i := 0
 	for {
 		select {
@@ -59,9 +61,34 @@ func (s *spinner) run(msg string) {
 			return
 		case <-t.C:
 			i = (i + 1) % len(spinnerFrames)
-			fmt.Fprintf(s.w, "\r%c %s", spinnerFrames[i], msg)
+			s.paint(fmt.Sprintf("%c %s", spinnerFrames[i], msg))
 		}
 	}
+}
+
+// paint draws one frame. Through a termio.SyncWriter (the production
+// stderr path) the frame is registered as the writer's status line so
+// concurrent writers — pluginhost's hclog forwarding go-plugin
+// subprocess lines — erase and repaint it around their own lines
+// instead of garbling the row (issue #67). A plain writer gets the
+// bare CR redraw, byte-identical to the pre-termio behaviour.
+func (s *spinner) paint(frame string) {
+	if sw, ok := s.w.(*termio.SyncWriter); ok {
+		sw.SetStatus(frame)
+		return
+	}
+	fmt.Fprintf(s.w, "\r%s", frame)
+}
+
+// clear erases the spinner line on the way out, deregistering the
+// status frame when the writer is a termio.SyncWriter so later log
+// lines stop repainting it.
+func (s *spinner) clear() {
+	if sw, ok := s.w.(*termio.SyncWriter); ok {
+		sw.ClearStatus()
+		return
+	}
+	fmt.Fprint(s.w, "\r\033[K")
 }
 
 // Stop halts the animation and erases the spinner line (CR + clear-to-
@@ -77,14 +104,19 @@ func (s *spinner) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stop)
 		<-s.done
-		fmt.Fprint(s.w, "\r\033[K")
+		s.clear()
 	})
 }
 
 // isInteractive reports whether w is a terminal bough may animate on. A
-// non-*os.File writer (a bytes.Buffer in tests, a pipe from the hook)
-// can never be a TTY, so it is treated as non-interactive.
+// termio.SyncWriter is unwrapped first — TTY-ness belongs to the fd
+// underneath, not the mutex wrapper. A non-*os.File writer (a
+// bytes.Buffer in tests, a pipe from the hook) can never be a TTY, so
+// it is treated as non-interactive.
 func isInteractive(w io.Writer) bool {
+	if sw, ok := w.(*termio.SyncWriter); ok {
+		w = sw.Unwrap()
+	}
 	f, ok := w.(*os.File)
 	if !ok {
 		return false

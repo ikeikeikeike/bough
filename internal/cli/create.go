@@ -17,6 +17,7 @@ import (
 	"github.com/ikeikeikeike/bough/internal/gitwt"
 	"github.com/ikeikeikeike/bough/internal/pluginhost"
 	"github.com/ikeikeikeike/bough/internal/registry"
+	"github.com/ikeikeikeike/bough/internal/termio"
 	engineapi "github.com/ikeikeikeike/bough/plugins/engine/api"
 
 	"github.com/spf13/cobra"
@@ -86,6 +87,13 @@ type engineInstance struct {
 // reads as the contract: load → allocate → start engines → materialise
 // repos → render env → run hooks → emit the worktree path.
 func runCreate(ctx context.Context, stderr, stdout io.Writer, cfg *config.Config, monorepoRoot, name string, noFetch, strict bool) error {
+	// One mutex per fd: route every create-path stderr write (logf, the
+	// spinner) through the shared termio wrapper so pluginhost's hclog
+	// lines — which target termio.Stderr from their own goroutines —
+	// cannot interleave with the spinner redraw (issue #67). For the
+	// real os.Stderr this IS termio.Stderr; test buffers get a private
+	// wrapper and behave as before.
+	stderr = termio.Wrap(stderr)
 	logf(stderr, "[bough] create %s @ %s", name, monorepoRoot)
 	worktreeRoot := filepath.Join(monorepoRoot, ".worktrees", name)
 	if err := os.MkdirAll(worktreeRoot, 0o755); err != nil {
