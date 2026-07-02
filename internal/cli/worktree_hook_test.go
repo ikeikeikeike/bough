@@ -35,6 +35,23 @@ func gitInitMain(t *testing.T, dir string) {
 	run("commit", "--allow-empty", "-m", "init")
 }
 
+// writeMinimalBoughYAML drops the smallest .bough.yaml that both passes
+// validation and drives runCreate/runRemove: one already-present repo
+// (branched off main, no clone), no engines (docker/nix-free), a registry.
+func writeMinimalBoughYAML(t *testing.T, root string) {
+	t.Helper()
+	yaml := "schema_version: 2\n" +
+		"monorepo_root: \".\"\n" +
+		"repositories:\n" +
+		"  - name: demo\n" +
+		"    branch_strategy: main\n" +
+		"registry:\n" +
+		"  path: \".bough-ports.json\"\n"
+	if err := os.WriteFile(filepath.Join(root, ".bough.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write .bough.yaml: %v", err)
+	}
+}
+
 // TestHookHandle_WorktreeCreateEmitsPath is the regression for the
 // dogfood bug: `bough hook install` wires WorktreeCreate →
 // `bough hook handle --event WorktreeCreate`, but the handler's switch
@@ -47,16 +64,7 @@ func TestHookHandle_WorktreeCreateEmitsPath(t *testing.T) {
 	// A present local git repo so AddOrAttach branches off it without a
 	// clone; no engines declared, so create stays docker/nix-free + fast.
 	gitInitMain(t, filepath.Join(root, "demo"))
-	yaml := "schema_version: 2\n" +
-		"monorepo_root: \".\"\n" +
-		"repositories:\n" +
-		"  - name: demo\n" +
-		"    branch_strategy: main\n" +
-		"registry:\n" +
-		"  path: \".bough-ports.json\"\n"
-	if err := os.WriteFile(filepath.Join(root, ".bough.yaml"), []byte(yaml), 0o644); err != nil {
-		t.Fatalf("write .bough.yaml: %v", err)
-	}
+	writeMinimalBoughYAML(t, root)
 
 	cmd := newHookHandleCmd()
 	cmd.SetArgs([]string{"--event", "WorktreeCreate", "--out", filepath.Join(root, "obs.jsonl")})
@@ -101,6 +109,12 @@ func TestHookHandle_WorktreeCreateMissingName(t *testing.T) {
 // the remaining six carry no repo-mutating dispatch, so a bare .bough.yaml-
 // less run is safe.
 func TestHookHandle_AllEventsRecordObservation(t *testing.T) {
+	// SessionEnd/PreCompact dispatch (runSessionEnd/runPreserveInstincts)
+	// resolves the homunculus from the process cwd; redirect it to a temp
+	// dir so the test never appends synthetic scores into the developer's
+	// or CI's real ~/.local/share/bough-homunculus corpus (git status does
+	// not surface that dir, which is how the pollution slipped through).
+	t.Setenv("BOUGH_HOMUNCULUS_DIR", t.TempDir())
 	for _, ev := range []hooks.HookEvent{
 		hooks.EventPreToolUse,
 		hooks.EventPostToolUse,
@@ -137,16 +151,7 @@ func TestHookHandle_AllEventsRecordObservation(t *testing.T) {
 func TestHookHandle_WorktreeRemoveTearsDown(t *testing.T) {
 	root := t.TempDir()
 	gitInitMain(t, filepath.Join(root, "demo"))
-	yaml := "schema_version: 2\n" +
-		"monorepo_root: \".\"\n" +
-		"repositories:\n" +
-		"  - name: demo\n" +
-		"    branch_strategy: main\n" +
-		"registry:\n" +
-		"  path: \".bough-ports.json\"\n"
-	if err := os.WriteFile(filepath.Join(root, ".bough.yaml"), []byte(yaml), 0o644); err != nil {
-		t.Fatalf("write .bough.yaml: %v", err)
-	}
+	writeMinimalBoughYAML(t, root)
 	obs := filepath.Join(root, "obs.jsonl")
 
 	handle := func(event, payload string) {

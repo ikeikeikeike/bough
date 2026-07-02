@@ -241,9 +241,12 @@ func copyFile(src, dst string) error {
 	// a single physical line with literal \n escapes (the observer model
 	// wrote it via its Write tool + JSON-escaped the body). Heal that at
 	// the import boundary so bough's strict reader does not silently drop
-	// it. NormalizeInstinct is a no-op for a healthy or unrepairable file,
-	// so a non-instinct .md (INSTINCTS.md / README.md) copies unchanged.
-	if strings.HasSuffix(src, ".md") {
+	// it. Catalog files (INSTINCTS.md / MEMORY.md / README.md) are never
+	// instincts and can grow large over months of logging, so they skip
+	// the read-whole-file normalize path and stream like any other file
+	// below — matching the same trio ScanInstincts ignores.
+	base := filepath.Base(src)
+	if strings.HasSuffix(src, ".md") && base != "INSTINCTS.md" && base != "MEMORY.md" && base != "README.md" {
 		return copyInstinctFile(src, dst)
 	}
 	in, err := os.Open(src)

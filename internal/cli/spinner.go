@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/mattn/go-isatty"
@@ -23,10 +24,11 @@ const spinnerInterval = 100 * time.Millisecond
 // so the plain [bough] lines remain the entire, greppable log. That
 // inertness is the contract the hook path relies on.
 type spinner struct {
-	w    io.Writer
-	tty  bool
-	stop chan struct{}
-	done chan struct{}
+	w        io.Writer
+	tty      bool
+	stop     chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
 }
 
 // startSpinner begins animating msg on w and returns a handle whose
@@ -69,9 +71,14 @@ func (s *spinner) Stop() {
 	if !s.tty {
 		return
 	}
-	close(s.stop)
-	<-s.done
-	fmt.Fprint(s.w, "\r\033[K")
+	// sync.Once so a second Stop() (a future extra call site, or an
+	// error path that also defers Stop) cannot panic on a double
+	// `close(s.stop)` and crash `bough create`.
+	s.stopOnce.Do(func() {
+		close(s.stop)
+		<-s.done
+		fmt.Fprint(s.w, "\r\033[K")
+	})
 }
 
 // isInteractive reports whether w is a terminal bough may animate on. A

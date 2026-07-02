@@ -198,20 +198,29 @@ teardown:
 ```
 
 Then wire it into Claude Code's `WorktreeCreate` / `WorktreeRemove`
-hooks in `.claude/settings.json`:
+hooks in `.claude/settings.json`. `bough hook install` writes these
+(and the continuous-learning hooks) for you, all routed through the
+single `bough hook handle` dispatcher:
 
 ```json
 {
   "hooks": {
     "WorktreeCreate": [
-      {"hooks": [{"type": "command", "command": "bough create --stdin-json"}]}
+      {"hooks": [{"type": "command", "command": "bough hook handle --event WorktreeCreate"}]}
     ],
     "WorktreeRemove": [
-      {"hooks": [{"type": "command", "command": "bough remove --stdin-json"}]}
+      {"hooks": [{"type": "command", "command": "bough hook handle --event WorktreeRemove"}]}
     ]
   }
 }
 ```
+
+> Wire each event through **one** command. `bough hook handle --event
+> WorktreeCreate` and the older `bough create --stdin-json` both run the
+> full create pipeline, so keeping both for the same event runs it twice
+> (a second `post_create` migration pass). `bough hook install` only ever
+> manages its own `bough hook handle` entries, so prefer it and don't also
+> hand-add a `bough create --stdin-json` group.
 
 After that, `claude --worktree F-FeatureName` deterministically:
 

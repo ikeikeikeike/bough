@@ -2,8 +2,10 @@ package cli
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"testing"
+	"time"
 )
 
 // TestSpinner_InertOnNonTTY is the hook-safety contract: when stderr is
@@ -41,4 +43,42 @@ func TestIsInteractive_nonTerminalIsFalse(t *testing.T) {
 func TestSpinner_StopOnInertIsSafe(t *testing.T) {
 	sp := startSpinner(&bytes.Buffer{}, "x")
 	sp.Stop()
+}
+
+// TestSpinner_AnimatesAndStops exercises the TTY animation path the
+// inert-only tests never reach: run() must paint frame 0 (carrying the
+// message) immediately, and Stop() must observe the stop signal, unblock,
+// and stay panic-free on a second call (the sync.Once guard).
+func TestSpinner_AnimatesAndStops(t *testing.T) {
+	pr, pw := io.Pipe()
+	s := &spinner{w: pw, tty: true, stop: make(chan struct{}), done: make(chan struct{})}
+
+	got := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, 64)
+		n, _ := pr.Read(buf) // blocks until run() writes frame 0
+		got <- append([]byte(nil), buf[:n]...)
+		_, _ = io.Copy(io.Discard, pr) // drain later frames / clear-line so run()/Stop() never block
+	}()
+	go s.run("booting")
+
+	select {
+	case frame := <-got:
+		if !bytes.Contains(frame, []byte("booting")) {
+			t.Errorf("first spinner frame missing the message: %q", frame)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("spinner never painted a frame")
+	}
+
+	// Stop() twice: it must unblock (run() observed stop) and the second
+	// call must be a no-op, not a double-close panic.
+	stopped := make(chan struct{})
+	go func() { s.Stop(); s.Stop(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("spinner Stop() hung")
+	}
+	_ = pw.Close()
 }

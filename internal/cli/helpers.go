@@ -13,9 +13,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// hookRemoveGracefulSecs mirrors newRemoveCmd's --graceful-timeout
-// default for the WorktreeRemove hook dispatch, which has no flag.
-const hookRemoveGracefulSecs = 10
+// defaultRemoveGracefulSecs is the seconds runRemove waits for plugin
+// Down() before SIGKILL. It backs both newRemoveCmd's --graceful-timeout
+// flag default and the flagless WorktreeRemove hook dispatch, so the two
+// removal paths cannot drift.
+const defaultRemoveGracefulSecs = 10
 
 // hookInput is the shape Claude Code's WorktreeCreate / WorktreeRemove
 // hook contracts emit on stdin.
@@ -72,35 +74,48 @@ func dispatchWorktreeCreate(cmd *cobra.Command, payload []byte) error {
 	return runCreate(cmd.Context(), cmd.ErrOrStderr(), cmd.OutOrStdout(), cfg, monorepoRoot, in.Name, false, false)
 }
 
+// resolveRemoveTarget maps a (worktreePath OR name) removal request to
+// the (monorepoRoot, worktreeName, worktreePath) triple runRemove needs.
+// Shared by the `bough remove` CLI and the WorktreeRemove hook dispatch
+// so the two paths cannot diverge. worktreePath wins when present (and is
+// Cleaned so a trailing slash does not shift Dir(Dir(...)) a level too
+// shallow); otherwise the worktree is <cwd>/.worktrees/<name>. cwd is
+// os.Getwd() — the hook payload's own `cwd` is deliberately NOT trusted:
+// a WorktreeRemove hook can fire from inside the worktree being torn
+// down, and doubling that into the path would miss the real worktree and
+// leak its engine subprocesses.
+func resolveRemoveTarget(name, worktreePath string) (monorepoRoot, wtName, path string, err error) {
+	switch {
+	case worktreePath != "":
+		path = filepath.Clean(worktreePath)
+		wtName = filepath.Base(path)
+		monorepoRoot = filepath.Dir(filepath.Dir(path))
+	case name != "":
+		monorepoRoot, _ = os.Getwd()
+		wtName = name
+		path = filepath.Join(monorepoRoot, ".worktrees", name)
+	default:
+		err = errors.New("removal needs a worktree path or name (--path/--name, or hook worktree_path/name)")
+	}
+	return
+}
+
 // dispatchWorktreeRemove is the WorktreeRemove twin: it tears down the
-// worktree named by the payload (worktree_path preferred, else name),
-// mirroring newRemoveCmd's resolution.
+// worktree named by the payload (worktree_path preferred, else name).
 func dispatchWorktreeRemove(cmd *cobra.Command, payload []byte) error {
 	in, err := parseHookInput(payload)
 	if err != nil {
 		return err
 	}
-	var monorepoRoot, wtName, path string
-	switch {
-	case in.WorktreePath != "":
-		path = in.WorktreePath
-		wtName = filepath.Base(path)
-		monorepoRoot = filepath.Dir(filepath.Dir(path))
-	case in.Name != "":
-		monorepoRoot = in.Cwd
-		if monorepoRoot == "" {
-			monorepoRoot, _ = os.Getwd()
-		}
-		wtName = in.Name
-		path = filepath.Join(monorepoRoot, ".worktrees", in.Name)
-	default:
-		return errors.New("WorktreeRemove hook payload has no worktree_path or name")
+	monorepoRoot, wtName, path, err := resolveRemoveTarget(in.Name, in.WorktreePath)
+	if err != nil {
+		return err
 	}
 	abs, cfg, err := loadConfigAndRoot(cmd, monorepoRoot)
 	if err != nil {
 		return err
 	}
-	return runRemove(cmd.Context(), cmd.ErrOrStderr(), cfg, abs, wtName, path, hookRemoveGracefulSecs)
+	return runRemove(cmd.Context(), cmd.ErrOrStderr(), cfg, abs, wtName, path, defaultRemoveGracefulSecs)
 }
 
 // resolveConfigPath answers "where does the bough YAML live?" in the

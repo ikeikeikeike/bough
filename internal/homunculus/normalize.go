@@ -55,6 +55,13 @@ func NormalizeInstinct(raw []byte, wantID string) ([]byte, bool) {
 	if !IsCorruptInstinct(raw) {
 		return raw, false
 	}
+	// unescapeInstinct protects `\\` with a NUL sentinel, so a pre-existing
+	// NUL byte in the body would be rewritten to a stray backslash. Instinct
+	// files are text; a NUL means this is not a normal instinct, so copy it
+	// verbatim rather than risk mangling unrelated bytes during the repair.
+	if bytes.IndexByte(raw, 0) >= 0 {
+		return raw, false
+	}
 	repaired := []byte(unescapeInstinct(string(raw)))
 	in, err := parseInstinct(repaired)
 	if err != nil || in.ID != wantID {
