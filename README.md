@@ -77,9 +77,11 @@ the only option do not silently flip to docker on upgrade):
   2. else docker daemon reachable → `docker`
   3. else: actionable error pointing at the `engines[].backend` YAML knob
 
-In practice that means **nix users** (= those who already installed
-Nix before adopting bough) get `nix`; **everyone else (the typical
-install)** gets `docker`. An explicit `backend: nix | docker` per
+In practice that means **nix users with flakes enabled** (= those who
+already installed Nix and turned on the `nix-command`/`flakes`
+experimental features before adopting bough) get `nix`; **everyone
+else (the typical install, including a bare Nix install without
+flakes)** gets `docker`. An explicit `backend: nix | docker` per
 engine in `.bough.yaml` always overrides auto-detect.
 
 | Backend  | When auto-detect picks it                            | User must provide |
@@ -106,8 +108,11 @@ bough ships as 5 binaries (`bough` + 4 `bough-plugin-*`). Pick one:
 ```bash
 # 1. GitHub Release tarball (recommended; no Go / Nix toolchain needed)
 #    Available for darwin/linux × arm64/amd64. The URL resolves the
-#    latest tagged release automatically.
-curl -fsSL https://github.com/ikeikeikeike/bough/releases/latest/download/bough_$(uname -s | tr A-Z a-z)_$(uname -m).tar.gz \
+#    latest tagged release automatically. `uname -m` reports x86_64/
+#    aarch64, but release assets are named by Go's GOARCH (amd64/
+#    arm64) — the arch= mapping below translates between the two.
+arch=$(uname -m); case "$arch" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; esac
+curl -fsSL https://github.com/ikeikeikeike/bough/releases/latest/download/bough_$(uname -s | tr A-Z a-z)_${arch}.tar.gz \
   | tar xz -C ~/.local/bin/  bough bough-plugin-mysql bough-plugin-postgres bough-plugin-redis bough-plugin-elasticsearch
 #
 # macOS (Apple Silicon) one-time step: the release binaries are not

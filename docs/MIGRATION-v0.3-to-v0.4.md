@@ -15,10 +15,17 @@ This guide covers:
 
 ## TL;DR
 
-If your `.worktree-isolation.yaml` already works against bough v0.3.x,
-**v0.4.0 keeps working without edits**. The host loader detects the
-old file and reads it with a deprecation warning. Rename to the new
-shape at your convenience before v0.5.0 ships.
+**v0.5.0 already shipped and removed the v0.3.x fallback described
+below.** If you are still running a `.worktree-isolation.yaml` config
+(or a plugin binary built before v0.4.0), migrate to `.bough.yaml`
+before upgrading past v0.4.x — a current bough host no longer reads
+the old file, section names, field names, or gRPC handshake key at
+all; see Timeline below.
+
+(Historical, for anyone running a pinned v0.4.x host: during that
+window your existing `.worktree-isolation.yaml` kept working without
+edits — the host loader detected the old file and read it with a
+deprecation warning. That grace period ended at v0.5.0.)
 
 ## What renamed
 

@@ -3,10 +3,10 @@
 // onward — rabbitmq, kafka, nats, minio, etc.). Host and plugin link
 // this package; the generated gRPC stubs sit under api/proto.
 //
-// Renamed from plugins/db/api in v0.4.0. The legacy DBProvider
-// interface stays in plugins/db/api for the v0.4.x transition so
-// host-side fallback handshakes can spawn v0.3.x binaries, but every
-// new plugin should target EngineProvider here. See
+// Renamed from plugins/db/api in v0.4.0. plugins/db/api and its
+// legacy DBProvider fallback handshake (which let a v0.4.x host spawn
+// a v0.3.x-built binary) existed only through the v0.4.x transition;
+// v0.5.0 removed both the directory and the fallback entirely. See
 // docs/MIGRATION-v0.3-to-v0.4.md.
 package api
 
