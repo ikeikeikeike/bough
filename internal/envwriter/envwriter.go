@@ -26,12 +26,18 @@ import (
 
 // Context is the variable surface every YAML template renders against.
 // Adding a field here is a schema break for monorepo authors — keep the
-// surface narrow.
+// surface narrow. One DBCtx field per bundled engine plugin (mysql,
+// postgres, redis, elasticsearch) — anything past that set belongs on
+// a future generic `Engines map[string]DBCtx` instead of a fifth
+// named field.
 type Context struct {
-	Worktree WorktreeCtx
-	Repo     RepoCtx
-	Mysql    DBCtx
-	Ports    map[string]int
+	Worktree      WorktreeCtx
+	Repo          RepoCtx
+	Mysql         DBCtx
+	Postgres      DBCtx
+	Redis         DBCtx
+	Elasticsearch DBCtx
+	Ports         map[string]int
 }
 
 // WorktreeCtx is the per-worktree identity. `Name` is what the user
@@ -50,13 +56,13 @@ type RepoCtx struct {
 	Path string
 }
 
-// DBCtx is the per-worktree mysql instance descriptor produced by the
-// mysql plugin. `Socket` is the absolute /tmp socket path bough has
-// configured the mysqld to bind, mostly relevant when a consumer wants
-// to skip TCP entirely. When no database plugin is in play the zero
-// value is fine — templates that reference DBCtx in a no-DB monorepo
-// produce a literal `0` / empty string and surface as a schema error
-// upstream rather than here.
+// DBCtx is the per-worktree engine instance descriptor produced by an
+// engine plugin (mysql/postgres/redis/elasticsearch). `Socket` is the
+// absolute /tmp socket path bough has configured the server to bind,
+// mostly relevant when a consumer wants to skip TCP entirely. When a
+// given engine kind isn't configured for this worktree, its Context
+// field is left at the zero value — templates that reference it
+// produce a literal `0` / empty string rather than a template error.
 type DBCtx struct {
 	Port   int
 	Host   string

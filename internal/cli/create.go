@@ -84,8 +84,8 @@ type engineInstance struct {
 // operator in an inconsistent state.
 //
 // Each numbered phase below is a self-contained helper so this body
-// reads as the contract: load → allocate → start engines → materialise
-// repos → render env → run hooks → emit the worktree path.
+// reads as the contract: load → allocate → materialise repos → start
+// engines → render env → run hooks → emit the worktree path.
 func runCreate(ctx context.Context, stderr, stdout io.Writer, cfg *config.Config, monorepoRoot, name string, noFetch, strict bool) error {
 	logf(stderr, "[bough] create %s @ %s", name, monorepoRoot)
 	worktreeRoot := filepath.Join(monorepoRoot, ".worktrees", name)
@@ -102,7 +102,19 @@ func runCreate(ctx context.Context, stderr, stdout io.Writer, cfg *config.Config
 		return err
 	}
 
-	// 2. Engine plugins: discover binaries, Up + ReadyCheck each, and
+	// 2. git worktree add + direnv + symlinks per repository. We
+	// continue on per-repo failure because partial worktree
+	// materialisation is more useful than aborting on the first
+	// error — the operator can `bough remove` and retry. This must run
+	// BEFORE starting engines: an engine-provider repo's worktree
+	// destination and its engine's deployed flake dir are the same
+	// path (<worktreeRoot>/<repo.Name>), and `git worktree add` fails
+	// outright against a non-empty destination — populating it via
+	// deployFlake first would break worktree materialisation for that
+	// repo on every single `bough create`.
+	failedRepos := materializeRepositories(ctx, stderr, cfg, monorepoRoot, worktreeRoot, name, noFetch)
+
+	// 3. Engine plugins: discover binaries, Up + ReadyCheck each, and
 	// capture their EnvVars for the env-render pass. The defer kills
 	// every started subprocess on the way out — even partial-start
 	// engines from a mid-loop error are caught because startEngines
@@ -127,12 +139,6 @@ func runCreate(ctx context.Context, stderr, stdout io.Writer, cfg *config.Config
 		}
 		return err
 	}
-
-	// 3. git worktree add + direnv + symlinks per repository. We
-	// continue on per-repo failure because partial worktree
-	// materialisation is more useful than aborting on the first
-	// error — the operator can `bough remove` and retry.
-	failedRepos := materializeRepositories(ctx, stderr, cfg, monorepoRoot, worktreeRoot, name, noFetch)
 
 	// Repos that failed to materialise (clone / worktree-add) are skipped
 	// in the env_local + post_create passes below: their worktree dir does
@@ -578,10 +584,13 @@ func renderEnvLocals(
 		}
 		repoDst := filepath.Join(worktreeRoot, repo.Name)
 		envCtx := envwriter.Context{
-			Worktree: envwriter.WorktreeCtx{Name: name, Root: worktreeRoot},
-			Repo:     envwriter.RepoCtx{Name: repo.Name, Path: repoDst},
-			Mysql:    engineContextFor("mysql", engines),
-			Ports:    portsCtx,
+			Worktree:      envwriter.WorktreeCtx{Name: name, Root: worktreeRoot},
+			Repo:          envwriter.RepoCtx{Name: repo.Name, Path: repoDst},
+			Mysql:         engineContextFor("mysql", engines),
+			Postgres:      engineContextFor("postgres", engines),
+			Redis:         engineContextFor("redis", engines),
+			Elasticsearch: engineContextFor("elasticsearch", engines),
+			Ports:         portsCtx,
 		}
 		rendered, err := envwriter.Render(repo.EnvLocal, envCtx)
 		if err != nil {
