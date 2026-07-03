@@ -42,7 +42,74 @@ type monorepoFixture struct {
 	hostBinDir string
 }
 
+// v0.4CanonicalYAML is the schema_version:2 shape (engines: /
+// port_ranges: / initial_resources: / role: engine-provider).
+const v0_4CanonicalYAML = `schema_version: 2
+monorepo_root: "."
+repositories:
+  - name: demo-db
+    branch_strategy: develop
+    direnv: false
+    role: engine-provider
+    env_local:
+      BOUGH_DEMO_PORT: "{{ .Mysql.Port }}"
+engines:
+  - kind: mysql
+    version: "8.4"
+    port_ranges:
+      main: [42000, 42999]
+    socket_dir: "/tmp"
+    initial_resources:
+      - { type: database, name: bough }
+registry:
+  path: ".bough-ports.json"
+  backup_dir: "/tmp/bough-test-backups"
+teardown:
+  remove_branch: true
+  remove_datadir: true
+  graceful_timeout_sec: 10
+`
+
+// v0_3LegacyYAML is the schema_version:1 shape (databases: /
+// port_range: / initial_databases: / role: db-provider) that
+// migrateLegacy() converts in memory before the rest of the pipeline
+// ever sees it. Kept as a distinct end-to-end fixture (not just a
+// migrateLegacy() unit test) so a regression in how allocateEngines /
+// the mysql plugin consume a migrateLegacy()-produced Engine — or in
+// engineProviderRepo()'s "db-provider" role-alias branch, which no
+// other test in the repo exercises — surfaces here instead of only in
+// production, on hosts still running an unconverted
+// .worktree-isolation.yaml.
+const v0_3LegacyYAML = `schema_version: 1
+monorepo_root: "."
+repositories:
+  - name: demo-db
+    branch_strategy: develop
+    direnv: false
+    role: db-provider
+    env_local:
+      BOUGH_DEMO_PORT: "{{ .Mysql.Port }}"
+databases:
+  - kind: mysql
+    version: "8.4"
+    port_range: [42000, 42999]
+    socket_dir: "/tmp"
+    initial_databases: ["bough"]
+registry:
+  path: ".bough-ports.json"
+  backup_dir: "/tmp/bough-test-backups"
+teardown:
+  remove_branch: true
+  remove_datadir: true
+  graceful_timeout_sec: 10
+`
+
 func newFixture(t *testing.T) *monorepoFixture {
+	t.Helper()
+	return newFixtureWithYAML(t, v0_4CanonicalYAML)
+}
+
+func newFixtureWithYAML(t *testing.T, yaml string) *monorepoFixture {
 	t.Helper()
 	root := t.TempDir()
 
@@ -71,36 +138,6 @@ func newFixture(t *testing.T) *monorepoFixture {
 	}
 	gitInit(t, srcRepo)
 
-	// Write .bough.yaml against this minimal layout. v0.3 fallback for
-	// .worktree-isolation.yaml is covered separately by the unit-test
-	// migrateLegacy() suite; here we exercise the v0.4 canonical shape
-	// end-to-end so a future schema bump cannot regress the wiring
-	// silently.
-	yaml := `schema_version: 2
-monorepo_root: "."
-repositories:
-  - name: demo-db
-    branch_strategy: develop
-    direnv: false
-    role: engine-provider
-    env_local:
-      BOUGH_DEMO_PORT: "{{ .Mysql.Port }}"
-engines:
-  - kind: mysql
-    version: "8.4"
-    port_ranges:
-      main: [42000, 42999]
-    socket_dir: "/tmp"
-    initial_resources:
-      - { type: database, name: bough }
-registry:
-  path: ".bough-ports.json"
-  backup_dir: "/tmp/bough-test-backups"
-teardown:
-  remove_branch: true
-  remove_datadir: true
-  graceful_timeout_sec: 10
-`
 	if err := os.WriteFile(filepath.Join(root, ".bough.yaml"), []byte(yaml), 0o644); err != nil {
 		t.Fatalf("write yaml: %v", err)
 	}
@@ -111,7 +148,29 @@ func TestE2E_CreateMysqlReadyAndRemove(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test skipped in -short mode")
 	}
-	fx := newFixture(t)
+	runE2ECreateReadyRemove(t, newFixture(t), "F-E2E-Mysql")
+}
+
+// TestE2E_CreateMysqlReadyAndRemove_LegacyV03Schema is the end-to-end
+// counterpart to internal/config's migrateLegacy() unit tests: those
+// only assert on the in-memory *Config struct LoadFromBytes returns,
+// never on how allocateEngines / the mysql plugin actually consume a
+// migrateLegacy()-produced Engine, nor on engineProviderRepo()'s
+// "db-provider" role-alias branch — which no other test in the repo
+// calls at all. A host still running an unconverted
+// .worktree-isolation.yaml (the explicitly-still-supported v0.3
+// fallback) depends on both working; this drives the real create →
+// registry → plugin → remove pipeline against that legacy shape so a
+// regression in either surfaces here instead of only in production.
+func TestE2E_CreateMysqlReadyAndRemove_LegacyV03Schema(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test skipped in -short mode")
+	}
+	runE2ECreateReadyRemove(t, newFixtureWithYAML(t, v0_3LegacyYAML), "F-E2E-Mysql-V03")
+}
+
+func runE2ECreateReadyRemove(t *testing.T, fx *monorepoFixture, wtName string) {
+	t.Helper()
 
 	// Inject ./dist at the front of PATH so cli.create → pluginhost
 	// resolves bough-plugin-mysql to the just-built binary instead of
@@ -128,14 +187,13 @@ func TestE2E_CreateMysqlReadyAndRemove(t *testing.T) {
 	}
 
 	// === Create ===
-	const wtName = "F-E2E-Mysql"
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	if err := runCLI(ctx, "create", "--name", wtName); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	// Registry should have the F-E2E-Mysql entry with a mysql port.
+	// Registry should have the wtName entry with a mysql port.
 	store := registry.NewStore(
 		filepath.Join(fx.root, ".bough-ports.json"),
 		"/tmp/bough-test-backups",

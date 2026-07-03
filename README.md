@@ -398,13 +398,14 @@ See [docs/CONCEPTS.md](docs/CONCEPTS.md) for the layering model,
 
 ## Status
 
-v0.9.22 (current; v0.9.23 in progress). The four bundled engine
-plugins (`bough-plugin-{mysql,postgres,redis,elasticsearch}`) are
+v0.9.22 (current; v0.9.23 in progress). Three of the four bundled
+engine plugins (`bough-plugin-{mysql,redis,elasticsearch}`) are
 battle-tested in a real Go + Rails + Remix multi-sub-repo monorepo
 (MySQL 8.4 LTS + Redis 7 + Elasticsearch 7) on the Docker backend; the
 Nix backend remains supported via auto-detect and is the default when
-nix-with-flakes is on `PATH`. The Postgres plugin is
-integration-test-only. Multi-port engines (rabbitmq / kafka / NATS) are
+nix-with-flakes is on `PATH`. The Postgres plugin
+(`bough-plugin-postgres`) is integration-test-only — it has not run in
+that production monorepo. Multi-port engines (rabbitmq / kafka / NATS) are
 first-class in the contract — reference plugins are not yet bundled.
 
 The worktree-isolation core has been stable since v0.4.0. v0.5 onward
