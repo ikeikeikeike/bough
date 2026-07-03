@@ -25,8 +25,11 @@ func TestRenderEnvLocals_BestEffort(t *testing.T) {
 	if len(failed) != 1 {
 		t.Fatalf("renderEnvLocals returned %d failures, want 1 (must not abort): %v", len(failed), failed)
 	}
-	if !strings.Contains(failed[0], "demo") {
-		t.Errorf("failure entry missing repo name: %q", failed[0])
+	if failed[0].Repo != "demo" {
+		t.Errorf("failure entry has repo %q, want %q", failed[0].Repo, "demo")
+	}
+	if !strings.Contains(failed[0].Detail, "render") {
+		t.Errorf("failure entry Detail missing 'render': %q", failed[0].Detail)
 	}
 }
 

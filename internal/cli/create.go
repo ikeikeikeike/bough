@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -147,6 +148,15 @@ func runCreate(ctx context.Context, stderr, stdout io.Writer, cfg *config.Config
 	// worktree-path stdout emit + failure summary below.
 	failedEnv := renderEnvLocals(stderr, cfg, worktreeRoot, name, engines, portsCtx, skipRepo)
 
+	// A repo whose .env.local failed to render/write this run must not
+	// have post_create run against it: there is nothing (or a stale
+	// prior run's file) to inject, and post_create's own env would
+	// silently interpolate to empty strings with no link back to this
+	// earlier failure. Same treatment as a failed worktree-add.
+	for _, e := range failedEnv {
+		skipRepo[e.Repo] = true
+	}
+
 	// 5. post_create hooks. Best-effort: a failing migration here is
 	// reported to stderr but does not unwind the entire create — the
 	// operator usually wants the worktree materialised even when seed
@@ -176,7 +186,7 @@ func runCreate(ctx context.Context, stderr, stdout io.Writer, cfg *config.Config
 			logf(stderr, "[bough]   - worktree add failed: %s", r)
 		}
 		for _, e := range failedEnv {
-			logf(stderr, "[bough]   - env_local failed: %s", e)
+			logf(stderr, "[bough]   - env_local failed: %s (%s)", e.Repo, e.Detail)
 		}
 		for _, h := range failedHooks {
 			logf(stderr, "[bough]   - post_create failed: %s", h)
@@ -540,6 +550,16 @@ func linkWorktreeSkills(stderr io.Writer, monorepoRoot, worktreeRoot string) {
 // and writes the rendered .env.local. Engine-emitted vars (EnvVars
 // from each plugin) get merged in last so the host can render keys
 // the operator did not have to enumerate by hand.
+// envLocalFailure names a repo whose .env.local render or write failed
+// this run, plus a human-readable detail for the create summary. A
+// struct (not a pre-formatted string) so the caller can both extend
+// skipRepo with just the Repo name and print Detail in its own
+// summary line, without re-parsing a combined string.
+type envLocalFailure struct {
+	Repo   string
+	Detail string
+}
+
 func renderEnvLocals(
 	stderr io.Writer,
 	cfg *config.Config,
@@ -547,8 +567,8 @@ func renderEnvLocals(
 	engines []engineInstance,
 	portsCtx map[string]int,
 	skip map[string]bool,
-) []string {
-	var failed []string
+) []envLocalFailure {
+	var failed []envLocalFailure
 	for _, repo := range cfg.Repositories {
 		if skip[repo.Name] {
 			continue // repo did not materialise; no worktree to write into
@@ -569,7 +589,7 @@ func renderEnvLocals(
 			// must not abort the create before the worktree-path stdout emit +
 			// failure summary. Record it and carry on.
 			logf(stderr, "[bough] %s: env_local render failed: %v", repo.Name, err)
-			failed = append(failed, fmt.Sprintf("%s (render: %v)", repo.Name, err))
+			failed = append(failed, envLocalFailure{Repo: repo.Name, Detail: fmt.Sprintf("render: %v", err)})
 			continue
 		}
 		for _, e := range engines {
@@ -582,7 +602,7 @@ func renderEnvLocals(
 		dst := filepath.Join(repoDst, ".env.local")
 		if err := envwriter.Write(dst, rendered); err != nil {
 			logf(stderr, "[bough] %s: .env.local write failed: %v", repo.Name, err)
-			failed = append(failed, fmt.Sprintf("%s (write: %v)", repo.Name, err))
+			failed = append(failed, envLocalFailure{Repo: repo.Name, Detail: fmt.Sprintf("write: %v", err)})
 			continue
 		}
 		logf(stderr, "[bough] %s: .env.local written (%d keys)", repo.Name, len(rendered))
@@ -598,18 +618,24 @@ func runPostCreateHooks(ctx context.Context, stderr io.Writer, cfg *config.Confi
 	var failed []string
 	for _, repo := range cfg.Repositories {
 		if skip[repo.Name] {
-			continue // repo did not materialise; nothing to run hooks against
+			continue // repo did not materialise, or its env_local failed to render; nothing to run hooks against
 		}
 		if len(repo.PostCreate) == 0 {
 			continue
 		}
 		repoDst := filepath.Join(worktreeRoot, repo.Name)
-		fileEnv := parseEnvLocal(filepath.Join(repoDst, ".env.local"))
+		envLocalPath := filepath.Join(repoDst, ".env.local")
 		for _, line := range repo.PostCreate {
 			logf(stderr, "[bough] %s post_create: %s", repo.Name, line)
 			c := exec.CommandContext(ctx, "bash", "-c", line)
 			c.Dir = repoDst
-			c.Env = append(os.Environ(), fileEnv...)
+			// Re-read .env.local before every line rather than once per
+			// repo: an earlier line may have derived and appended a new
+			// value (the documented idiom this feature exists for, e.g.
+			// composing a DSN from a port bough just allocated), and a
+			// snapshot taken before the loop would starve every line
+			// after the first of that value.
+			c.Env = append(os.Environ(), parseEnvLocal(stderr, repo.Name, envLocalPath)...)
 			c.Stdout = stderr
 			c.Stderr = stderr
 			if err := c.Run(); err != nil {
@@ -715,17 +741,32 @@ func resolveRegistryPath(monorepoRoot, yamlPath string) string {
 // parseEnvLocal reads a `.env.local` file and returns its `KEY=VALUE`
 // lines verbatim so the caller can pass them through to a child
 // process's exec.Cmd.Env. Comments (`#`-prefixed) and blank lines
-// are skipped; lines without an `=` are silently dropped.
+// are skipped; lines without an `=` are silently dropped. A read
+// failure other than the file simply not existing yet is logged
+// (repoName identifies which repo's post_create is affected) rather
+// than silently treated the same as "no .env.local".
 //
 // IMPORTANT: this parser does NOT do shell unquoting / interpolation
 // of values. The bough envwriter emits raw values without surrounding
 // quotes (matching the historical direnv `dotenv_if_exists .env.local`
 // idiom) and bash `source` would choke on the `(`, `&`, `?` chars
 // many DSNs / URLs contain — that exact failure mode is the bug this
-// helper exists to bypass.
-func parseEnvLocal(path string) []string {
+// helper exists to bypass. This is a deliberate, tested contract (see
+// TestParseEnvLocal_ValuesWithShellMetachars's WITH_QUOTES case): a
+// value a post_create script appends with hand-written quotes is
+// passed through with those quote characters intact, not stripped —
+// stripping would be ambiguous with a value that genuinely needs a
+// literal leading/trailing quote character, which this parser cannot
+// distinguish without a real quoting format the .env.local file
+// doesn't have (see issue #75 for the concrete failure case and
+// why a fix needs a coordinated envwriter.Write format decision,
+// not a parseEnvLocal-only change).
+func parseEnvLocal(stderr io.Writer, repoName, path string) []string {
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			logf(stderr, "[bough] %s: .env.local read failed: %v", repoName, err)
+		}
 		return nil
 	}
 	var env []string
