@@ -9,6 +9,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// v03FallbackCaption is shared by every --help string that documents
+// the v0.3 config-path fallback (root's --config flag, `bough config
+// validate`'s Short text, ...) so removing that fallback in v0.5.0
+// only needs updating in one place instead of drifting between
+// independently-worded copies.
+const v03FallbackCaption = "v0.3 .worktree-isolation.yaml accepted on fallback"
+
 // NewRootCmd assembles the full bough command tree. `version` is
 // surfaced through `bough --version`; main.go fills it in from the
 // linker-injected build tag.
@@ -31,7 +38,7 @@ func NewRootCmd(version string) *cobra.Command {
 		SilenceUsage:  true, // RunE-returned errors print without the usage banner
 		SilenceErrors: true, // main.go formats the error itself
 	}
-	root.PersistentFlags().String("config", "", "path to .bough.yaml (default: <monorepoRoot>/.bough.yaml; v0.3 .worktree-isolation.yaml accepted on fallback)")
+	root.PersistentFlags().String("config", "", "path to .bough.yaml (default: <monorepoRoot>/.bough.yaml; "+v03FallbackCaption+")")
 
 	root.AddCommand(
 		// Per-worktree infrastructure (v0.4+).
@@ -65,7 +72,9 @@ WorktreeCreate / WorktreeRemove hook target for Claude Code's
 ` + "`claude --worktree`" + ` workflow, bough deterministically allocates a port
 set (db / api / gateway / ...) per branch, writes the matching
 .env.local in every sub-repo, and spawns the configured engine
-(MySQL / PostgreSQL / Redis / Elasticsearch / rabbitmq / kafka / NATS / ...)
+(MySQL / PostgreSQL / Redis / Elasticsearch today; multi-port engines
+like rabbitmq / kafka / NATS are first-class in the contract but their
+reference plugins are not yet bundled)
 via a Hashicorp go-plugin gRPC plugin so adding a new engine never
 touches the host binary.
 
