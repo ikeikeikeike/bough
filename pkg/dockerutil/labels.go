@@ -20,10 +20,13 @@ const (
 // the only knob the per-plugin caller needs to provide; the rest are
 // derived from the image reference + published host port.
 //
-// Schema stability matters: `bough remove` discovers leaked containers
-// by listing on these labels, so renaming a key here is a breaking
-// change for older bough binaries running side-by-side on the same
-// host.
+// Currently write-only: every plugin discovers its container purely
+// by exact name (bough-<engine>-<port> via LookupByName), never by
+// listing on these labels. They exist so a future label-based
+// discovery tool (`bough doctor` / `bough ps`) doesn't have to
+// retrofit tagging onto every already-running container — schema
+// stability matters for THAT reason, not because anything reads them
+// back today.
 func Labels(engine, imageRef string, port int) map[string]string {
 	return map[string]string{
 		LabelManaged:  "true",

@@ -3,9 +3,14 @@
 // Integration tests for the daemon-dependent helpers in container.go.
 // Only run with `go test -tags integration ./pkg/dockerutil/...`.
 //
-// Each test allocates a throwaway `alpine:3.20` container with the
-// label `com.bough.test=dockerutil` for blast-radius bounding, then
-// teardown is guaranteed via t.Cleanup.
+// Each test allocates a throwaway `alpine:3.20` container tagged with
+// the label `com.bough.test=dockerutil` for operator identification
+// (`docker ps --filter label=com.bough.test=dockerutil`). Teardown
+// itself is by container ID via t.Cleanup, not by listing on the
+// label — if the test binary is killed before Cleanup runs (a `go
+// test` timeout, a CI OOM-kill, Ctrl-C), a leaked container has no
+// automatic label-based recovery; an operator has to `docker ps -a`
+// and use the label filter above manually.
 
 package dockerutil
 
@@ -20,10 +25,9 @@ import (
 	"github.com/docker/docker/client"
 )
 
-const (
-	testImage = "alpine:3.20"
-	testLabel = "com.bough.test=dockerutil"
-)
+const testImage = "alpine:3.20"
+
+var testLabels = map[string]string{"com.bough.test": "dockerutil"}
 
 func newTestClient(t *testing.T) *client.Client {
 	t.Helper()
@@ -49,7 +53,7 @@ func createSleepContainer(t *testing.T, cli *client.Client, name string, start b
 	cfg := &container.Config{
 		Image:  testImage,
 		Cmd:    []string{"sleep", "3600"},
-		Labels: map[string]string{"com.bough.test": "dockerutil"},
+		Labels: testLabels,
 	}
 	resp, err := cli.ContainerCreate(ctx, cfg, &container.HostConfig{}, nil, nil, name)
 	if err != nil {
@@ -155,6 +159,50 @@ func TestUpOrReuse_RemovesStopped(t *testing.T) {
 	id, _ := LookupByName(context.Background(), cli, name)
 	if id != "" {
 		t.Errorf("stale container still exists after UpOrReuse: %s", id)
+	}
+}
+
+// TestIsBackendRunning_StoppedContainerIsNotRunning is the regression
+// guard for the wave-2 review finding: all four engine plugins'
+// usingDockerBackend used to return true for ANY container matching
+// the name, including a long-stopped leftover — LookupByName lists
+// with All:true. That false positive let a stale container make
+// Down()/ReadyCheck() take the docker path against the wrong
+// container while the real (possibly nix-backed) engine kept running
+// untouched, risking Cleanup() deleting its datadir out from under it.
+func TestIsBackendRunning_StoppedContainerIsNotRunning(t *testing.T) {
+	cli := newTestClient(t)
+	defer cli.Close()
+	pullTestImage(t, cli)
+
+	name := fmt.Sprintf("bough-test-backend-stopped-%d", time.Now().UnixNano())
+	_ = createSleepContainer(t, cli, name, false) // stopped
+
+	if IsBackendRunning(context.Background(), cli, name) {
+		t.Error("IsBackendRunning = true for a stopped container, want false")
+	}
+}
+
+func TestIsBackendRunning_RunningContainerIsRunning(t *testing.T) {
+	cli := newTestClient(t)
+	defer cli.Close()
+	pullTestImage(t, cli)
+
+	name := fmt.Sprintf("bough-test-backend-running-%d", time.Now().UnixNano())
+	_ = createSleepContainer(t, cli, name, true)
+
+	if !IsBackendRunning(context.Background(), cli, name) {
+		t.Error("IsBackendRunning = false for a running container, want true")
+	}
+}
+
+func TestIsBackendRunning_NoContainerIsNotRunning(t *testing.T) {
+	cli := newTestClient(t)
+	defer cli.Close()
+
+	name := fmt.Sprintf("bough-test-backend-missing-%d", time.Now().UnixNano())
+	if IsBackendRunning(context.Background(), cli, name) {
+		t.Error("IsBackendRunning = true for a nonexistent container, want false")
 	}
 }
 
