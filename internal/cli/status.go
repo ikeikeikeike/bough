@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/ikeikeikeike/bough/internal/backend"
 	"github.com/ikeikeikeike/bough/internal/config"
@@ -33,7 +32,7 @@ func newStatusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			status := buildStatus(reg, cfg)
+			status := buildStatus(cmd.Context(), reg, cfg)
 			if asJSON {
 				enc := json.NewEncoder(cmd.OutOrStdout())
 				enc.SetIndent("", "  ")
@@ -64,15 +63,31 @@ type statusEntry struct {
 	// Backend is the lifecycle runtime for engine kinds (mysql /
 	// postgres / redis / elasticsearch / rabbitmq / ...). Empty for the
 	// non-engine port kinds the host allocates alongside (api /
-	// gateway / ...). The value is the user-supplied `backend:` from
-	// the YAML, or a `<detected> (auto)` annotation when the YAML left
-	// it empty — matches the same Detect() the create path runs, so
-	// operators can spot-check without re-running `bough create`.
+	// gateway / ...). The value is the user-supplied `backend:` (or
+	// `extras.backend`) from the YAML when explicitly set — accurate
+	// per worktree. When the YAML leaves it on auto-detect, this is
+	// instead a single `<detected> (auto)` guess from ONE Detect() call
+	// made right now on the host, stamped onto every worktree of that
+	// engine kind — it is NOT read back from what that specific
+	// worktree's `bough create` actually chose (no per-worktree backend
+	// choice is persisted anywhere), so it can be wrong for a worktree
+	// created under different host conditions (e.g. before Docker was
+	// installed, or before/after a nix install).
 	Backend string `json:"backend,omitempty"`
 }
 
-func buildStatus(reg registry.Registry, cfg *config.Config) []statusEntry {
-	engineBackend := computeEngineBackends(cfg)
+func buildStatus(ctx context.Context, reg registry.Registry, cfg *config.Config) []statusEntry {
+	// Only probe backends for engine kinds this registry actually has
+	// a row for — a config declaring mysql/redis/es but a registry
+	// with zero worktrees yet must not pay Detect()'s daemon-probe
+	// latency on every `bough status` call.
+	registeredKinds := make(map[string]bool)
+	for _, kinds := range reg {
+		for kind := range kinds {
+			registeredKinds[engineKindFromRegistryKey(kind)] = true
+		}
+	}
+	engineBackend := computeEngineBackends(ctx, cfg, registeredKinds)
 	var out []statusEntry
 	for name, kinds := range reg {
 		for kind, port := range kinds {
@@ -105,41 +120,54 @@ func engineKindFromRegistryKey(key string) string {
 
 // computeEngineBackends returns a map from engine kind ("mysql",
 // "postgres", "rabbitmq", ...) to the backend that would be selected
-// by the create path for that engine (the YAML override, or the auto-
-// detect result annotated `<backend> (auto)`). Non-engine ports are
-// absent from the map so the caller leaves their Backend field empty.
+// by the create path for that engine (the YAML override — either the
+// dedicated `backend:` field or the equally-authoritative
+// `extras.backend` — or the auto-detect result annotated
+// `<backend> (auto)`). Non-engine ports and engine kinds absent from
+// `registeredKinds` are left out of the map so the caller leaves
+// their Backend field empty and Detect() is never called for a kind
+// the registry has no row for.
 //
-// Detect() is called at most once per status invocation; if no engine
-// in the YAML leaves backend empty, Detect is skipped entirely.
-func computeEngineBackends(cfg *config.Config) map[string]string {
+// Detect() is called at most once per status invocation, sharing
+// backend.Detect's own internal detectTimeout cap under the caller's
+// ctx (honors Ctrl+C/SIGTERM like every other bough subcommand) — the
+// same call create.go's detectBackendIfNeeded makes, so a cold-store
+// probe that create tolerates does not spuriously report "unresolved"
+// here under a shorter, disconnected deadline.
+func computeEngineBackends(ctx context.Context, cfg *config.Config, registeredKinds map[string]bool) map[string]string {
 	if cfg == nil {
 		return nil
 	}
 	needsDetect := false
 	for _, eng := range cfg.Engines {
-		if eng.Backend == "" {
+		if !registeredKinds[eng.Kind] {
+			continue
+		}
+		if eng.Backend == "" && eng.Extras["backend"] == "" {
 			needsDetect = true
 			break
 		}
 	}
 	var detected string
+	var detectErr error
 	if needsDetect {
-		// 3s cap so an unresponsive nix/docker daemon does not stall
-		// `bough status`; on timeout we leave detected empty and the
-		// affected entries get the "unresolved" placeholder.
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if v, err := backend.Detect(ctx); err == nil {
-			detected = v
-		}
+		detected, detectErr = backend.Detect(ctx)
 	}
 	out := make(map[string]string, len(cfg.Engines))
 	for _, eng := range cfg.Engines {
-		if eng.Backend != "" {
+		if !registeredKinds[eng.Kind] {
+			continue
+		}
+		switch {
+		case eng.Backend != "":
 			out[eng.Kind] = eng.Backend
-		} else if detected != "" {
+		case eng.Extras["backend"] != "":
+			out[eng.Kind] = eng.Extras["backend"]
+		case detected != "":
 			out[eng.Kind] = detected + " (auto)"
-		} else {
+		case detectErr != nil:
+			out[eng.Kind] = fmt.Sprintf("unresolved (%v)", detectErr)
+		default:
 			out[eng.Kind] = "unresolved"
 		}
 	}
