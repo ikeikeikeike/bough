@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.9.24
+
+Review-driven follow-ups deferred from v0.9.23 (issues #67 / #68, PR #69).
+
+### Fixed
+
+- **Spinner and plugin logger no longer garble the TTY** (#67). New
+  `internal/termio.SyncWriter` — one mutex per stderr fd (the `termio.Stderr`
+  singleton) — coordinates `bough create`'s spinner with pluginhost's hclog
+  lines: each frame registers as the writer's status line, and a plugin
+  Warn/Error arriving mid-spinner gets its own clean row (erase → line →
+  repaint, assembled into a single underlying write). A foreign write ending
+  mid-line suspends repaints so a spinner tick cannot wipe the partial chunk.
+  Non-TTY (hook / CI) output stays byte-identical inert. `bough remove` shares
+  the same routing.
+- **Hook children inherit the raw stderr fd** — handing os/exec a
+  non-`*os.File` writer makes it substitute a pipe + copy goroutine whose EOF
+  a backgrounded grandchild (`devserver &` in `post_create` / `pre_remove`)
+  holds open forever, hanging create after the hook itself exited.
+  `termio.ExecWriter` prevents it; the regression test proves the piped shape
+  blocks 10s where the fix returns immediately.
+- The `termio.Stderr` singleton resolves `os.Stderr` per write instead of
+  latching the fd at init, so the standard swap-and-capture pattern keeps
+  seeing plugin log lines.
+
+### Added
+
+- Coverage: `startEngines` per-phase error wrapping (discover / Up /
+  ReadyCheck / EnvVars + the nil-error timeout message) via an injected
+  discover func and a fake `EngineProvider` (#68). The EnvVars wrap was
+  silently dropped once during v0.9.23 development; `errors.Is` through the
+  chain now trips on any re-drop (verified by mutation).
+
 ## v0.9.23
 
 The dogfood-hardening release: `claude --worktree` now works end-to-end, plus a
