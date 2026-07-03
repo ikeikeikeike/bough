@@ -25,6 +25,7 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
 
+	"github.com/ikeikeikeike/bough/internal/termio"
 	engineapi "github.com/ikeikeikeike/bough/plugins/engine/api"
 )
 
@@ -95,10 +96,15 @@ func DiscoverFromBinary(binPath string) (engineapi.EngineProvider, func(), error
 // lines and make a slow step look hung. Default Warn keeps the output
 // clean; set BOUGH_PLUGIN_LOG=trace|debug|info|warn|error to restore the
 // verbose go-plugin logs when debugging a plugin handshake.
+//
+// Output goes through termio.Stderr — the same mutex the create
+// spinner paints under — so a plugin Warn/Error line arriving
+// mid-spinner lands on its own clean row instead of interleaving with
+// the redraw (issue #67).
 func pluginLogger() hclog.Logger {
 	return hclog.New(&hclog.LoggerOptions{
 		Name:   "plugin",
-		Output: os.Stderr,
+		Output: termio.Stderr,
 		Level:  pluginLogLevel(),
 	})
 }

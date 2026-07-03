@@ -12,6 +12,7 @@ import (
 	"github.com/ikeikeikeike/bough/internal/gitwt"
 	"github.com/ikeikeikeike/bough/internal/pluginhost"
 	"github.com/ikeikeikeike/bough/internal/registry"
+	"github.com/ikeikeikeike/bough/internal/termio"
 	engineapi "github.com/ikeikeikeike/bough/plugins/engine/api"
 
 	"github.com/spf13/cobra"
@@ -57,6 +58,10 @@ func newRemoveCmd() *cobra.Command {
 }
 
 func runRemove(ctx context.Context, stderr io.Writer, cfg *config.Config, monorepoRoot, name, worktreePath string, gracefulSecs int) error {
+	// Same one-mutex-per-fd routing as runCreate: the plugin Down/Cleanup
+	// calls below spawn hclog writers targeting termio.Stderr, so remove's
+	// own logf lines must share that mutex rather than race it on fd 2.
+	stderr = termio.Wrap(stderr)
 	logf(stderr, "[bough] remove %s @ %s", name, worktreePath)
 
 	store := registry.NewStore(
@@ -100,6 +105,10 @@ func runRemove(ctx context.Context, stderr io.Writer, cfg *config.Config, monore
 		kill()
 	}
 
+	// Raw fd for hook children — see runPostCreateHooks: an exec.Cmd
+	// handed the SyncWriter gets a pipe + copy goroutine whose EOF a
+	// backgrounded grandchild can hold open forever.
+	hookOut := termio.ExecWriter(stderr)
 	runner := gitwt.NewRunner()
 	for _, repo := range cfg.Repositories {
 		repoSrc := filepath.Join(monorepoRoot, repo.Name)
@@ -108,8 +117,8 @@ func runRemove(ctx context.Context, stderr io.Writer, cfg *config.Config, monore
 			logf(stderr, "[bough] %s pre_remove: %s", repo.Name, line)
 			c := exec.CommandContext(ctx, "bash", "-c", line)
 			c.Dir = repoDst
-			c.Stdout = stderr
-			c.Stderr = stderr
+			c.Stdout = hookOut
+			c.Stderr = hookOut
 			_ = c.Run()
 		}
 		if _, err := os.Stat(repoSrc); err != nil {

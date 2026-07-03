@@ -18,6 +18,7 @@ import (
 	"github.com/ikeikeikeike/bough/internal/gitwt"
 	"github.com/ikeikeikeike/bough/internal/pluginhost"
 	"github.com/ikeikeikeike/bough/internal/registry"
+	"github.com/ikeikeikeike/bough/internal/termio"
 	engineapi "github.com/ikeikeikeike/bough/plugins/engine/api"
 
 	"github.com/spf13/cobra"
@@ -87,6 +88,13 @@ type engineInstance struct {
 // reads as the contract: load → allocate → materialise repos → start
 // engines → render env → run hooks → emit the worktree path.
 func runCreate(ctx context.Context, stderr, stdout io.Writer, cfg *config.Config, monorepoRoot, name string, noFetch, strict bool) error {
+	// One mutex per fd: route every create-path stderr write (logf, the
+	// spinner) through the shared termio wrapper so pluginhost's hclog
+	// lines — which target termio.Stderr from their own goroutines —
+	// cannot interleave with the spinner redraw (issue #67). For the
+	// real os.Stderr this IS termio.Stderr; test buffers get a private
+	// wrapper and behave as before.
+	stderr = termio.Wrap(stderr)
 	logf(stderr, "[bough] create %s @ %s", name, monorepoRoot)
 	worktreeRoot := filepath.Join(monorepoRoot, ".worktrees", name)
 	if err := os.MkdirAll(worktreeRoot, 0o755); err != nil {
@@ -119,7 +127,7 @@ func runCreate(ctx context.Context, stderr, stdout io.Writer, cfg *config.Config
 	// every started subprocess on the way out — even partial-start
 	// engines from a mid-loop error are caught because startEngines
 	// returns whatever it managed to bring up.
-	engines, err := startEngines(ctx, stderr, cfg, worktreeRoot, enginePorts)
+	engines, err := startEngines(ctx, stderr, cfg, worktreeRoot, enginePorts, pluginhost.Discover)
 	defer func() {
 		for _, e := range engines {
 			e.kill()
@@ -247,12 +255,17 @@ func allocateAllPorts(cfg *config.Config, monorepoRoot, name string) (map[string
 // The backend auto-detect runs at most once per `bough create`: the
 // result is reused across every engine whose YAML left Backend
 // empty; explicit YAML values bypass it entirely.
+//
+// discover is the plugin lookup (production: pluginhost.Discover),
+// injected so tests can substitute a fake EngineProvider and pin the
+// per-phase error wrapping without spawning subprocesses (#68).
 func startEngines(
 	ctx context.Context,
 	stderr io.Writer,
 	cfg *config.Config,
 	worktreeRoot string,
 	enginePorts map[string]int,
+	discover func(kind string) (engineapi.EngineProvider, func(), error),
 ) ([]engineInstance, error) {
 	engineProviderWorktree := worktreeRoot
 	if provider := engineProviderRepo(cfg); provider != nil {
@@ -274,7 +287,7 @@ func startEngines(
 	engines := make([]engineInstance, 0, len(cfg.Engines))
 	for _, eng := range cfg.Engines {
 		port := enginePorts[eng.Kind]
-		prov, kill, err := pluginhost.Discover(eng.Kind)
+		prov, kill, err := discover(eng.Kind)
 		if err != nil {
 			return engines, fmt.Errorf("discover %s plugin: %w", eng.Kind, err)
 		}
@@ -624,6 +637,14 @@ func renderEnvLocals(
 // a failed migration should not unwind the entire create, since the
 // worktree materialisation itself is still valuable to the operator.
 func runPostCreateHooks(ctx context.Context, stderr io.Writer, cfg *config.Config, worktreeRoot string, skip map[string]bool) []string {
+	// Hook children must inherit the raw fd, not the SyncWriter: a
+	// non-*os.File writer makes os/exec insert a pipe + copy goroutine
+	// whose EOF only arrives once every inheriting descendant closes it
+	// — a post_create that backgrounds a long-lived process would hang
+	// create forever, and children would lose TTY-ness. No spinner is
+	// active while hooks run, so direct fd writes cannot garble a
+	// status line.
+	hookOut := termio.ExecWriter(stderr)
 	var failed []string
 	for _, repo := range cfg.Repositories {
 		if skip[repo.Name] {
@@ -645,8 +666,8 @@ func runPostCreateHooks(ctx context.Context, stderr io.Writer, cfg *config.Confi
 			// snapshot taken before the loop would starve every line
 			// after the first of that value.
 			c.Env = append(os.Environ(), parseEnvLocal(stderr, repo.Name, envLocalPath)...)
-			c.Stdout = stderr
-			c.Stderr = stderr
+			c.Stdout = hookOut
+			c.Stderr = hookOut
 			if err := c.Run(); err != nil {
 				logf(stderr, "[bough] %s post_create FAILED: %v", repo.Name, err)
 				failed = append(failed, fmt.Sprintf("%s: %s", repo.Name, line))
