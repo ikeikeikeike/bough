@@ -217,6 +217,31 @@ func TestRunner_RemoveAndDeleteBranch(t *testing.T) {
 	}
 }
 
+// TestRunner_DeleteBranch_UsedByWorktreeIsNotSwallowed is the
+// regression guard for the wave-2 review finding: DeleteBranch used
+// to treat every git exec.ExitError as the idempotent "branch not
+// found" case, since `git branch -D` also exits 1 when the branch is
+// checked out in another worktree — a real failure that must bubble
+// up, not be swallowed as false success.
+func TestRunner_DeleteBranch_UsedByWorktreeIsNotSwallowed(t *testing.T) {
+	src := initBareRepo(t)
+	r := NewRunner()
+	dst := filepath.Join(t.TempDir(), "wt-inuse")
+	if _, _, err := r.AddOrAttach(context.Background(), src, dst, "F-InUse", "main"); err != nil {
+		t.Fatalf("setup AddOrAttach: %v", err)
+	}
+	// Do NOT Remove the worktree first — the branch is still checked
+	// out there, so `git branch -D` must fail with "used by worktree",
+	// not "not found".
+	err := r.DeleteBranch(context.Background(), src, "F-InUse")
+	if err == nil {
+		t.Fatal("DeleteBranch on a branch checked out in another worktree: want error, got nil")
+	}
+	if strings.Contains(err.Error(), "not found") {
+		t.Errorf("DeleteBranch misclassified a real failure as 'not found': %v", err)
+	}
+}
+
 func TestRunner_Remove_fallbackOnPartial(t *testing.T) {
 	// Mimic the "interrupted previous teardown" scenario: the worktree
 	// directory was nuked out-of-band but git still has a record. Remove

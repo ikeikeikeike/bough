@@ -268,17 +268,19 @@ func (r *Runner) Remove(ctx context.Context, repoPath, dst string, force bool) e
 // "not found" exit code from git ≥ 2.30 so re-running the teardown is
 // idempotent).
 func (r *Runner) DeleteBranch(ctx context.Context, repoPath, branch string) error {
-	err := r.cmd(ctx, "git", "-C", repoPath, "branch", "-D", branch).Run()
+	out, err := r.cmd(ctx, "git", "-C", repoPath, "branch", "-D", branch).CombinedOutput()
 	if err == nil {
 		return nil
 	}
 	var ee *exec.ExitError
-	if errors.As(err, &ee) {
-		// git exits 1 for "no such branch" — treat as idempotent success.
-		// Anything else (permission denied, corrupt repo) is bubbled.
+	// git also exits 1 for "cannot delete branch '<b>' used by worktree
+	// at '<path>'" — a real failure that must bubble, not be swallowed
+	// as idempotent success. Only the actual "not found" message is
+	// treated as already-deleted.
+	if errors.As(err, &ee) && strings.Contains(string(out), "not found") {
 		return nil
 	}
-	return fmt.Errorf("gitwt: branch -D %s: %w", branch, err)
+	return fmt.Errorf("gitwt: branch -D %s: %w (%s)", branch, err, strings.TrimSpace(string(out)))
 }
 
 // List parses `git worktree list --porcelain` so the caller can drive a
