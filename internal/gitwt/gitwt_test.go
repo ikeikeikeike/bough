@@ -152,6 +152,49 @@ func TestRunner_AddOrAttach_attachExistingBranch(t *testing.T) {
 	}
 }
 
+// TestRunner_AddOrAttach_ResumeIsNoOpThroughSymlink is the regression
+// guard for the #7-review finding: the resume idempotency check
+// compared the caller's literal dst against git's symlink-resolved
+// `worktree list --porcelain` path, so on any host where dst
+// traverses a symlink component — stock macOS's /tmp -> /private/tmp
+// and /var -> /private/var, which is exactly what Go's own
+// os.Getwd()/t.TempDir() return unresolved — a second AddOrAttach
+// call for an already-created worktree (claude --worktree --resume
+// re-firing WorktreeCreate) fell through to `git worktree add`
+// against the existing dir and failed with exit 128 instead of the
+// documented (false, base, nil) no-op.
+//
+// A symlink is created explicitly here (rather than relying on the
+// test host's own /tmp shape) so the regression reproduces
+// deterministically on any OS, not just machines that happen to
+// symlink their temp dir.
+func TestRunner_AddOrAttach_ResumeIsNoOpThroughSymlink(t *testing.T) {
+	src := initBareRepo(t)
+	realRoot := t.TempDir()
+	linkRoot := filepath.Join(t.TempDir(), "via-symlink")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Skipf("symlink not supported on this host: %v", err)
+	}
+	dst := filepath.Join(linkRoot, "wt")
+	r := NewRunner()
+
+	created, _, err := r.AddOrAttach(context.Background(), src, dst, "F-Resume", "main")
+	if err != nil {
+		t.Fatalf("first AddOrAttach: %v", err)
+	}
+	if !created {
+		t.Fatalf("first call: created = false, want true")
+	}
+
+	created, _, err = r.AddOrAttach(context.Background(), src, dst, "F-Resume", "main")
+	if err != nil {
+		t.Fatalf("second AddOrAttach through a symlinked dst (simulating macOS /tmp -> /private/tmp): want a silent no-op, got error: %v", err)
+	}
+	if created {
+		t.Errorf("second call: created = true, want false (resume no-op)")
+	}
+}
+
 func TestRunner_RemoveAndDeleteBranch(t *testing.T) {
 	src := initBareRepo(t)
 	r := NewRunner()
@@ -171,6 +214,31 @@ func TestRunner_RemoveAndDeleteBranch(t *testing.T) {
 	// Idempotent: repeating DeleteBranch returns nil even for "no such branch".
 	if err := r.DeleteBranch(context.Background(), src, "F-Rm"); err != nil {
 		t.Errorf("DeleteBranch second call should be idempotent, got %v", err)
+	}
+}
+
+// TestRunner_DeleteBranch_UsedByWorktreeIsNotSwallowed is the
+// regression guard for the wave-2 review finding: DeleteBranch used
+// to treat every git exec.ExitError as the idempotent "branch not
+// found" case, since `git branch -D` also exits 1 when the branch is
+// checked out in another worktree — a real failure that must bubble
+// up, not be swallowed as false success.
+func TestRunner_DeleteBranch_UsedByWorktreeIsNotSwallowed(t *testing.T) {
+	src := initBareRepo(t)
+	r := NewRunner()
+	dst := filepath.Join(t.TempDir(), "wt-inuse")
+	if _, _, err := r.AddOrAttach(context.Background(), src, dst, "F-InUse", "main"); err != nil {
+		t.Fatalf("setup AddOrAttach: %v", err)
+	}
+	// Do NOT Remove the worktree first — the branch is still checked
+	// out there, so `git branch -D` must fail with "used by worktree",
+	// not "not found".
+	err := r.DeleteBranch(context.Background(), src, "F-InUse")
+	if err == nil {
+		t.Fatal("DeleteBranch on a branch checked out in another worktree: want error, got nil")
+	}
+	if strings.Contains(err.Error(), "not found") {
+		t.Errorf("DeleteBranch misclassified a real failure as 'not found': %v", err)
 	}
 }
 

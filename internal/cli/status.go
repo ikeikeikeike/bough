@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -27,7 +26,7 @@ func newStatusCmd() *cobra.Command {
 				return err
 			}
 			store := registry.NewStore(
-				filepath.Join(monorepoRoot, cfg.Registry.Path),
+				resolveRegistryPath(monorepoRoot, cfg.Registry.Path),
 				cfg.Registry.BackupDir,
 			)
 			reg, err := store.Load()

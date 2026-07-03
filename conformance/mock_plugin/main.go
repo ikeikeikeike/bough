@@ -76,6 +76,7 @@ func (p *mockProvider) Up(_ context.Context, req *api.UpReq) error {
 	if err := os.MkdirAll(req.Datadir, 0o755); err != nil {
 		return fmt.Errorf("mock: mkdir datadir: %w", err)
 	}
+	var newlyBound []int
 	for _, ps := range req.Ports {
 		if _, exists := p.listeners[ps.Port]; exists {
 			continue // up-or-reuse: contract requires a second Up to be a no-op.
@@ -85,15 +86,20 @@ func (p *mockProvider) Up(_ context.Context, req *api.UpReq) error {
 			return fmt.Errorf("mock: listen %s:%d (role=%s): %w", mockHost, ps.Port, ps.Role, err)
 		}
 		p.listeners[ps.Port] = ln
+		newlyBound = append(newlyBound, ps.Port)
 		go acceptLoop(ln)
 	}
 	sentinel := filepath.Join(req.Datadir, "up.sentinel")
 	if err := os.WriteFile(sentinel, []byte("up"), 0o644); err != nil {
-		// Roll back any newly bound listeners so a retry can succeed.
-		for _, ps := range req.Ports {
-			if ln, ok := p.listeners[ps.Port]; ok {
+		// Roll back only the listeners bound by THIS call, not every
+		// port in req.Ports — a role reused from a prior successful Up
+		// (up-or-reuse) is healthy and unrelated to this failure; tearing
+		// it down here would silently undo work the caller never asked
+		// to undo.
+		for _, port := range newlyBound {
+			if ln, ok := p.listeners[port]; ok {
 				_ = ln.Close()
-				delete(p.listeners, ps.Port)
+				delete(p.listeners, port)
 			}
 		}
 		return fmt.Errorf("mock: write sentinel: %w", err)

@@ -51,7 +51,7 @@ func runBackfill(stderr io.Writer, cfg *config.Config, monorepoRoot string) erro
 		return fmt.Errorf("read .worktrees/: %w", err)
 	}
 	store := registry.NewStore(
-		filepath.Join(monorepoRoot, cfg.Registry.Path),
+		resolveRegistryPath(monorepoRoot, cfg.Registry.Path),
 		cfg.Registry.BackupDir,
 	)
 	reg, err := store.Load()

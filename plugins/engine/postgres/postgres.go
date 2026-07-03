@@ -93,8 +93,14 @@ func (p *Provider) Up(ctx context.Context, req *api.UpReq) error {
 		return fmt.Errorf("postgres: deploy flake: %w", err)
 	}
 	if req.Datadir != "" {
-		if err := os.MkdirAll(req.Datadir, 0o755); err != nil {
-			return fmt.Errorf("postgres: mkdir datadir: %w", err)
+		// Only the parent dir — NOT req.Datadir itself. services-flake's
+		// postgres setup script only runs initdb when `[[ ! -d "$PGDATA" ]]`
+		// (unlike mysql, whose init-detection checks for a marker *file*
+		// inside the dir and tolerates a pre-created empty one);
+		// pre-creating $PGDATA here would defeat that check and initdb
+		// would never run.
+		if err := os.MkdirAll(filepath.Dir(req.Datadir), 0o755); err != nil {
+			return fmt.Errorf("postgres: mkdir datadir parent: %w", err)
 		}
 	}
 	flakeRef := p.flakeRef(flakeDir)
@@ -106,7 +112,13 @@ func (p *Provider) Up(ctx context.Context, req *api.UpReq) error {
 	if err != nil {
 		return fmt.Errorf("postgres: open log: %w", err)
 	}
-	cmd := exec.CommandContext(ctx, "nix", "run", "--impure",
+	// Detached via Setsid so the process outlives this call — but
+	// exec.CommandContext arms a kill-on-ctx-done watchdog regardless
+	// of Setsid, and ctx here is the per-RPC gRPC context, which
+	// grpc-go cancels the instant Up() returns. Without
+	// WithoutCancel, the watchdog SIGKILLs `nix run` microseconds
+	// after Start(), long before flake evaluation finishes.
+	cmd := exec.CommandContext(context.WithoutCancel(ctx), "nix", "run", "--impure",
 		flakeRef+"#postgres", "--", "up", "--tui=false")
 	cmd.Dir = req.WorktreeRoot
 	cmd.Env = append(os.Environ(),
@@ -121,6 +133,10 @@ func (p *Provider) Up(ctx context.Context, req *api.UpReq) error {
 		_ = logFile.Close()
 		return fmt.Errorf("postgres: nix run: %w", err)
 	}
+	// Reap on exit to avoid a zombie; Down() locates and signals the
+	// real postgres/process-compose PID independently via lsof, so
+	// this goroutine has nothing else to coordinate with.
+	go func() { _ = cmd.Wait() }()
 	_ = logFile.Close()
 	return nil
 }
@@ -329,7 +345,11 @@ func killStrayProcessCompose(cwdPrefix string) {
 		for scanner.Scan() {
 			fields := strings.Fields(scanner.Text())
 			if len(fields) >= 9 && fields[3] == "cwd" {
-				if strings.HasPrefix(fields[len(fields)-1], cwdPrefix) {
+				// Exact match or a real path-separator boundary — a bare
+				// HasPrefix would also match ".../auba-api-1394" against
+				// cwdPrefix ".../auba-api-139", SIGTERMing a sibling
+				// worktree's still-running supervisor.
+				if cwd := fields[len(fields)-1]; cwd == cwdPrefix || strings.HasPrefix(cwd, cwdPrefix+"/") {
 					_ = syscall.Kill(pid, syscall.SIGTERM)
 				}
 				break

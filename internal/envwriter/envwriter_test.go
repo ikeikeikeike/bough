@@ -9,10 +9,13 @@ import (
 
 func sampleCtx() Context {
 	return Context{
-		Worktree: WorktreeCtx{Name: "F-Auth", Root: "/wt/root"},
-		Repo:     RepoCtx{Name: "demo-api", Path: "/wt/root/demo-api"},
-		Mysql:    DBCtx{Port: 42345, Host: "127.0.0.1", Socket: "/tmp/bough-mysql-42345.sock"},
-		Ports:    map[string]int{"api": 45123, "gateway": 48045},
+		Worktree:      WorktreeCtx{Name: "F-Auth", Root: "/wt/root"},
+		Repo:          RepoCtx{Name: "demo-api", Path: "/wt/root/demo-api"},
+		Mysql:         DBCtx{Port: 42345, Host: "127.0.0.1", Socket: "/tmp/bough-mysql-42345.sock"},
+		Postgres:      DBCtx{Port: 42346, Host: "127.0.0.1", Socket: "/tmp/bough-postgres-42346.sock"},
+		Redis:         DBCtx{Port: 53345, Host: "127.0.0.1", Socket: "/tmp/bough-redis-53345.sock"},
+		Elasticsearch: DBCtx{Port: 56345, Host: "127.0.0.1", Socket: "/tmp/bough-elasticsearch-56345.sock"},
+		Ports:         map[string]int{"api": 45123, "gateway": 48045},
 	}
 }
 
@@ -22,6 +25,9 @@ func TestRender_substitutesAllKnownFields(t *testing.T) {
 		"DEMO_API_URI":          `grpc://0.0.0.0:{{ .Ports.api }}`,
 		"DEMO_API_GATEWAY_PORT": `{{ .Ports.gateway }}`,
 		"REPO_TAG":              `{{ .Repo.Name }}@{{ .Worktree.Name }}`,
+		"DEMO_PG_DSN":           `postgres://127.0.0.1:{{ .Postgres.Port }}/demo`,
+		"DEMO_REDIS_URL":        `redis://127.0.0.1:{{ .Redis.Port }}/0`,
+		"DEMO_ES_URL":           `http://127.0.0.1:{{ .Elasticsearch.Port }}`,
 	}
 	out, err := Render(env, sampleCtx())
 	if err != nil {
@@ -32,10 +38,40 @@ func TestRender_substitutesAllKnownFields(t *testing.T) {
 		"DEMO_API_URI":          "grpc://0.0.0.0:45123",
 		"DEMO_API_GATEWAY_PORT": "48045",
 		"REPO_TAG":              "demo-api@F-Auth",
+		"DEMO_PG_DSN":           "postgres://127.0.0.1:42346/demo",
+		"DEMO_REDIS_URL":        "redis://127.0.0.1:53345/0",
+		"DEMO_ES_URL":           "http://127.0.0.1:56345",
 	}
 	for k, want := range cases {
 		if got := out[k]; got != want {
 			t.Errorf("%s: got %q want %q", k, got, want)
+		}
+	}
+}
+
+// TestRender_nonMysqlEngineFieldsAreIndependentlyAddressable is the
+// regression guard for the wave-2 review finding: prior to adding
+// Postgres/Redis/Elasticsearch fields, Context only carried a single
+// Mysql field, so renderEnvLocals always populated `.Mysql` regardless
+// of which engine kind a worktree actually configured — a postgres-
+// only worktree's env_local template had no way to reference its own
+// engine's port at all. Each field must render its own value, not
+// silently fall back to Mysql's.
+func TestRender_nonMysqlEngineFieldsAreIndependentlyAddressable(t *testing.T) {
+	env := map[string]string{
+		"PG": `{{ .Postgres.Port }}`,
+		"RD": `{{ .Redis.Port }}`,
+		"ES": `{{ .Elasticsearch.Port }}`,
+		"MY": `{{ .Mysql.Port }}`,
+	}
+	out, err := Render(env, sampleCtx())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	cases := map[string]string{"PG": "42346", "RD": "53345", "ES": "56345", "MY": "42345"}
+	for k, want := range cases {
+		if got := out[k]; got != want {
+			t.Errorf("%s: got %q want %q (fields must not collapse onto one another)", k, got, want)
 		}
 	}
 }

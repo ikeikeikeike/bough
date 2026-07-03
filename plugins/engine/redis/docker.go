@@ -36,7 +36,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"time"
 
 	api "github.com/ikeikeikeike/bough/plugins/engine/api"
@@ -81,10 +80,22 @@ func usingDockerBackend(ctx context.Context, port int) bool {
 	}
 	defer func() { _ = cli.Close() }()
 	id, err := dockerutil.LookupByName(ctx, cli, dockerContainerName(port))
-	if err != nil {
+	if err != nil || id == "" {
 		return false
 	}
-	return id != ""
+	// A stopped/leftover container must not count as "docker backend
+	// in use" — LookupByName lists with All:true, so a stale, already-
+	// stopped container from a prior run would otherwise make Down()
+	// take the docker path (stop+remove the irrelevant container,
+	// report success) while the real engine for this worktree/port —
+	// possibly nix-backed — keeps running untouched, and the
+	// subsequent Cleanup() would then rm -rf its datadir out from
+	// under it.
+	info, err := cli.ContainerInspect(ctx, id)
+	if err != nil || info.State == nil {
+		return false
+	}
+	return info.State.Running
 }
 
 func (p *Provider) dockerUp(ctx context.Context, req *api.UpReq) error {
@@ -162,12 +173,8 @@ func (p *Provider) dockerUp(ctx context.Context, req *api.UpReq) error {
 	if err != nil {
 		return fmt.Errorf("redis docker: create: %w", err)
 	}
-	if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		_ = cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true, RemoveVolumes: false})
-		if strings.Contains(err.Error(), "port is already allocated") {
-			return fmt.Errorf("redis docker: host port %d is already published by another container — `docker ps --filter publish=%d` to find it; raw: %w", port, port, err)
-		}
-		return fmt.Errorf("redis docker: start %s: %w", resp.ID, err)
+	if err := dockerutil.StartOrCleanup(ctx, cli, resp.ID, "redis", port); err != nil {
+		return err
 	}
 	return nil
 }

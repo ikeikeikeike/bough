@@ -252,6 +252,24 @@ registry: {path: .bough-ports.json}
 			wantInErr: "ReadyTimeoutSec",
 		},
 		{
+			// Regression guard: the plugin RPC wire narrows this value to
+			// a proto int32, which would silently wrap negative for a
+			// value at or above 2^31 with no validation error — the
+			// operator's explicit timeout gets replaced by whatever the
+			// plugin's own <=0 fallback default is, with no warning
+			// anywhere in the chain.
+			name: "ready_timeout_sec above the int32-safe cap",
+			yaml: `schema_version: 2
+monorepo_root: "."
+repositories:
+  - {name: a, branch_strategy: develop, role: engine-provider}
+engines:
+  - {kind: mysql, version: "8.4", port_ranges: {main: [42000, 44999]}, ready_timeout_sec: 999999999}
+registry: {path: .bough-ports.json}
+`,
+			wantInErr: "ReadyTimeoutSec",
+		},
+		{
 			name: "unknown top-level field (strict mode)",
 			yaml: `schema_version: 1
 monorepo_root: "."
@@ -324,6 +342,54 @@ registry: {path: .worktree-ports.json}
 	}
 	if got, want := eng.InitialResources[1].Name, "replica"; got != want {
 		t.Errorf("InitialResources[1].Name: got %q want %q", got, want)
+	}
+}
+
+// TestLoad_migrateLegacy_MergesEnginesAndDatabases is the regression
+// guard for the #17-review finding: migrateLegacy used to overwrite
+// c.Engines (already populated from the YAML's engines: section) with
+// the databases: conversion whenever databases: was non-empty,
+// silently discarding any engines: entries declared in the same file
+// — breaking the exact incremental-migration story ("existing
+// deployments do not have to migrate in lockstep") schema_version: 1
+// is meant to support: keep an existing engine under the legacy
+// databases: section while adding a new one under engines:.
+func TestLoad_migrateLegacy_MergesEnginesAndDatabases(t *testing.T) {
+	yaml := `schema_version: 1
+monorepo_root: "."
+repositories:
+  - {name: dbrepo, branch_strategy: develop, role: db-provider}
+databases:
+  - kind: mysql
+    version: "8.4"
+    port_range: [42000, 44999]
+engines:
+  - kind: rabbitmq
+    version: "3.13"
+    port_ranges: {main: [60000, 60999]}
+registry: {path: .worktree-ports.json}
+`
+	c, err := LoadFromBytes([]byte(yaml), "test-legacy-mixed")
+	if err != nil {
+		t.Fatalf("LoadFromBytes(mixed legacy): %v", err)
+	}
+	if got, want := len(c.Engines), 2; got != want {
+		t.Fatalf("Engines: got %d want %d (engines: entry must survive alongside the databases: conversion): %+v", got, want, c.Engines)
+	}
+	var sawMysql, sawRabbitmq bool
+	for _, eng := range c.Engines {
+		switch eng.Kind {
+		case "mysql":
+			sawMysql = true
+		case "rabbitmq":
+			sawRabbitmq = true
+		}
+	}
+	if !sawMysql {
+		t.Error("mysql (from databases:) missing after migration")
+	}
+	if !sawRabbitmq {
+		t.Error("rabbitmq (from engines:) missing after migration — engines: entries were dropped")
 	}
 }
 

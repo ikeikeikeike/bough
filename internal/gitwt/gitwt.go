@@ -120,8 +120,21 @@ func (r *Runner) AddOrAttach(ctx context.Context, repoPath, dst, branch, base st
 	// enabled yet fail, in which case the branch is cut from the local base.
 	effectiveBase = base
 	if wts, listErr := r.List(ctx, repoPath); listErr == nil {
+		// git worktree list --porcelain reports the symlink-resolved
+		// real path, but dst is the caller's literal path — on stock
+		// macOS (/tmp -> /private/tmp, /var -> /private/var) those
+		// differ even though they name the same directory, since
+		// os.Getwd()/$PWD (what callers build dst from) do not resolve
+		// symlinks. Resolve dst the same way before comparing so an
+		// already-registered worktree is actually recognized; a
+		// resolve failure (dst doesn't exist yet) falls back to the
+		// literal path, which is also what a genuinely-new dst needs.
+		resolvedDst := dst
+		if real, evalErr := filepath.EvalSymlinks(dst); evalErr == nil {
+			resolvedDst = real
+		}
 		for _, wt := range wts {
-			if wt.Path == dst {
+			if wt.Path == resolvedDst {
 				return false, base, nil
 			}
 		}
@@ -255,17 +268,19 @@ func (r *Runner) Remove(ctx context.Context, repoPath, dst string, force bool) e
 // "not found" exit code from git ≥ 2.30 so re-running the teardown is
 // idempotent).
 func (r *Runner) DeleteBranch(ctx context.Context, repoPath, branch string) error {
-	err := r.cmd(ctx, "git", "-C", repoPath, "branch", "-D", branch).Run()
+	out, err := r.cmd(ctx, "git", "-C", repoPath, "branch", "-D", branch).CombinedOutput()
 	if err == nil {
 		return nil
 	}
 	var ee *exec.ExitError
-	if errors.As(err, &ee) {
-		// git exits 1 for "no such branch" — treat as idempotent success.
-		// Anything else (permission denied, corrupt repo) is bubbled.
+	// git also exits 1 for "cannot delete branch '<b>' used by worktree
+	// at '<path>'" — a real failure that must bubble, not be swallowed
+	// as idempotent success. Only the actual "not found" message is
+	// treated as already-deleted.
+	if errors.As(err, &ee) && strings.Contains(string(out), "not found") {
 		return nil
 	}
-	return fmt.Errorf("gitwt: branch -D %s: %w", branch, err)
+	return fmt.Errorf("gitwt: branch -D %s: %w (%s)", branch, err, strings.TrimSpace(string(out)))
 }
 
 // List parses `git worktree list --porcelain` so the caller can drive a

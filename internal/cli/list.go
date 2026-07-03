@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"text/tabwriter"
 
@@ -22,7 +21,7 @@ func newListCmd() *cobra.Command {
 				return err
 			}
 			store := registry.NewStore(
-				filepath.Join(monorepoRoot, cfg.Registry.Path),
+				resolveRegistryPath(monorepoRoot, cfg.Registry.Path),
 				cfg.Registry.BackupDir,
 			)
 			reg, err := store.Load()

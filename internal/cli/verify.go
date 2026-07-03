@@ -49,7 +49,7 @@ func runVerify(stderr, stdout io.Writer, cfg *config.Config, monorepoRoot, name 
 		return fmt.Errorf("worktree dir absent: %s", worktreePath)
 	}
 	store := registry.NewStore(
-		filepath.Join(monorepoRoot, cfg.Registry.Path),
+		resolveRegistryPath(monorepoRoot, cfg.Registry.Path),
 		cfg.Registry.BackupDir,
 	)
 	reg, err := store.Load()
@@ -62,26 +62,37 @@ func runVerify(stderr, stdout io.Writer, cfg *config.Config, monorepoRoot, name 
 	}
 	var probs []string
 	for _, eng := range cfg.Engines {
-		for role, portRange := range eng.PortRanges {
-			key := eng.Kind + "." + role
-			port, ok := entry[key]
-			if !ok {
-				probs = append(probs, fmt.Sprintf("registry missing %s entry", key))
-				continue
-			}
-			if port < portRange[0] || port > portRange[1] {
-				probs = append(probs, fmt.Sprintf("%s port %d outside range %v", key, port, portRange))
-			}
+		// v0.4.0: allocateEngines only ever allocates/writes the "main"
+		// role (single-port engines only; multi-port lands in Λ-7.4).
+		// Demanding every declared PortRanges role here would report
+		// permanent DRIFT against a key nothing will ever populate.
+		mainRange, ok := eng.PortRanges["main"]
+		if !ok {
+			continue
+		}
+		key := eng.Kind + ".main"
+		port, ok := entry[key]
+		if !ok {
+			probs = append(probs, fmt.Sprintf("registry missing %s entry", key))
+			continue
+		}
+		if port < mainRange[0] || port > mainRange[1] {
+			probs = append(probs, fmt.Sprintf("%s port %d outside range %v", key, port, mainRange))
 		}
 	}
 	for kind, pr := range cfg.Ports {
-		port, ok := entry[kind]
+		// Non-engine ports are also written under "<kind>.main"
+		// (allocateNonEnginePorts, create.go) — Load() upgrades any
+		// legacy bare key to that same dotted form, so the bare key
+		// never exists post-v0.4.0.
+		key := kind + ".main"
+		port, ok := entry[key]
 		if !ok {
-			probs = append(probs, fmt.Sprintf("registry missing %s entry", kind))
+			probs = append(probs, fmt.Sprintf("registry missing %s entry", key))
 			continue
 		}
 		if port < pr.Range[0] || port > pr.Range[1] {
-			probs = append(probs, fmt.Sprintf("%s port %d outside range %v", kind, port, pr.Range))
+			probs = append(probs, fmt.Sprintf("%s port %d outside range %v", key, port, pr.Range))
 		}
 	}
 	for _, repo := range cfg.Repositories {
