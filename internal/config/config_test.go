@@ -327,6 +327,54 @@ registry: {path: .worktree-ports.json}
 	}
 }
 
+// TestLoad_migrateLegacy_MergesEnginesAndDatabases is the regression
+// guard for the #17-review finding: migrateLegacy used to overwrite
+// c.Engines (already populated from the YAML's engines: section) with
+// the databases: conversion whenever databases: was non-empty,
+// silently discarding any engines: entries declared in the same file
+// — breaking the exact incremental-migration story ("existing
+// deployments do not have to migrate in lockstep") schema_version: 1
+// is meant to support: keep an existing engine under the legacy
+// databases: section while adding a new one under engines:.
+func TestLoad_migrateLegacy_MergesEnginesAndDatabases(t *testing.T) {
+	yaml := `schema_version: 1
+monorepo_root: "."
+repositories:
+  - {name: dbrepo, branch_strategy: develop, role: db-provider}
+databases:
+  - kind: mysql
+    version: "8.4"
+    port_range: [42000, 44999]
+engines:
+  - kind: rabbitmq
+    version: "3.13"
+    port_ranges: {main: [60000, 60999]}
+registry: {path: .worktree-ports.json}
+`
+	c, err := LoadFromBytes([]byte(yaml), "test-legacy-mixed")
+	if err != nil {
+		t.Fatalf("LoadFromBytes(mixed legacy): %v", err)
+	}
+	if got, want := len(c.Engines), 2; got != want {
+		t.Fatalf("Engines: got %d want %d (engines: entry must survive alongside the databases: conversion): %+v", got, want, c.Engines)
+	}
+	var sawMysql, sawRabbitmq bool
+	for _, eng := range c.Engines {
+		switch eng.Kind {
+		case "mysql":
+			sawMysql = true
+		case "rabbitmq":
+			sawRabbitmq = true
+		}
+	}
+	if !sawMysql {
+		t.Error("mysql (from databases:) missing after migration")
+	}
+	if !sawRabbitmq {
+		t.Error("rabbitmq (from engines:) missing after migration — engines: entries were dropped")
+	}
+}
+
 // TestLoad_acceptsV05Sections pins the LegacyConfig superset against
 // the v0.5+ root sections (`instinct`, `engines`, `memory_backends`,
 // `export`). Post-ship dogfooding on 2026-06-22 surfaced that the

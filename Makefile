@@ -1,7 +1,6 @@
 .DEFAULT_GOAL := help
 
 PROTO_DIR_ENGINE     := plugins/engine/api/proto
-PROTO_DIR_DB         := plugins/db/api/proto
 PROTO_DIR_MEMORY     := plugins/memory/api/proto
 PROTO_DIR_INSTINCT   := plugins/instinct/api/proto
 PROTO_DIR_CAPABILITY := plugins/capability/api/proto
@@ -25,10 +24,6 @@ proto:  ## Regenerate gRPC stubs for every plugin contract.
 	$(call protogen,$(PROTO_DIR_INSTINCT),instinct)
 	$(call protogen,$(PROTO_DIR_CAPABILITY),capability)
 	$(call protogen,$(PROTO_DIR_EVALUATOR),evaluator)
-	# v0.4.0 transition: regenerate the legacy db.proto too while the
-	# old plugins/db/ tree still exists (deleted in Λ-7.1). After that
-	# this line goes away.
-	$(call protogen,$(PROTO_DIR_DB),db)
 
 
 .PHONY: test

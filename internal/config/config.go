@@ -462,10 +462,10 @@ type LegacyDatabase struct {
 	Extras           map[string]string `yaml:"extras"`
 }
 
-// Load reads `.bough.yaml` (v0.4 canonical) when present, otherwise
-// falls back to `.worktree-isolation.yaml` (v0.3 legacy) with a
-// deprecated warning. The chosen path is passed to LoadFromPath so
-// the host can rely on Load to do the discovery.
+// Load reads and parses the config file at the given path (already
+// resolved by the caller — the `.bough.yaml` vs `.worktree-isolation.yaml`
+// v0.4/v0.3 discovery-with-deprecation-warning logic lives one layer up,
+// in internal/cli/helpers.go's resolveConfigPath, not here).
 //
 // `strict` decoding is enabled so a typo in a field name (e.g.
 // `repositries:` instead of `repositories:`) raises a hard error
@@ -631,9 +631,15 @@ func migrateLegacy(lc *LegacyConfig) (*Config, []string) {
 	if len(lc.Databases) > 0 {
 		warnings = append(warnings,
 			"YAML section 'databases:' is deprecated, rename to 'engines:' (auto-converted for now; removed in v0.5.0)")
-		c.Engines = make([]Engine, len(lc.Databases))
+		// Append the converted databases: entries to whatever engines:
+		// already held (set from lc.Engines above) rather than
+		// replacing it — an incremental v0.3→v0.4 migration can declare
+		// both sections in the same file (existing engines still under
+		// databases:, a new one added under engines:), and overwriting
+		// here silently dropped the engines: entries.
+		converted := make([]Engine, len(lc.Databases))
 		for i, db := range lc.Databases {
-			c.Engines[i] = Engine{
+			converted[i] = Engine{
 				Kind:            db.Kind,
 				Version:         db.Version,
 				PortRanges:      map[string][2]int{"main": db.PortRange},
@@ -643,15 +649,16 @@ func migrateLegacy(lc *LegacyConfig) (*Config, []string) {
 				Extras:          db.Extras,
 			}
 			if len(db.InitialDatabases) > 0 {
-				c.Engines[i].InitialResources = make([]InitialResource, len(db.InitialDatabases))
+				converted[i].InitialResources = make([]InitialResource, len(db.InitialDatabases))
 				for j, dbname := range db.InitialDatabases {
-					c.Engines[i].InitialResources[j] = InitialResource{
+					converted[i].InitialResources[j] = InitialResource{
 						Type: "database",
 						Name: dbname,
 					}
 				}
 			}
 		}
+		c.Engines = append(c.Engines, converted...)
 	}
 	// `engine-provider` is the canonical role name as of v0.4; if the
 	// YAML still says `db-provider` we accept it but warn once.
