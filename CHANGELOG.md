@@ -1,5 +1,58 @@
 # Changelog
 
+## v0.9.28
+
+Retires the v0.5-v0.8 memory-orchestration surface from user-facing
+docs. `bough-plugin-memory-*` was never going to be built out —
+`plugins/memory/` was already deleted wholesale in the v0.9.0
+ECC-verbatim reset — but several docs still described that dead
+surface as current and reachable from the top-level README.
+
+### Changed
+
+- **README**: dropped memory/capability/MCP specifics from the
+  v0.5-v0.8 callout, roadmap row, and status paragraph; dropped the
+  now-attic'd `docs/CONCEPTS.md` / `docs/INSTINCTS.md` links.
+- **`docs/attic/`**: moved 8 docs that are ~entirely about the deleted
+  `MemoryBackend`/`CapabilityCompiler` architecture (BACKENDS,
+  CAPABILITY_COMPILER, EXTERNAL_MEMORY_BACKENDS, MCP_SERVER,
+  MEMORY_PLUGIN_AUTHOR_GUIDE, NAMESPACE_MAPPING, CONCEPTS, INSTINCTS)
+  via `git mv` (history preserved) with a new `docs/attic/README.md`
+  explaining why. `bough instinct status/list/show/promote` (v0.9+)
+  is a real, unrelated command sharing a name with the old
+  subsystem's CLI.
+- **`docs/ROADMAP.md`**: compressed the v0.5.0-v0.8.0 sections into
+  one paragraph pointing at this changelog for detail; restored a
+  condensed version of the version-independent "what bough
+  deliberately does not do" non-goals that the compression had
+  otherwise dropped with no replacement anywhere in the repo.
+- **`docs/SIGNING.md` / `docs/SECURITY.md`**: rewritten around their
+  real subject — engine plugins — with an explicit notice that the
+  signing-enforcement design is not wired into any command yet
+  (`internal/pluginsign` has no callers, `bough plugins` only has
+  `list`).
+- **`Makefile`**: `make proto` regenerated stubs for 3 nonexistent
+  proto dirs; narrowed to the one that exists (engine).
+
+### Fixed
+
+- Corrected several doc comments (`internal/config/config.go`,
+  `pkg/schema/doc.go`/`scope.go`) that described deleted packages as
+  live, including one that claimed `InstinctConfig` has no live
+  readers when `EvolveClaudeMDOnSessionEnd` actually gates a real
+  v0.9.14 SessionEnd feature, and one that still pointed at
+  `bough plugin verify` (no such subcommand exists).
+- Fixed 3 relative links inside the newly-archived docs (`INSTINCTS`,
+  `BACKENDS`, `EXTERNAL_MEMORY_BACKENDS`) that broke when their
+  `git mv` into `docs/attic/` left them pointing at siblings that
+  stayed in `docs/`.
+- `docs/SECURITY.md`'s trust-model intro named only `bough create` as
+  the thing that spawns untrusted engine plugins; `bough remove`
+  does too.
+
+Config schema and `pkg/schema` types are unchanged — only the
+description of what's live changed, not the implementation.
+
 ## v0.9.27
 
 Retrospective `/code-review` sweep, wave 4 (#27/#30/#38) — completes
