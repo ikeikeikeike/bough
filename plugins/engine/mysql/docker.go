@@ -196,11 +196,13 @@ func (p *Provider) dockerUp(ctx context.Context, req *api.UpReq) error {
 	return dockerutil.StartOrCleanup(ctx, cli, resp.ID, "mysql", port)
 }
 
-// dockerReadyCheck polls a TCP dial against the host-side port until it
-// succeeds, then issues a single `mysqladmin ping` via docker exec
-// against the container's internal socket to confirm mysqld accepts
-// queries (the TCP listener opens slightly before mysqld is query-ready
-// on a fresh datadir initdb).
+// dockerReadyCheck polls a TCP dial against the host-side port as a
+// cheap pre-gate, then confirms readiness with an in-container SELECT
+// 1 forced over TCP (mysqlTCPReady). The host-side dial alone is not
+// sufficient: docker-proxy accepts the host port from the moment the
+// container starts, regardless of whether mysqld is listening yet.
+// mysqlTCPReady is what actually distinguishes "the real server is
+// serving queries" from "docker-proxy answered".
 func (p *Provider) dockerReadyCheck(ctx context.Context, port, timeoutSec int) (bool, error) {
 	if timeoutSec <= 0 {
 		timeoutSec = 600
@@ -227,7 +229,7 @@ func (p *Provider) dockerReadyCheck(ctx context.Context, port, timeoutSec int) (
 			continue
 		}
 		_ = conn.Close()
-		if mysqlAdminPing(ctx, cli, name) == nil {
+		if mysqlTCPReady(ctx, cli, name) == nil {
 			return true, nil
 		}
 		time.Sleep(dockerReadyPollMS * time.Millisecond)
@@ -235,10 +237,19 @@ func (p *Provider) dockerReadyCheck(ctx context.Context, port, timeoutSec int) (
 	return false, fmt.Errorf("mysql docker: not ready on port %d within %ds", port, timeoutSec)
 }
 
-// mysqlAdminPing runs `mysqladmin ping -h localhost` inside the
-// container — uses the internal socket, no host network round-trip.
-// Returns nil iff mysqld replies `mysqld is alive` (mysqladmin exits 0).
-func mysqlAdminPing(ctx context.Context, cli *client.Client, name string) error {
+// mysqlTCPReady runs `mysql --protocol=TCP -h127.0.0.1 -uroot -e
+// 'SELECT 1'` inside the container via docker exec. --protocol=TCP
+// forces the network path (rather than the client's default socket
+// preference), so this fails cleanly during the mysql:8.4 image's
+// first-run "temporary server" phase, which runs mysqld with
+// --skip-networking to bootstrap the datadir/grant tables before
+// restarting as the real, network-enabled server. A socket-based
+// check (the previous mysqladmin ping -h localhost) answers success
+// against that temporary server too, which is a container-internal
+// socket connection — it says nothing about whether the real server
+// is up, and the real server is what post_create hooks connect to
+// over host TCP immediately after Up returns.
+func mysqlTCPReady(ctx context.Context, cli *client.Client, name string) error {
 	id, err := dockerutil.LookupByName(ctx, cli, name)
 	if err != nil {
 		return err
@@ -247,7 +258,7 @@ func mysqlAdminPing(ctx context.Context, cli *client.Client, name string) error 
 		return fmt.Errorf("container %s not found", name)
 	}
 	exec, err := cli.ContainerExecCreate(ctx, id, container.ExecOptions{
-		Cmd:          []string{"mysqladmin", "ping", "-h", "localhost"},
+		Cmd:          []string{"mysql", "--protocol=TCP", "-h127.0.0.1", "-uroot", "-e", "SELECT 1"},
 		AttachStdout: true,
 		AttachStderr: true,
 	})
@@ -267,7 +278,7 @@ func mysqlAdminPing(ctx context.Context, cli *client.Client, name string) error 
 		insp, _ = cli.ContainerExecInspect(ctx, exec.ID)
 	}
 	if insp.ExitCode != 0 {
-		return fmt.Errorf("mysqladmin ping exit %d", insp.ExitCode)
+		return fmt.Errorf("mysql --protocol=TCP SELECT 1 exit %d", insp.ExitCode)
 	}
 	return nil
 }
