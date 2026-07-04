@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +25,15 @@ import (
 // plugins genuinely cannot simulate them (e.g. a cluster-side
 // provisioner that has no concept of a local socket cannot have its
 // port preempted by `net.Listen`).
+//
+// Fault_ImagePullFailure and Fault_DatadirPermission each force the
+// backend that makes their fault real: image-pull forces docker (only
+// the docker path pulls an image); datadir-permission forces the
+// host-process backend (cfg.DatadirFaultBackend), because only that
+// path prepares Datadir with a synchronous os.MkdirAll inside Up and
+// so surfaces an un-writable parent as an Up error — the docker path
+// merely bind-mounts and the container's write fails asynchronously,
+// long after Up has already returned nil.
 func runFaults(t *testing.T, cfg Config) {
 	t.Helper()
 
@@ -101,7 +111,16 @@ func runFaultDatadirPermission(t *testing.T, cfg Config) {
 		t.Skipf("chmod fault dir 0o000: %v (cannot test this path)", err)
 	}
 
-	datadir := filepath.Join(faultDir, "data")
+	// Force the host-process backend (see runFaults' doc): only that
+	// path mkdirs Datadir synchronously inside Up, so a 0o000 parent is
+	// a deterministic, cross-platform Up error. The mkdir precedes the
+	// backend-binary exec, so this fires even when the backend binary
+	// itself is absent — isBackendBinaryMissing below distinguishes the
+	// rare fall-through.
+	extras := mergeExtras(cfg)
+	extras["backend"] = cfg.DatadirFaultBackend
+
+	datadir := faultDatadir(faultDir)
 	ctx, cancel := context.WithTimeout(t.Context(), cfg.UpTimeout)
 	defer cancel()
 	upErr := prov.Up(ctx, &engineapi.UpReq{
@@ -109,15 +128,51 @@ func runFaultDatadirPermission(t *testing.T, cfg Config) {
 		Datadir:      datadir,
 		WorktreeRoot: t.TempDir(),
 		SocketDir:    t.TempDir(),
-		Extras:       mergeExtras(cfg),
+		Extras:       extras,
 	})
 	if upErr == nil {
 		_ = prov.Down(ctx, &engineapi.DownReq{Ports: []int{port}, GracefulTimeoutSec: 5})
 		_ = prov.Cleanup(ctx, datadir, []int{port})
-		t.Errorf("Up with un-writable datadir parent must fail; got nil error")
+		t.Errorf("Up with an un-writable datadir parent must fail; got nil error")
 		return
 	}
+	if isBackendBinaryMissing(upErr) {
+		t.Skipf("Fault_DatadirPermission inconclusive: the datadir mkdir should have "+
+			"failed first, but Up reached the %q backend launch and it is not installed (%v)",
+			extras["backend"], upErr)
+	}
 	t.Logf("Up surfaced datadir-permission as: %v", upErr)
+}
+
+// faultDatadir returns the datadir path Fault_DatadirPermission drives
+// Up with: two levels below the 0o000 faultDir. The nesting defeats
+// both datadir-prep shapes plugins use:
+//
+//   - mysql / redis / elasticsearch mkdir Datadir itself, so any path
+//     under the un-writable faultDir fails.
+//   - postgres mkdirs only filepath.Dir(Datadir) — it must not
+//     pre-create $PGDATA or initdb refuses to run. A single level
+//     (faultDir/data) makes filepath.Dir == faultDir, which already
+//     exists, so the mkdir is a no-op and Up wrongly succeeds. Two
+//     levels put filepath.Dir at faultDir/data, which cannot be created
+//     under the 0o000 faultDir — so postgres fails at its mkdir too.
+func faultDatadir(faultDir string) string {
+	return filepath.Join(faultDir, "data", "db")
+}
+
+// isBackendBinaryMissing reports whether err is the "plugin tried to
+// exec its host-process backend binary but it is not on PATH" shape.
+// Matched textually because the error crosses the go-plugin gRPC
+// boundary as a string (the api server's errString → the client's
+// errors.New), which drops the exec.ErrNotFound sentinel; the phrase
+// "executable file not found" is identical on linux and darwin.
+//
+// Fault_DatadirPermission skips (rather than passes) on this shape so
+// an inconclusive run — where the synchronous datadir mkdir did not
+// fire and Up fell through to a backend launch the host cannot perform
+// — never reads as a green contract check.
+func isBackendBinaryMissing(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "executable file not found")
 }
 
 func runFaultImagePullFailure(t *testing.T, cfg Config) {

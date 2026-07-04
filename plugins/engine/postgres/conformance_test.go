@@ -22,11 +22,12 @@ const (
 )
 
 // TestPostgresConformance drives the bough contract against
-// bin/bough-plugin-postgres. No NativeProbe — AssertReachable's
-// TCP-level guard catches the v0.2.6-class "bridge IP advertised"
-// bug, and a SELECT 1 round-trip requires a startup-message + auth
-// handshake the suite would rather not embed. Plugin authors who
-// want stronger probes can pass their own pgx-backed function.
+// bin/bough-plugin-postgres. NativeProbe is the stdlib-only
+// conformance.PostgresProbe (an SSLRequest handshake requiring the
+// server's 'S'/'N' reply): postgres sends no unsolicited greeting, so
+// the SSLRequest — answerable before startup + auth — is the minimal
+// round-trip that proves the protocol layer is up, strictly stronger
+// than AssertReachable's TCP-only check.
 func TestPostgresConformance(t *testing.T) {
 	bin := os.Getenv(postgresConformancePluginEnv)
 	if bin == "" {
@@ -37,9 +38,11 @@ func TestPostgresConformance(t *testing.T) {
 		Image:           postgresConformanceImage,
 		ReadyTimeout:    postgresConformanceReadyMax,
 		IdempotentCount: 2,
-		// Same reason as the mysql plugin: postgres only bind-mounts
-		// Datadir, it never writes there itself, so chmod 0o000
-		// cannot fault-inject through Up's return value.
-		SkipDatadirPermission: true,
+		NativeProbe:     conformance.PostgresProbe,
+		// SkipDatadirPermission is intentionally NOT set: the
+		// Fault_DatadirPermission case forces the host-process
+		// (services-flake) backend, whose Up mkdirs filepath.Dir(Datadir)
+		// synchronously and so surfaces a 0o000 grandparent as a real Up
+		// error. See conformance.Config.DatadirFaultBackend.
 	})
 }

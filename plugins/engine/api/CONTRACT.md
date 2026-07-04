@@ -29,8 +29,11 @@ and the suite will treat the clause as not-applicable rather than failed.
    `Fault_ImagePullFailure`.
 3. **`Up` is up-or-reuse**: if a container with the canonical name is
    already running, `Up` returns nil without recreating it. The suite
-   asserts this by running the full lifecycle `IdempotentCount` times
-   (default 2).
+   asserts this in the `UpReuse` phase — it calls `Up` a second time
+   while the service is up, requires a nil return, then re-checks
+   readiness to confirm the reuse did not disrupt the running engine.
+   (Running the full lifecycle `IdempotentCount` times, by contrast,
+   only exercises restart: each loop Downs before the next Up.)
 4. **`Up` surfaces port conflicts** as a non-nil error.
 5. **`ReadyCheck` does not return true until the service accepts at
    least one protocol-level message** on every entry in `Ports`. A TCP
@@ -76,11 +79,18 @@ and the suite will treat the clause as not-applicable rather than failed.
 
 ## Datadir
 
-11. **`Up` is allowed to bind-mount but not to write to `Datadir`** for
-    the docker backend. The engine inside the container writes there.
-    A host-side `chmod 0o000` therefore does not necessarily surface as
-    an `Up` error — the suite's `Fault_DatadirPermission` may be opted
-    out via `SkipDatadirPermission=true`.
+11. **On the host-process backend, `Up` prepares `Datadir` and surfaces
+    an un-writable parent as a non-nil error.** The services-flake /
+    process-compose path mkdirs `Datadir` (or its parent, for engines
+    like postgres that must not pre-create `$PGDATA`) synchronously
+    inside `Up`, before it launches the engine — so a `chmod 0o000`
+    parent is a real `Up` failure. The suite's `Fault_DatadirPermission`
+    asserts this, forcing the host-process backend via
+    `DatadirFaultBackend` (default `"nix"`). The docker backend
+    legitimately only bind-mounts `Datadir` and lets the container write
+    there, so it does not surface this error; a plugin that is
+    docker-only (no host-process path) opts out with
+    `SkipDatadirPermission=true`.
 
 ## Notes for plugin authors
 
@@ -95,6 +105,10 @@ and the suite will treat the clause as not-applicable rather than failed.
 - `extras["backend"]="docker"` is forced by the conformance suite by
   default so the docker path is always exercised. Pass
   `cfg.Extras["backend"]="nix"` to verify the services-flake path.
+  `Fault_DatadirPermission` is the one exception: it forces the
+  host-process backend (`DatadirFaultBackend`, default `"nix"`) because
+  only that path prepares `Datadir` synchronously and can surface an
+  un-writable parent as an `Up` error.
 - `MainPortRole` on `conformance.Config` defaults to `"main"`; override
   it if your plugin's "primary" port is named differently.
 - The contract bound is on plugins/engine/api/proto/engine.proto. Any
