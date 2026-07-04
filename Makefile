@@ -1,10 +1,6 @@
 .DEFAULT_GOAL := help
 
 PROTO_DIR_ENGINE     := plugins/engine/api/proto
-PROTO_DIR_MEMORY     := plugins/memory/api/proto
-PROTO_DIR_INSTINCT   := plugins/instinct/api/proto
-PROTO_DIR_CAPABILITY := plugins/capability/api/proto
-PROTO_DIR_EVALUATOR  := plugins/evaluator/api/proto
 
 # protogen builds one proto package; the per-plugin `proto-*` targets
 # below pass the right include dir and source file. Keeps the proto
@@ -20,10 +16,6 @@ endef
 .PHONY: proto
 proto:  ## Regenerate gRPC stubs for every plugin contract.
 	$(call protogen,$(PROTO_DIR_ENGINE),engine)
-	$(call protogen,$(PROTO_DIR_MEMORY),memory)
-	$(call protogen,$(PROTO_DIR_INSTINCT),instinct)
-	$(call protogen,$(PROTO_DIR_CAPABILITY),capability)
-	$(call protogen,$(PROTO_DIR_EVALUATOR),evaluator)
 
 
 .PHONY: test

@@ -21,7 +21,7 @@ const (
 // promote.go is the only piece of code that legitimately rewrites
 // a Scope; memory backends never invent or change Scope.
 //
-// Namespace mapping (see docs/NAMESPACE_MAPPING.md): when v0.6
+// Namespace mapping (see docs/attic/NAMESPACE_MAPPING.md): when v0.6
 // external backends (mem0 / Graphiti) need to translate a Scope
 // into their own user/session/agent triple, the canonical mapping
 // is:

@@ -193,19 +193,19 @@ type SymlinkSpec struct {
 	Link   string `yaml:"link" validate:"required"`
 }
 
-// InstinctConfig is the v0.5 opt-in instinct subsystem. When
-// `enabled: false` (the default) the host behaves exactly as it did
-// under v0.4: no observer is wired up, no memory backends are
-// discovered, and the `bough instinct` / `bough memory` CLI
-// subcommands print a "subsystem disabled" notice. This makes v0.5
-// release a pure additive bump for existing v0.4 monorepos.
-//
-// When `enabled: true`, the host stands up the coordinator
-// (internal/instinct/), the redaction + poisoning_guard + decay
-// pipeline, the configured backends in MemoryBackends, and the
-// observer pipeline (stdin ingest as primary, optional opt-in beta
-// file watch). See docs/INSTINCTS.md for the per-monorepo design
-// choices users make here.
+// InstinctConfig is mostly the v0.5-v0.8 memory-orchestration
+// subsystem's config schema (MemoryBackend plugins, InstinctMinter, a
+// coordinator under internal/instinct/). That subsystem was
+// superseded wholesale in v0.9.0 — internal/instinct/ no longer
+// exists, and almost all of this struct's fields are unread. The one
+// live exception is EvolveClaudeMDOnSessionEnd (see its own doc
+// comment below): internal/cli/hook.go's dispatchEvolveClaudeMD still
+// reads it to gate a real v0.9.14 SessionEnd feature. Every other
+// field stays only so a `.bough.yaml` written for v0.5-v0.8 still
+// parses without an "unknown field" error, with no plan to re-wire
+// it. v0.9's continuous-learning surface (`bough observer`, `bough
+// evolve`, `bough instinct status/list/show`) is unrelated and
+// unconfigured by this struct — see the top-level README instead.
 type InstinctConfig struct {
 	Enabled               bool   `yaml:"enabled"`
 	DefaultMemoryBackend  string `yaml:"default_memory_backend"`
@@ -343,20 +343,14 @@ type InstinctFileWatch struct {
 	DebounceMs        int    `yaml:"debounce_ms"`
 }
 
-// InstinctPluginSecurity governs third-party plugin trust. v0.5
-// shipped `require_signed: false` (warn-only); v0.6 (Ν-1.8) added
-// the `bough plugin verify <binary>` CLI so an operator can dry-run
-// a binary against cosign or minisign before they trust it. The
-// host-side enforcement loop (= refuse-to-spawn when the binary
-// fails verification) is intentionally **not yet wired in v0.6.0**
-// (review #23 #9). The field is consumed by `bough plugin verify`
-// today; v0.6.x lands the spawn-time gate and the timeline in
-// `docs/SIGNING.md` (= v0.6 verify+opt-in / v0.6.x strict mode /
-// v0.7 official-plugin required / v0.8+ enterprise default true).
-// UntrustedWarning=true tells the host CLI to print a "third-party
-// plugin = untrusted code" banner whenever a non-allowlisted plugin
-// is discovered (independent of the signing path so warning +
-// enforce can coexist).
+// InstinctPluginSecurity is the v0.5-v0.8 plugin-signing design's
+// config schema (see docs/SIGNING.md). It parses, but no command
+// reads these fields today: there is no `bough plugin verify`
+// subcommand, and internal/pluginsign — the cosign/minisign
+// verification library this was meant to drive — has no callers.
+// UntrustedWarning=true would tell the host CLI to print a
+// "third-party plugin = untrusted code" banner whenever a
+// non-allowlisted plugin is discovered, if anything wired it up.
 //
 // AcceptedSignatureSchemes (round 4 priority A9 + A11) is the
 // two-system signing surface: "cosign" matches the GoReleaser
@@ -520,18 +514,11 @@ func LoadFromBytes(raw []byte, pathHint string) (*Config, error) {
 	return c, nil
 }
 
-// applyInstinctDefaults fills sane defaults for the v0.5 instinct
-// subsystem so a user who toggles `instinct.enabled: true` does not
-// have to spell out every nested field. The defaults match the
-// docs/INSTINCTS.md "default profile" so a fresh `.bough.yaml`
-// snippet (just `instinct: { enabled: true }`) produces a working
-// subsystem.
-//
-// The hard-limit fallbacks for retrieve.max_results and
-// retrieve.max_tokens are required: an unconfigured backend that
-// returns unbounded results would blow Claude's context window the
-// first time `bough instinct query` runs. Validator-level defaults
-// guard against the user forgetting to set them.
+// applyInstinctDefaults fills defaults on the retired v0.5-v0.8
+// InstinctConfig fields (see the type doc). It still runs on every
+// config load for backward-compat round-tripping, but nothing in
+// v0.9 reads the fields it sets — there is no live subsystem left
+// for these defaults to configure.
 func (c *Config) applyInstinctDefaults() {
 	if c.Instinct.DefaultMemoryBackend == "" {
 		c.Instinct.DefaultMemoryBackend = "sqlite"

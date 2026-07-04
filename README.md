@@ -377,14 +377,11 @@ hard rate-limited (10 / session, 30 / hour, 3-failure circuit
 breaker). Everything else — hooks, ingest, clustering gates 1-4 — is
 pure local filesystem.
 
-See [docs/CONCEPTS.md](docs/CONCEPTS.md) for the layering model,
-[docs/INSTINCTS.md](docs/INSTINCTS.md) for the instinct lifecycle, and
-[docs/EVOLVE.md](docs/EVOLVE.md) for the 5-gate evolve pipeline.
+See [docs/EVOLVE.md](docs/EVOLVE.md) for the 5-gate evolve pipeline.
 
-> **v0.5-v0.8 removed.** Earlier releases shipped bough-designed memory
-> backends, a capability compiler, an MCP server, and evaluator
-> adapters. v0.9.0 deleted that surface wholesale and reset to the ECC
-> verbatim port above; pin **v0.8.1** if you depend on it. See the
+> **v0.5-v0.8 superseded.** Earlier releases explored a different
+> continuous-learning design. v0.9.0 reset to the ECC verbatim port
+> above; pin **v0.8.1** if you depend on the earlier surface. See the
 > v0.9.0 [CHANGELOG](CHANGELOG.md) entry.
 
 ## Roadmap
@@ -396,7 +393,7 @@ See [docs/CONCEPTS.md](docs/CONCEPTS.md) for the layering model,
 | v0.2.0    | Docker backend, hybrid `backend:` selector — explicit `nix` / `docker` in YAML, or auto-detect (Nix-with-flakes present → Nix, else Docker daemon → Docker, else clear error) when the field is omitted |
 | v0.3.0    | Plugin conformance suite + CI matrix on real Docker — plugin authors verify their contract end-to-end with one test func, four bough-internal plugins are gated on `ubuntu-24.04` + `ubuntu-24.04-arm` × `mysql` / `postgres` / `redis` / `elasticsearch` |
 | v0.4.0    | Generic engine plugin orchestrator (was: DB-only). `DBProvider` → `EngineProvider`, `plugins/db/` → `plugins/engine/`, YAML schema v2 (`.bough.yaml` / `engines:` / `port_ranges:` per role / `initial_resources:`). Multi-port engines (rabbitmq AMQP+Management, kafka broker+controller, NATS client+monitor+cluster) are first-class; v0.4.x reads every v0.3 surface with a deprecation warning, removed in v0.5.0 |
-| v0.5.0-v0.8.0 | (superseded) A bough-designed memory-orchestration layer — `MemoryBackend` / `InstinctMinter` plugin contracts, SQLite + mem0 + Graphiti backends, a capability compiler, `bough-mcp-server`, evaluator adapters. **Removed wholesale in v0.9.0**; pin v0.8.1 to keep it |
+| v0.5.0-v0.8.0 | (superseded) An earlier continuous-learning design, replaced wholesale in v0.9.0; pin v0.8.1 if you depend on it |
 | v0.9.0    | The "ECC verbatim port" reset. Deleted the v0.5-v0.8 surface and rebuilt continuous learning as a faithful Go port of [everything-claude-code](https://github.com/affaan-m/everything-claude-code): the `~/.local/share/bough-homunculus/` corpus, `observations.jsonl`, and a subscription-only `claude --print` mechanism (no Anthropic API, no separate billing) |
 | v0.9.1-v0.9.22 | The observe → evolve → inject loop: `bough evolve --generate` 5-gate clustering into skills / agents / commands, `UserPromptSubmit` instinct injection, `SessionEnd` / `PreCompact` hooks, secret-scrub at capture, project-scope evolved skills (v0.9.20), resolvable source-instinct paths (v0.9.22), plus a retrospective `/review` bug-fix sweep of the merged infra PRs |
 | next      | Reference rabbitmq / kafka / NATS / minio engine plugins, Homebrew tap |
@@ -419,8 +416,8 @@ The worktree-isolation core has been stable since v0.4.0. v0.5 onward
 layers on the opt-in [continuous-learning loop](#continuous-learning-v09).
 v0.9.0 reset that loop to a verbatim Go port of the
 everything-claude-code reference architecture (subscription-only, no
-API billing) and **removed the v0.5-v0.8 memory / capability / MCP
-surface wholesale** — pin v0.8.1 if you depend on it.
+API billing) and **superseded the earlier v0.5-v0.8 surface
+wholesale** — pin v0.8.1 if you depend on it.
 
 ## Plugin conformance
 
