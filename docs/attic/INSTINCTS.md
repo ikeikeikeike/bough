@@ -156,5 +156,5 @@ three-layer split.
 - [CONCEPTS.md](CONCEPTS.md) — the three-layer model (memory architecture / skill execution / artifact compile chain).
 - [BACKENDS.md](BACKENDS.md) — choosing a memory backend.
 - [EXTERNAL_MEMORY_BACKENDS.md](EXTERNAL_MEMORY_BACKENDS.md) — wiring mem0 / Graphiti adapters.
-- [SECURITY.md](SECURITY.md) — third-party plugin trust + SKILL.md supply-chain risk.
-- [ROADMAP.md](ROADMAP.md) — v0.5 → v0.6 → v0.7 plan.
+- [../SECURITY.md](../SECURITY.md) — third-party plugin trust + SKILL.md supply-chain risk.
+- [../ROADMAP.md](../ROADMAP.md) — v0.5 → v0.6 → v0.7 plan.

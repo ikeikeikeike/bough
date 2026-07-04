@@ -102,4 +102,4 @@ Adapter authors should:
    ```
 4. Publish the binary alongside your own `docs/INTEGRATION.md` covering namespace mapping, auth, and the v0.5-stable feature subset your backend implements.
 
-See [SECURITY.md](SECURITY.md) for the trust model around third-party plugins.
+See [../SECURITY.md](../SECURITY.md) for the trust model around third-party plugins.

@@ -102,3 +102,20 @@ LLM-judged clustering on top of it. v0.9.0 reset all of it in favour
 of the ECC-verbatim continuous-learning port described above; none of
 it shipped past v0.8.1. See CHANGELOG.md for the release-by-release
 detail if you need the history.
+
+## What bough deliberately does not do
+
+These are durable non-goals, independent of which continuous-learning
+design is current:
+
+- Weight updates (SEAL / SFT / RLHF) — a model-tier concern, not
+  something an orchestration layer does.
+- Proprietary vendor memory (OpenAI Memory, Anthropic Memory) —
+  avoids vendor lock-in.
+- Forcing every instinct through a single `skill → command → agent`
+  chain — `bough evolve` clusters an instinct into whichever kind
+  (skill / command / agent) its content warrants, not a chain every
+  instinct must pass through.
+
+bough is a per-worktree development-environment orchestrator, not an
+agent memory system; these non-goals keep it from drifting into either.

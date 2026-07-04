@@ -4,7 +4,7 @@
 
 ## Trust model
 
-bough discovers plugins on PATH and spawns them as subprocesses under hashicorp/go-plugin's gRPC transport. Each plugin runs with the user's full filesystem and network privileges. Today "plugin" means an engine plugin (`bough-plugin-{mysql,postgres,redis,elasticsearch}` bundled, or a third-party engine a plugin author ships) — `bough create` is the thing that spawns them.
+bough discovers plugins on PATH and spawns them as subprocesses under hashicorp/go-plugin's gRPC transport. Each plugin runs with the user's full filesystem and network privileges. Today "plugin" means an engine plugin (`bough-plugin-{mysql,postgres,redis,elasticsearch}` bundled, or a third-party engine a plugin author ships) — both `bough create` (Up) and `bough remove` (Down/Cleanup) spawn one.
 
 A malicious engine plugin could:
 

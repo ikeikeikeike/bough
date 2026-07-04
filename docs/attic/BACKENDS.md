@@ -50,7 +50,7 @@ memory_backends:
 
 ## v0.6+ external backends
 
-Adapter skeletons land in `examples/memory-plugin-mem0-skeleton/` so plugin authors can prototype against the v0.5 contract today. The actual official mem0 / Graphiti plugins ship in v0.6.0 — see [ROADMAP.md](ROADMAP.md).
+Adapter skeletons land in `examples/memory-plugin-mem0-skeleton/` so plugin authors can prototype against the v0.5 contract today. The actual official mem0 / Graphiti plugins ship in v0.6.0 — see [../ROADMAP.md](../ROADMAP.md).
 
 ## Authoring a new backend
 

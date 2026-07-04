@@ -70,8 +70,9 @@ GoReleaser pipeline signed under (bough's own release identity:
 issuer `https://token.actions.githubusercontent.com`). `internal
 /pluginsign.Request` carries `CertIdentity` / `CertOIDCIssuer` /
 `CertPath` fields for this — there is no env-var or config-file
-loader for them yet since nothing constructs a `Request` outside
-`internal/pluginsign`'s own tests.
+loader for them yet since nothing constructs a `Request` at all:
+`internal/pluginsign` has no test files either, so this path has
+zero coverage today, not just zero callers outside its own tests.
 
 ## Current CLI
 
