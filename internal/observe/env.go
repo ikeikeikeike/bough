@@ -21,6 +21,17 @@ var AnthropicAPIEnvVars = []string{
 	"ANTHROPIC_VERTEX_BASE_URL",
 	"ANTHROPIC_VERTEX_PROJECT_ID",
 	"CLAUDE_API_KEY",
+	// CLAUDE_CODE_USE_BEDROCK / CLAUDE_CODE_USE_VERTEX are the actual
+	// enable switches that route Claude Code onto Bedrock/Vertex
+	// billing — the ANTHROPIC_BEDROCK_BASE_URL / ANTHROPIC_VERTEX_*
+	// vars above are only auxiliary endpoint/project overrides that do
+	// nothing unless one of these two is also set. Omitting them let
+	// an operator's CLAUDE_CODE_USE_BEDROCK=1 (a normal enterprise,
+	// AWS-billed Claude Code setup) pass straight through into the
+	// spawned `claude --print` subprocess, silently billing the
+	// operator's AWS account instead of their subscription.
+	"CLAUDE_CODE_USE_BEDROCK",
+	"CLAUDE_CODE_USE_VERTEX",
 }
 
 // SanitizeAnthropicEnv returns a copy of env (KEY=VALUE strings as

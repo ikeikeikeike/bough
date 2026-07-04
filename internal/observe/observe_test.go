@@ -129,6 +129,29 @@ func TestSanitizeAnthropicEnv(t *testing.T) {
 	}
 }
 
+// TestSanitizeAnthropicEnv_StripsBedrockVertexSwitches is the
+// regression guard for the wave-4 review finding: AnthropicAPIEnvVars
+// listed only the Bedrock/Vertex auxiliary endpoint/project-override
+// vars (ANTHROPIC_BEDROCK_BASE_URL / ANTHROPIC_VERTEX_*), never the
+// actual CLAUDE_CODE_USE_BEDROCK / CLAUDE_CODE_USE_VERTEX enable
+// switches — so an operator's normal enterprise env (Bedrock/Vertex
+// billing) passed straight through into the spawned `claude --print`
+// subprocess, contradicting the README's "cannot silently flip to API
+// billing" claim.
+func TestSanitizeAnthropicEnv_StripsBedrockVertexSwitches(t *testing.T) {
+	env := []string{
+		"HOME=/Users/me",
+		"CLAUDE_CODE_USE_BEDROCK=1",
+		"CLAUDE_CODE_USE_VERTEX=1",
+	}
+	out := SanitizeAnthropicEnv(env)
+	for _, kv := range out {
+		if kv == "CLAUDE_CODE_USE_BEDROCK=1" || kv == "CLAUDE_CODE_USE_VERTEX=1" {
+			t.Errorf("Bedrock/Vertex enable switch survived sanitisation: %q", kv)
+		}
+	}
+}
+
 func TestDetectAnthropicAPIVars(t *testing.T) {
 	env := []string{
 		"HOME=/x",
