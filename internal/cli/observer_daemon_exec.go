@@ -27,11 +27,13 @@ func makeDetachedCmd(exe string, args []string) *exec.Cmd {
 // `bough observer run-once --root <root>` as a subprocess. We spawn
 // rather than call in-process so each tick gets a fresh provider /
 // limiter lifecycle identical to a manual run, and a panic in one
-// pass cannot kill the daemon loop.
-func runObserverOnceQuiet(ctx context.Context, root string) {
+// pass cannot kill the daemon loop. It returns the subprocess exit
+// status so the caller (tickOnce) can feed the daemon-lifetime
+// limiter's circuit breaker; a nil error means the pass succeeded.
+func runObserverOnceQuiet(ctx context.Context, root string) error {
 	exe, err := os.Executable()
 	if err != nil {
-		return
+		return err
 	}
 	c := exec.CommandContext(ctx, exe, "observer", "run-once", "--root", root)
 	c.Stdin = nil
@@ -51,7 +53,9 @@ func runObserverOnceQuiet(ctx context.Context, root string) {
 		// Negative pid → signal the process group led by the child.
 		return syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
 	}
-	// Best-effort: a failed pass logs via the run-once path; the
-	// daemon loop continues regardless.
-	_ = c.Run()
+	// Return the exit status so tickOnce can record success/failure on
+	// the daemon-lifetime limiter (its circuit breaker). A failed pass
+	// also logs via the run-once path; the daemon loop continues either
+	// way.
+	return c.Run()
 }
