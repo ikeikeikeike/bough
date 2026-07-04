@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -59,12 +61,24 @@ the copy.`,
 			if err != nil {
 				return err
 			}
+			// Sorted, not map-order: a corpus large enough to hit a
+			// mid-import failure must fail the same way on every run so
+			// an operator investigating a failure (and a retry) sees a
+			// consistent picture of what was/wasn't attempted.
+			ids := make([]string, 0, len(projects))
+			for id := range projects {
+				ids = append(ids, id)
+			}
+			sort.Strings(ids)
+
 			fmt.Fprintf(stdout, "ECC root:   %s\n", eccRoot)
 			fmt.Fprintf(stdout, "bough root: %s\n", dst.Root)
 			fmt.Fprintf(stdout, "projects:   %d\n\n", len(projects))
 
-			imported := 0
-			for id, meta := range projects {
+			var toRegister []homunculus.Project
+			var failed []string
+			for _, id := range ids {
+				meta := projects[id]
 				srcDir := filepath.Join(eccRoot, "projects", id)
 				if _, err := os.Stat(srcDir); err != nil {
 					continue
@@ -74,16 +88,28 @@ the copy.`,
 				if dryRun {
 					continue
 				}
+				// A copy failure (permission denied, disk full, an
+				// unreadable file) must not abort the whole migration —
+				// it is reported and the remaining projects are still
+				// attempted, with a non-zero exit + failure summary at
+				// the end so the operator knows exactly what needs a
+				// retry.
 				if err := copyProject(srcDir, dst.ProjectDir(id)); err != nil {
-					return fmt.Errorf("ecc import: copy project %s: %w", id, err)
+					fmt.Fprintf(stdout, "    FAILED to copy: %v\n", err)
+					failed = append(failed, id)
+					continue
 				}
-				reg := homunculus.NewRegistryRW(dst)
-				if err := reg.WriteUpsert(homunculus.Project{
+				toRegister = append(toRegister, homunculus.Project{
 					ID: id, Name: meta.Name, Root: meta.Root, Remote: meta.Remote,
-				}); err != nil {
-					return err
+				})
+			}
+
+			imported := 0
+			if len(toRegister) > 0 {
+				if err := homunculus.NewRegistryRW(dst).WriteUpsertMany(toRegister); err != nil {
+					return fmt.Errorf("ecc import: register imported projects: %w", err)
 				}
-				imported++
+				imported = len(toRegister)
 			}
 
 			// Warn on project dirs present on disk but absent from
@@ -103,9 +129,15 @@ the copy.`,
 				}
 			}
 
-			if dryRun {
+			switch {
+			case dryRun:
 				fmt.Fprintf(stdout, "\ndry-run: nothing copied. Re-run with --apply to import.\n")
-			} else {
+			case len(failed) > 0:
+				fmt.Fprintf(stdout, "\nimported %d of %d projects into %s; failed: %s\n",
+					imported, len(projects), dst.Root, strings.Join(failed, ", "))
+				return fmt.Errorf("ecc import: %d of %d project(s) failed to copy: %s",
+					len(failed), len(projects), strings.Join(failed, ", "))
+			default:
 				fmt.Fprintf(stdout, "\nimported %d projects into %s\n", imported, dst.Root)
 			}
 			return nil
@@ -113,9 +145,17 @@ the copy.`,
 	}
 	cmd.Flags().StringVar(&from, "from", DefaultECCRoot, "ECC homunculus root to import from")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", true, "report what would be copied without writing (default true)")
-	// --apply is the inverse of --dry-run for ergonomics.
-	cmd.Flags().BoolFunc("apply", "perform the copy (= --dry-run=false)", func(string) error {
-		dryRun = false
+	// --apply is the inverse of --dry-run for ergonomics. pflag's
+	// BoolFunc passes the flag's literal string value on --apply,
+	// --apply=true, AND --apply=false alike — it must be parsed, not
+	// ignored, or an explicit --apply=false would silently still
+	// perform the copy.
+	cmd.Flags().BoolFunc("apply", "perform the copy (= --dry-run=false)", func(v string) error {
+		apply, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("--apply: %w", err)
+		}
+		dryRun = !apply
 		return nil
 	})
 	return cmd

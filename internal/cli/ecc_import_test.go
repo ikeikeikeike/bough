@@ -43,6 +43,88 @@ func writeFile(t *testing.T, path, body string) {
 	}
 }
 
+// TestEccImport_ApplyFalseIsExplicitDryRun is the regression guard for
+// the wave-4 review finding: pflag's BoolFunc passes --apply=false's
+// literal string value to the registered callback, but the original
+// callback ignored the argument and unconditionally set dryRun=false
+// — so --apply=false silently performed the real copy anyway.
+func TestEccImport_ApplyFalseIsExplicitDryRun(t *testing.T) {
+	t.Setenv("BOUGH_HOMUNCULUS_DIR", t.TempDir())
+	eccRoot := t.TempDir()
+	writeFile(t, filepath.Join(eccRoot, "projects.json"),
+		`{"p1":{"name":"proj1","root":"/r1","remote":""}}`)
+	writeFile(t, filepath.Join(eccRoot, "projects", "p1", "instincts", "personal", "a.md"), "# a")
+
+	cmd := newEccImportCmd()
+	cmd.SetArgs([]string{"--from", eccRoot, "--apply=false"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !strings.Contains(out.String(), "dry-run: nothing copied") {
+		t.Errorf("--apply=false did not stay a dry run:\n%s", out.String())
+	}
+	dst := homunculus.NewLayout()
+	if _, err := os.Stat(dst.ProjectDir("p1")); err == nil {
+		t.Errorf("--apply=false copied project p1 into %s", dst.ProjectDir("p1"))
+	}
+}
+
+// TestEccImport_ContinuesAfterOneProjectFails is the regression guard
+// for the wave-4 review finding: a copy failure for one project used
+// to abort the whole `--apply` run via an immediate return, so which
+// project failed (and which ones were never attempted) depended on Go's
+// randomized map iteration order. Import must instead attempt every
+// project regardless of an earlier failure, and report a non-zero
+// exit with a summary of exactly what failed.
+func TestEccImport_ContinuesAfterOneProjectFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: unreadable-file permission bits are not enforced")
+	}
+	t.Setenv("BOUGH_HOMUNCULUS_DIR", t.TempDir())
+	eccRoot := t.TempDir()
+	writeFile(t, filepath.Join(eccRoot, "projects.json"),
+		`{"good":{"name":"good","root":"/g","remote":""},"bad":{"name":"bad","root":"/b","remote":""}}`)
+	writeFile(t, filepath.Join(eccRoot, "projects", "good", "instincts", "personal", "a.md"), "# a")
+	// "bad"'s only file is unreadable: copyFile's os.Open fails on it,
+	// simulating a permission-denied file in a messy real corpus.
+	badFile := filepath.Join(eccRoot, "projects", "bad", "instincts", "personal", "x.md")
+	writeFile(t, badFile, "# x")
+	if err := os.Chmod(badFile, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(badFile, 0o644) }) // let t.TempDir() clean up
+
+	cmd := newEccImportCmd()
+	cmd.SetArgs([]string{"--from", eccRoot, "--apply"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected a non-nil error reporting the failed project")
+	}
+	if !strings.Contains(out.String(), "imported 1 of 2 projects") {
+		t.Errorf("missing partial-success summary:\n%s", out.String())
+	}
+	// The good project must still have been imported despite bad's
+	// failure — this is the actual "continues past one failure" check,
+	// not just the summary text.
+	dst := homunculus.NewLayout()
+	if _, statErr := os.Stat(filepath.Join(dst.ProjectDir("good"), "instincts", "personal", "a.md")); statErr != nil {
+		t.Errorf("good project was not imported despite bad's failure: %v", statErr)
+	}
+	reg, regErr := homunculus.NewRegistryRW(dst).Read()
+	if regErr != nil {
+		t.Fatalf("read registry: %v", regErr)
+	}
+	if _, ok := reg["good"]; !ok {
+		t.Errorf("good project was not registered in projects.json")
+	}
+}
+
 // TestCopyProject_FollowsDedupInstinctsSymlink is the regression test for
 // the v0.9.2 import bug: ECC dedups a re-keyed project by symlinking its
 // instincts/ dir at the physical project that still holds the files, and

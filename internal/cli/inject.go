@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -9,6 +10,48 @@ import (
 	"github.com/ikeikeikeike/bough/internal/homunculus"
 	"github.com/ikeikeikeike/bough/internal/inject"
 )
+
+// runInjectContext resolves the current project's instinct pools and
+// writes the confidence-ranked injection block to out. Shared by
+// dispatchInjectContext (hook.go's UserPromptSubmit hook path) and
+// newInjectContextCmd's RunE (the manual preview command below) so
+// the two paths cannot drift apart — before this helper existed they
+// already needed an identical fix hand-applied twice (switching
+// DetectIdentity(cwd) to DetectIdentity(resolveMonorepoRoot(cwd)) in
+// both places).
+func runInjectContext(out io.Writer, root string, opts inject.Options) error {
+	cwd := root
+	if cwd == "" {
+		w, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("inject-context: getwd: %w", err)
+		}
+		cwd = w
+	}
+	// Resolve identity from the MONOREPO ROOT, not the raw cwd: the
+	// observation writer (resolveHomunculusObsPath), the observer
+	// daemon that mints the instinct files, session-end, and preserve
+	// all pool to DetectIdentity(resolveMonorepoRoot(cwd)). In a
+	// multi-repo monorepo / worktree (the .bough.yaml root is not a
+	// git repo; each sub-repo has its own origin) the raw-cwd id would
+	// differ from the writer's id, so this injector would read an
+	// empty project and surface nothing — the loop's whole payoff.
+	ident, err := homunculus.DetectIdentity(resolveMonorepoRoot(cwd))
+	if err != nil {
+		// A non-git directory is not an error for a hook — just
+		// emit nothing so the prompt is unaffected.
+		return nil
+	}
+	layout := homunculus.NewLayout()
+	project, _ := homunculus.ScanInstincts(layout.InstinctsDir(ident.ID))
+	global, _ := homunculus.ScanInstincts(layout.GlobalInstinctsDir())
+	block, n := inject.Build(project, global, opts)
+	if n == 0 {
+		return nil // no qualifying instincts → clean no-op
+	}
+	fmt.Fprint(out, block)
+	return nil
+}
 
 // newInjectContextCmd wires `bough inject-context` — the
 // UserPromptSubmit hook handler. Claude Code calls it on every user
@@ -41,42 +84,20 @@ billed as input tokens; instincts are confidence-sorted so the most
 reliable ones land before the cap truncates. No claude --print call
 is made — selection is pure filesystem.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cwd := root
-			if cwd == "" {
-				w, err := os.Getwd()
-				if err != nil {
-					return fmt.Errorf("inject-context: getwd: %w", err)
-				}
-				cwd = w
+			opts := inject.Options{
+				MaxBytes:     maxBytes,
+				MaxInstincts: maxN,
 			}
-			// Resolve identity from the MONOREPO ROOT, not the raw cwd: the
-			// observation writer (resolveHomunculusObsPath), the observer
-			// daemon that mints the instinct files, session-end, and preserve
-			// all pool to DetectIdentity(resolveMonorepoRoot(cwd)). In a
-			// multi-repo monorepo / worktree (the .bough.yaml root is not a
-			// git repo; each sub-repo has its own origin) the raw-cwd id would
-			// differ from the writer's id, so this injector would read an
-			// empty project and surface nothing — the loop's whole payoff.
-			ident, err := homunculus.DetectIdentity(resolveMonorepoRoot(cwd))
-			if err != nil {
-				// A non-git directory is not an error for a hook — just
-				// emit nothing so the prompt is unaffected.
-				return nil
+			// Only override MinConfidence when the operator actually
+			// passed the flag: --min-confidence 0 is a legitimate "no
+			// floor" request, and inject.Options.MinConfidence must see
+			// that as an explicit 0.0, not as "unset" (which would
+			// silently substitute the 0.50 default and drop every
+			// instinct in the real, reachable 0.30-0.49 band).
+			if cmd.Flags().Changed("min-confidence") {
+				opts.MinConfidence = &minConf
 			}
-			layout := homunculus.NewLayout()
-			project, _ := homunculus.ScanInstincts(layout.InstinctsDir(ident.ID))
-			global, _ := homunculus.ScanInstincts(layout.GlobalInstinctsDir())
-
-			block, n := inject.Build(project, global, inject.Options{
-				MaxBytes:      maxBytes,
-				MaxInstincts:  maxN,
-				MinConfidence: minConf,
-			})
-			if n == 0 {
-				return nil // no qualifying instincts → clean no-op
-			}
-			fmt.Fprint(cmd.OutOrStdout(), block)
-			return nil
+			return runInjectContext(cmd.OutOrStdout(), root, opts)
 		},
 	}
 	cmd.Flags().StringVar(&root, "root", "", "monorepo root (default: $PWD)")

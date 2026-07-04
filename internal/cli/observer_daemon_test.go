@@ -1,10 +1,14 @@
 package cli
 
 import (
+	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ikeikeikeike/bough/internal/provider/claudecli"
 )
 
 // TestWaitGone covers the SIGTERM→SIGKILL escalation gate added in
@@ -59,5 +63,67 @@ func TestParseDaemonPID(t *testing.T) {
 	// no daemon at all → not found
 	if _, ok := parseDaemonPID("  100 /usr/bin/bash\n", root, 1, alive); ok {
 		t.Errorf("no daemon line should report not found")
+	}
+}
+
+// TestTickOnce_HourlyCapAccumulatesAcrossTicks is the regression guard
+// for the wave-4 review finding: the daemon loop used to call
+// runObserverOnceQuiet directly, which spawns a subprocess that
+// constructs its OWN fresh claudecli.Limiter every tick — so the
+// advertised N-calls/hour self-DoS cap never accumulated across ticks
+// and the daemon could fire unboundedly. tickOnce now checks a single
+// limiter instance the caller is expected to hold for the daemon's
+// whole lifetime; this verifies that instance actually stops firing
+// once its hourly cap is reached, across repeated tickOnce calls.
+func TestTickOnce_HourlyCapAccumulatesAcrossTicks(t *testing.T) {
+	limiter := claudecli.NewLimiter()
+	limiter.MaxCallsPerSession = 0 // daemon lifetime, not a single manual run
+	limiter.MaxCallsPerHour = 2
+	fixedNow := time.Now()
+	limiter.SetClock(func() time.Time { return fixedNow })
+
+	fired := 0
+	runTick := func(context.Context, string) { fired++ }
+	logPath := filepath.Join(t.TempDir(), "observer.log")
+
+	for i := 0; i < 5; i++ {
+		tickOnce(context.Background(), logPath, 60, "/root", limiter, runTick)
+	}
+	if fired != 2 {
+		t.Errorf("fired = %d, want 2 (hourly cap must stop firing once limiter.MaxCallsPerHour is reached)", fired)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if !strings.Contains(string(logBytes), "tick skipped") {
+		t.Errorf("expected a \"tick skipped\" log line once the cap was hit; log:\n%s", logBytes)
+	}
+}
+
+// TestTickOnce_UnboundedSessionCapWouldStillAllowManyTicks documents
+// why MaxCallsPerSession is disabled (0) for the daemon's tickLimiter:
+// with the default cap of 10 still enabled, an otherwise-healthy
+// long-running daemon would permanently stop ticking after its 11th
+// invocation, which is not what the advertised "10/session" cap means
+// for a daemon (it describes a single manual run, not daemon uptime).
+func TestTickOnce_UnboundedSessionCapWouldStillAllowManyTicks(t *testing.T) {
+	limiter := claudecli.NewLimiter()
+	limiter.MaxCallsPerSession = 0
+	limiter.MaxCallsPerHour = 0 // isolate the session-cap behavior only
+	fixedNow := time.Now()
+	limiter.SetClock(func() time.Time { return fixedNow })
+
+	fired := 0
+	runTick := func(context.Context, string) { fired++ }
+	logPath := filepath.Join(t.TempDir(), "observer.log")
+
+	const moreThanDefaultSessionCap = claudecli.DefaultMaxCallsPerSession + 5
+	for i := 0; i < moreThanDefaultSessionCap; i++ {
+		tickOnce(context.Background(), logPath, 60, "/root", limiter, runTick)
+	}
+	if fired != moreThanDefaultSessionCap {
+		t.Errorf("fired = %d, want %d (MaxCallsPerSession=0 must not cap daemon ticks)", fired, moreThanDefaultSessionCap)
 	}
 }

@@ -35,12 +35,17 @@ const DefaultMaxInstincts = 40
 // help, and it competes for the byte budget with reliable ones.
 const MinConfidence = 0.50
 
-// Options tunes the block. Zero values fall back to the Default*
-// constants so callers can pass Options{} for the standard block.
+// Options tunes the block. Zero values for MaxBytes/MaxInstincts fall
+// back to the Default* constants so callers can pass Options{} for
+// the standard block. MinConfidence is a pointer specifically because
+// 0.0 is a legitimate, meaningful value ("no floor, include
+// everything") that a bare float64 could not distinguish from "not
+// set" — nil means "not set", any non-nil value (including a pointer
+// to 0.0) is used as-is.
 type Options struct {
-	MaxBytes     int
-	MaxInstincts int
-	MinConfidence float64
+	MaxBytes      int
+	MaxInstincts  int
+	MinConfidence *float64
 }
 
 func (o Options) withDefaults() Options {
@@ -50,8 +55,9 @@ func (o Options) withDefaults() Options {
 	if o.MaxInstincts <= 0 {
 		o.MaxInstincts = DefaultMaxInstincts
 	}
-	if o.MinConfidence <= 0 {
-		o.MinConfidence = MinConfidence
+	if o.MinConfidence == nil {
+		def := MinConfidence
+		o.MinConfidence = &def
 	}
 	return o
 }
@@ -79,12 +85,12 @@ func Build(project, global []*homunculus.Instinct, opts Options) (string, int) {
 	}
 	pool := make([]ranked, 0, len(project)+len(global))
 	for _, in := range project {
-		if in.Confidence >= opts.MinConfidence {
+		if in.Confidence >= *opts.MinConfidence {
 			pool = append(pool, ranked{in: in, isProject: true})
 		}
 	}
 	for _, in := range global {
-		if in.Confidence >= opts.MinConfidence {
+		if in.Confidence >= *opts.MinConfidence {
 			pool = append(pool, ranked{in: in, isProject: false})
 		}
 	}

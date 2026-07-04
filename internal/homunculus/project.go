@@ -179,8 +179,21 @@ func (r *RegistryRW) readUnsafe() (map[string]Project, error) {
 // The write is atomic (= tmp + rename) so a half-written file never
 // appears on disk.
 func (r *RegistryRW) WriteUpsert(p Project) error {
-	if p.ID == "" {
-		return errors.New("homunculus.RegistryRW.WriteUpsert: ID empty")
+	return r.WriteUpsertMany([]Project{p})
+}
+
+// WriteUpsertMany upserts every Project in one read-modify-write
+// cycle instead of one cycle per project. A batch caller (e.g. `bough
+// ecc import --apply` migrating dozens-to-hundreds of projects) doing
+// N sequential WriteUpsert calls would otherwise perform N full
+// read+marshal+write passes over a projects.json that grows every
+// iteration — O(N) work that this collapses to one read and one
+// write regardless of N.
+func (r *RegistryRW) WriteUpsertMany(projects []Project) error {
+	for _, p := range projects {
+		if p.ID == "" {
+			return errors.New("homunculus.RegistryRW.WriteUpsertMany: ID empty")
+		}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -192,13 +205,15 @@ func (r *RegistryRW) WriteUpsert(p Project) error {
 		return err
 	}
 	now := r.now().UTC()
-	if existing, ok := current[p.ID]; ok && !existing.CreatedAt.IsZero() {
-		p.CreatedAt = existing.CreatedAt
-	} else if p.CreatedAt.IsZero() {
-		p.CreatedAt = now
+	for _, p := range projects {
+		if existing, ok := current[p.ID]; ok && !existing.CreatedAt.IsZero() {
+			p.CreatedAt = existing.CreatedAt
+		} else if p.CreatedAt.IsZero() {
+			p.CreatedAt = now
+		}
+		p.LastSeen = now
+		current[p.ID] = p
 	}
-	p.LastSeen = now
-	current[p.ID] = p
 	return r.flush(current)
 }
 

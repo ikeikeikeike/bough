@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/ikeikeikeike/bough/internal/homunculus"
 	"github.com/ikeikeikeike/bough/internal/observe"
@@ -234,18 +235,23 @@ func sessionHadCorrection(obs []observe.Observation) bool {
 }
 
 // addTokens lower-cases + splits on non-alphanumeric, dropping tokens
-// under 3 chars (= shorter tokens are mostly noise in tool I/O JSON).
+// under 3 runes (= shorter tokens are mostly noise in tool I/O JSON).
+// unicode.IsLetter/IsDigit (not a bare a-z/0-9 range check) so
+// instinct/observation text in Japanese or any other non-Latin script
+// still tokenizes — an ASCII-only check silently zeroed
+// instinctOverlap for such text, permanently disabling confidence
+// reinforcement/demotion for it.
 func addTokens(set map[string]struct{}, s string) {
-	cur := strings.Builder{}
+	cur := make([]rune, 0, 16)
 	flush := func() {
-		if cur.Len() >= 3 {
-			set[cur.String()] = struct{}{}
+		if len(cur) >= 3 {
+			set[string(cur)] = struct{}{}
 		}
-		cur.Reset()
+		cur = cur[:0]
 	}
 	for _, r := range strings.ToLower(s) {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			cur.WriteRune(r)
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			cur = append(cur, r)
 		} else {
 			flush()
 		}

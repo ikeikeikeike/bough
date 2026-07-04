@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ikeikeikeike/bough/internal/homunculus"
+	"github.com/ikeikeikeike/bough/internal/provider/claudecli"
 )
 
 // The observer daemon is an opt-in background process that runs
@@ -219,14 +221,19 @@ func newObserverRunDaemonCmd() *cobra.Command {
 			// cancelled context, so the daemon survived SIGTERM and only
 			// SIGKILL could stop it.
 			ctx := commandCtx(cmd)
+			// tickLimiter lives for the daemon's whole lifetime (unlike
+			// runObserverOnceQuiet's subprocess, which deliberately gets
+			// a fresh, unpersisted claudecli.Limiter every tick for
+			// crash isolation — see its doc comment). This is the one
+			// instance that actually enforces the advertised N/hour
+			// self-DoS ceiling across ticks. MaxCallsPerSession is
+			// disabled (0): "session" there means "one manual run-once
+			// invocation", not "daemon lifetime", so the per-session cap
+			// does not apply here.
+			tickLimiter := claudecli.NewLimiter()
+			tickLimiter.MaxCallsPerSession = 0
 			for {
-				appendDaemonLog(logPath, fmt.Sprintf("tick: observer run-once (interval %ds)", interval))
-				// run the extraction pass in-process by invoking the
-				// run-once command path. We shell out to keep the
-				// limiter / provider lifecycle identical to a manual
-				// run; CommandContext lets a mid-pass SIGTERM interrupt
-				// the claude --print call instead of waiting it out.
-				runObserverOnceQuiet(ctx, ident.Root)
+				tickOnce(ctx, logPath, interval, ident.Root, tickLimiter, runObserverOnceQuiet)
 				select {
 				case <-ctx.Done():
 					appendDaemonLog(logPath, "shutdown: context cancelled, daemon exiting")
@@ -240,6 +247,26 @@ func newObserverRunDaemonCmd() *cobra.Command {
 	cmd.Flags().StringVar(&root, "root", "", "monorepo root")
 	cmd.Flags().IntVar(&interval, "interval", 600, "seconds between passes")
 	return cmd
+}
+
+// tickOnce runs (or skips) a single daemon tick against the shared,
+// daemon-lifetime limiter. Extracted from the daemon loop so the
+// hourly-cap accumulation can be tested by calling it directly,
+// without waiting on real --interval sleeps. When the limiter's
+// hourly cap (or circuit breaker) rejects the tick, it is logged and
+// skipped rather than firing runTick.
+func tickOnce(ctx context.Context, logPath string, interval int, root string, limiter *claudecli.Limiter, runTick func(context.Context, string)) {
+	if err := limiter.Acquire(); err != nil {
+		appendDaemonLog(logPath, fmt.Sprintf("tick skipped: %v", err))
+		return
+	}
+	appendDaemonLog(logPath, fmt.Sprintf("tick: observer run-once (interval %ds)", interval))
+	// run the extraction pass in-process by invoking the run-once
+	// command path. We shell out to keep the limiter / provider
+	// lifecycle identical to a manual run; CommandContext lets a
+	// mid-pass SIGTERM interrupt the claude --print call instead of
+	// waiting it out.
+	runTick(ctx, root)
 }
 
 func resolveObserverProject(root string) (homunculus.ProjectIdentity, homunculus.Layout, error) {
