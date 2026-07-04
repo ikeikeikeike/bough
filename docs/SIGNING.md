@@ -1,11 +1,19 @@
-# Plugin signing (v0.6.0)
+# Plugin signing (design, not yet wired up)
 
 bough plugins are third-party code: any binary on `PATH` named
 `bough-plugin-<kind>` is a subprocess the host spawns with the
-operator's file-system + network capabilities. The v0.6 signing
-surface is the supply-chain control point operators use to verify
-that a plugin came from the source they trust before letting it
-run.
+operator's file-system + network capabilities — today that means
+the four bundled engine plugins (mysql / postgres / redis /
+elasticsearch). Signing is meant to be the supply-chain control
+point operators use to verify that a plugin came from the source
+they trust before letting it run.
+
+> **Status: designed, not enforced.** `internal/pluginsign` implements
+> the cosign / minisign verification calls below and the config
+> schema parses, but no command currently calls it — `bough plugins`
+> only has a `list` subcommand today (no `verify`, no spawn-time
+> enforce gate). Treat everything past this notice as the intended
+> design, not current behaviour.
 
 ## Schemes (round 4 priority A9)
 
@@ -25,25 +33,22 @@ authors should mention which scheme they ship in their own
 ```yaml
 instinct:
   plugin_security:
-    require_signed: false              # v0.6 default; v0.7 considers true
-    accepted_signature_schemes:        # both supported by default
+    require_signed: false              # parses; nothing reads it yet
+    accepted_signature_schemes:        # both supported by the library
       - cosign
       - minisign
-    untrusted_warning: true            # v0.5 behaviour, unchanged
+    untrusted_warning: true
     allowlist: []                      # bin-name → bypass the signing notice
 ```
 
-`require_signed: false` keeps the gate disabled. The flag itself
-is accepted by the host config; the **spawn-time enforce gate** —
-refuse-to-spawn when verification fails — was scaffolding in v0.6.0
-and went live in v0.6.1 for the memory plugin discovery paths
-(`bough memory ...` / `bough instinct ...` / the SQLite reference-
-fallback). Engine plugins (`bough create` / mysql / postgres /
-redis / elasticsearch) join the gate in v0.7 alongside the
-Bootstrap layer.
+This schema lives under the (otherwise unrelated, retired) `instinct:`
+root section for historical reasons — see the [attic](attic/) for
+where that section came from. Setting `require_signed: true` here
+has no effect today: no command path calls `internal/pluginsign` to
+enforce it against `bough create`'s engine plugin spawns.
 
-When `require_signed: true` is set, every memory plugin spawn runs
-through `internal/cli.enforceSigning` which:
+The intended design, once wired up: every engine plugin spawn would
+run through an enforce gate that:
 
 1. **Skips verification** when the binary name is on
    `plugin_security.allowlist` (= the operator's "I vendored this
@@ -51,60 +56,33 @@ through `internal/cli.enforceSigning` which:
 2. **Tries each scheme** in `accepted_signature_schemes` in order
    (defaults to `[cosign, minisign]`). The first success wins.
 3. **Fails open with a stderr NOTICE** when the verifier binary is
-   missing on PATH. v0.6.1 picks this default so flipping the flag
-   without installing cosign / minisign does not lock you out of
-   your own host; v0.7 adds a `fail_close_on_missing_verifier` flag
-   for enterprise deploys that need a hard gate.
+   missing on PATH, so flipping the flag without installing cosign /
+   minisign does not lock you out of your own host. A
+   `fail_close_on_missing_verifier` flag for enterprise deploys that
+   need a hard gate is part of the design but unimplemented.
 4. **Refuses to spawn** when at least one verifier ran and reported
    a non-verified result. The error mentions which schemes were
    tried and how to recover (= add to allowlist or re-sign).
 
-Wiring cosign keyless verification needs the OIDC identity + issuer
-the GoReleaser pipeline signed under. The host reads them from
-environment variables so an operator can rotate identities without
-touching `.bough.yaml`:
+Cosign keyless verification needs the OIDC identity + issuer the
+GoReleaser pipeline signed under (bough's own release identity:
+`https://github.com/ikeikeikeike/bough/.github/workflows/release.yml@<ref>`,
+issuer `https://token.actions.githubusercontent.com`). `internal
+/pluginsign.Request` carries `CertIdentity` / `CertOIDCIssuer` /
+`CertPath` fields for this — there is no env-var or config-file
+loader for them yet since nothing constructs a `Request` outside
+`internal/pluginsign`'s own tests.
+
+## Current CLI
 
 ```sh
-# Verify bough's own first-party plugins against the GoReleaser
-# keyless flow's GitHub Actions OIDC identity.
-export BOUGH_SIGNING_CERT_IDENTITY_REGEXP='https://github.com/ikeikeikeike/bough/\.github/workflows/release\.yml@.*'
-export BOUGH_SIGNING_CERT_OIDC_ISSUER='https://token.actions.githubusercontent.com'
-# minisign-signed third-party plugins:
-export BOUGH_SIGNING_PUBKEY=~/.config/bough/minisign.pub
+bough plugins list
 ```
 
-## Verify CLI
-
-```sh
-# cosign verify against the GoReleaser bundle alongside the binary.
-bough plugins verify /usr/local/bin/bough-plugin-memory-mem0
-
-# minisign verify with an explicit public key (signer-provided).
-bough plugins verify /usr/local/bin/bough-plugin-memory-foo \
-    --scheme minisign --pubkey ~/.config/bough/minisign.pub
-```
-
-A `✓ cosign verified ...` line means the binary is good. A
-non-zero exit means verification failed and the operator should
-investigate before enabling enforcement.
-
-## Fail-open today, strict mode tomorrow
-
-v0.6.0 prints a `[NOTICE]` and continues when the verifier binary
-is missing — an operator who set `require_signed: true` without
-installing `cosign` or `minisign` sees what is missing rather than
-a hard refusal. v0.6.x adds a strict mode (`fail_close_on_missing
-_verifier: true`) for enterprise deploys that need an unforgeable
-gate.
-
-## Timeline (round 4 priority A11)
-
-| Version | Behaviour |
-|---|---|
-| **v0.6.0** | `require_signed: false`; `bough plugins verify` available; opt-in enforcement when the operator flips the flag and installs cosign / minisign. |
-| **v0.6.x** | Stronger warning for unsigned third-party plugins; strict mode for the enterprise enforcement story. |
-| **v0.7** | Official bough plugins ship signed; `require_signed: true` recommended for production. Third-party plugins still optional per config. |
-| **v0.8+** | Enterprise profile defaults `require_signed: true`; community plugin authors expected to ship a signature alongside every binary. |
+lists every `bough-plugin-<kind>` binary bough finds on `PATH`.
+There is no `bough plugins verify` subcommand today — verifying a
+binary means invoking `cosign verify-blob` / `minisign -V` directly
+(see the table above), not through bough.
 
 ## Why two schemes
 
