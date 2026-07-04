@@ -351,7 +351,7 @@ func newHookHandleCmd() *cobra.Command {
 			case string(hooks.EventUserPromptSubmit):
 				dispatchInjectContext(c)
 			case string(hooks.EventSessionEnd):
-				_ = runSessionEnd(c.OutOrStdout(), "", "", sessionEndDefaultWindow)
+				_ = runSessionEnd(c.OutOrStdout(), "", extractSessionID(payload), sessionEndDefaultWindow)
 				dispatchEvolveClaudeMD(c)
 			case string(hooks.EventPreCompact):
 				_ = runPreserveInstincts(c.OutOrStdout(), "")
@@ -458,26 +458,10 @@ func rotateIfLarge(obsPath string) {
 // corpus must not break the operator's prompt); the block is only
 // emitted when there is something worth injecting.
 func dispatchInjectContext(c *cobra.Command) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return
-	}
-	// Resolve from the monorepo root so this injector reads the SAME project
-	// the writer/observer/session-end pool into (DetectIdentity(
-	// resolveMonorepoRoot(cwd))). On a raw cwd in a sub-repo / worktree the id
-	// would diverge from the writer's and inject nothing — see inject.go.
-	ident, err := homunculus.DetectIdentity(resolveMonorepoRoot(cwd))
-	if err != nil {
-		return
-	}
-	layout := homunculus.NewLayout()
-	project, _ := homunculus.ScanInstincts(layout.InstinctsDir(ident.ID))
-	global, _ := homunculus.ScanInstincts(layout.GlobalInstinctsDir())
-	block, n := inject.Build(project, global, inject.Options{})
-	if n == 0 {
-		return
-	}
-	fmt.Fprint(c.OutOrStdout(), block)
+	// runInjectContext (internal/cli/inject.go) is shared with `bough
+	// inject-context`'s RunE so the hook path and the manual preview
+	// command cannot silently diverge.
+	_ = runInjectContext(c.OutOrStdout(), "", inject.Options{})
 }
 
 // dispatchEvolveClaudeMD runs the CLAUDE.md proposer in write mode on
@@ -563,6 +547,24 @@ func buildMatchContext(event string, payload []byte) qualitygate.MatchContext {
 	}
 	mc.Command = ti.Command
 	return mc
+}
+
+// extractSessionID pulls the top-level session_id field out of a raw
+// Claude Code hook payload, mirroring buildMatchContext's probe-decode
+// pattern. Returns "" on any decode failure or a payload that omits
+// the field; runSessionEnd already treats "" as an acceptable (if
+// unidentifiable) session id.
+func extractSessionID(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	var probe struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(payload, &probe); err != nil {
+		return ""
+	}
+	return probe.SessionID
 }
 
 func convertGates(cfgs []config.QualityGateCfg) []qualitygate.Gate {

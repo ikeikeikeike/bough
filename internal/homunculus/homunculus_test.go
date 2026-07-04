@@ -11,11 +11,11 @@ import (
 
 func TestStripCredentials(t *testing.T) {
 	cases := map[string]string{
-		"https://github.com/foo/bar.git":          "https://github.com/foo/bar.git",
-		"https://ghp_XYZ@github.com/foo/bar.git":  "https://github.com/foo/bar.git",
-		"https://user:tok@gitlab.com/foo/bar":     "https://gitlab.com/foo/bar",
-		"git@github.com:foo/bar.git":              "git@github.com:foo/bar.git",
-		"":                                        "",
+		"https://github.com/foo/bar.git":         "https://github.com/foo/bar.git",
+		"https://ghp_XYZ@github.com/foo/bar.git": "https://github.com/foo/bar.git",
+		"https://user:tok@gitlab.com/foo/bar":    "https://gitlab.com/foo/bar",
+		"git@github.com:foo/bar.git":             "git@github.com:foo/bar.git",
+		"":                                       "",
 	}
 	for in, want := range cases {
 		if got := stripCredentials(in); got != want {
@@ -134,6 +134,72 @@ func TestRegistry_UpsertPreservesCreatedAt(t *testing.T) {
 	}
 	if rows["x"].Name != "demo-renamed" {
 		t.Errorf("name = %q, want demo-renamed", rows["x"].Name)
+	}
+}
+
+// TestRegistry_WriteUpsertManyMatchesSequentialWriteUpsert is the
+// regression guard for the wave-4 review finding: `bough ecc import
+// --apply` called WriteUpsert once per project, an O(N) sequence of
+// full projects.json read+write cycles for an N-project corpus.
+// WriteUpsertMany must produce the identical on-disk result (same
+// CreatedAt-preservation, same LastSeen stamping) as N sequential
+// WriteUpsert calls, in one read-modify-write cycle.
+func TestRegistry_WriteUpsertManyMatchesSequentialWriteUpsert(t *testing.T) {
+	root := t.TempDir()
+	reg := NewRegistryRW(FromRoot(root))
+	now := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
+	reg.SetClock(func() time.Time { return now })
+
+	if err := reg.WriteUpsertMany([]Project{
+		{ID: "a", Name: "proj-a", Root: "/a"},
+		{ID: "b", Name: "proj-b", Root: "/b"},
+	}); err != nil {
+		t.Fatalf("WriteUpsertMany: %v", err)
+	}
+	rows, err := reg.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(rows))
+	}
+	for _, id := range []string{"a", "b"} {
+		if rows[id].CreatedAt.IsZero() {
+			t.Errorf("%s: CreatedAt was not stamped", id)
+		}
+		if !rows[id].LastSeen.Equal(now) {
+			t.Errorf("%s: LastSeen = %s, want %s", id, rows[id].LastSeen, now)
+		}
+	}
+
+	// A second batch re-upserting "a" must preserve its original
+	// CreatedAt, same as WriteUpsert's single-project contract.
+	later := now.Add(time.Hour)
+	reg.SetClock(func() time.Time { return later })
+	if err := reg.WriteUpsertMany([]Project{
+		{ID: "a", Name: "proj-a-renamed", Root: "/a"},
+	}); err != nil {
+		t.Fatalf("WriteUpsertMany (2nd batch): %v", err)
+	}
+	rows, _ = reg.Read()
+	if !rows["a"].CreatedAt.Equal(now) {
+		t.Errorf("a: CreatedAt = %s, want preserved %s", rows["a"].CreatedAt, now)
+	}
+	if rows["a"].Name != "proj-a-renamed" {
+		t.Errorf("a: name = %q, want proj-a-renamed", rows["a"].Name)
+	}
+}
+
+func TestRegistry_WriteUpsertManyRejectsEmptyID(t *testing.T) {
+	root := t.TempDir()
+	reg := NewRegistryRW(FromRoot(root))
+	err := reg.WriteUpsertMany([]Project{{ID: "ok", Name: "x"}, {ID: "", Name: "y"}})
+	if err == nil {
+		t.Fatal("expected an error for an empty ID in the batch")
+	}
+	// Reject-before-write: no partial batch should land on disk.
+	if _, statErr := os.Stat(FromRoot(root).ProjectsJSON()); statErr == nil {
+		t.Errorf("projects.json was written despite a rejected batch")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/ikeikeikeike/bough/internal/homunculus"
@@ -69,13 +70,19 @@ func PreserveInstincts(layout homunculus.Layout, projectID string, now time.Time
 	return path, content, nil
 }
 
-// firstActionLine mirrors the inject/evolve helper so session has no
-// cross-package import for one small function.
+// firstActionLine mirrors internal/inject/inject.go's helper of the
+// same name so session has no cross-package import for one small
+// function. Matches "## Action" case-insensitively like every other
+// implementation of this helper in the codebase (inject.go,
+// evolve/judge.go, cli/claudemd.go) — a case-sensitive match here was
+// the one exception, silently falling through to the wrong line for a
+// differently-cased heading.
 func firstActionLine(body string) string {
-	lines := splitLines(body)
+	lines := strings.Split(body, "\n")
 	inAction := false
-	for _, t := range lines {
-		if t == "## Action" {
+	for _, ln := range lines {
+		t := strings.TrimSpace(ln)
+		if strings.EqualFold(t, "## Action") {
 			inAction = true
 			continue
 		}
@@ -83,47 +90,18 @@ func firstActionLine(body string) string {
 			if t == "" {
 				continue
 			}
-			if len(t) >= 3 && t[:3] == "## " {
+			if strings.HasPrefix(t, "## ") {
 				break
 			}
 			return t
 		}
 	}
-	for _, t := range lines {
-		if t == "" || (len(t) >= 1 && t[0] == '#') {
+	for _, ln := range lines {
+		t := strings.TrimSpace(ln)
+		if t == "" || strings.HasPrefix(t, "#") {
 			continue
 		}
 		return t
 	}
 	return "(no action)"
-}
-
-func splitLines(s string) []string {
-	out := []string{}
-	cur := ""
-	for _, r := range s {
-		if r == '\n' {
-			out = append(out, trimSpace(cur))
-			cur = ""
-			continue
-		}
-		if r == '\r' {
-			continue
-		}
-		cur += string(r)
-	}
-	out = append(out, trimSpace(cur))
-	return out
-}
-
-func trimSpace(s string) string {
-	start := 0
-	end := len(s)
-	for start < end && (s[start] == ' ' || s[start] == '\t') {
-		start++
-	}
-	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
-		end--
-	}
-	return s[start:end]
 }

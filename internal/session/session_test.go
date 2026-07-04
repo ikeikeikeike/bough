@@ -286,6 +286,21 @@ func TestPreserveInstincts(t *testing.T) {
 	}
 }
 
+// TestFirstActionLine_CaseInsensitiveHeading is the regression guard
+// for the wave-4 review finding: firstActionLine matched "## Action"
+// with a case-sensitive ==, unlike every other implementation of this
+// helper (inject.go, evolve/judge.go, cli/claudemd.go), so a
+// differently-cased heading (e.g. hand-edited or migrated in via
+// `bough ecc import`) fell through to the fallback loop and returned
+// the wrong line (typically the Trigger description) instead of the
+// real action.
+func TestFirstActionLine_CaseInsensitiveHeading(t *testing.T) {
+	got := firstActionLine("## action\nretry the request")
+	if got != "retry the request" {
+		t.Errorf("firstActionLine with lowercase heading = %q, want %q", got, "retry the request")
+	}
+}
+
 func TestSummary(t *testing.T) {
 	res := EvalResult{SessionID: "s1", Observations: 3, Reinforced: 1, Unchanged: 2}
 	obs := []observe.Observation{
@@ -297,5 +312,32 @@ func TestSummary(t *testing.T) {
 	}
 	if !strings.Contains(out, "PostToolUse") {
 		t.Errorf("summary missing event breakdown: %s", out)
+	}
+}
+
+// TestAddTokens_NonASCIIProducesTokens is the regression guard for the
+// wave-4 review finding: addTokens only recognized ASCII a-z/0-9, so
+// instinctOverlap always evaluated to 0 for Japanese (or any
+// non-Latin script) instinct/observation text, permanently disabling
+// confidence reinforcement/demotion for it.
+func TestAddTokens_NonASCIIProducesTokens(t *testing.T) {
+	set := map[string]struct{}{}
+	addTokens(set, "データベース接続")
+	if len(set) == 0 {
+		t.Fatalf("addTokens produced no tokens for Japanese text: %q", "データベース接続")
+	}
+}
+
+func TestInstinctOverlap_NonASCIITriggerMatchesObservation(t *testing.T) {
+	// Quoted/spaced so the shared Japanese substring tokenizes as its
+	// own token on both sides, the same shape a real JSON tool_input
+	// or a prompt sentence produces.
+	obsTokens := map[string]struct{}{}
+	addTokens(obsTokens, `retry "データベース接続" failed`)
+
+	in := &homunculus.Instinct{Trigger: `see "データベース接続" error`}
+	overlap := instinctOverlap(in, obsTokens)
+	if overlap <= 0 {
+		t.Errorf("instinctOverlap = %v for a Japanese trigger sharing a token with the observation, want > 0", overlap)
 	}
 }
