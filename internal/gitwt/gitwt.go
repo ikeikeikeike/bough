@@ -19,6 +19,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/ikeikeikeike/bough/internal/fsutil"
 )
 
 // Worktree is one entry of `git worktree list --porcelain`.
@@ -194,7 +196,7 @@ func (r *Runner) Clone(ctx context.Context, source, dst, baseDir string) error {
 	args := []string{"clone"}
 	src := source
 	if !isRemoteURL(source) {
-		src = expandHome(source)
+		src = fsutil.ExpandHome(source)
 		if !filepath.IsAbs(src) {
 			src = filepath.Join(baseDir, src)
 		}
@@ -223,16 +225,6 @@ func isRemoteURL(source string) bool {
 	colon := strings.Index(source, ":")
 	slash := strings.Index(source, "/")
 	return colon >= 0 && (slash < 0 || colon < slash)
-}
-
-// expandHome resolves a leading `~` / `~/` to the user's home directory.
-func expandHome(p string) string {
-	if p == "~" || strings.HasPrefix(p, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, strings.TrimPrefix(p[1:], "/"))
-		}
-	}
-	return p
 }
 
 // Remove tears down a worktree via `git worktree remove`. When that
