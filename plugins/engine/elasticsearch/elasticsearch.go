@@ -30,24 +30,23 @@
 package elasticsearch
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"embed"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
 	api "github.com/ikeikeikeike/bough/plugins/engine/api"
+
+	"github.com/ikeikeikeike/bough/pkg/procutil"
 )
 
 //go:embed nix
@@ -65,12 +64,22 @@ type Provider struct {
 func New() *Provider { return &Provider{} }
 
 const (
-	defaultPortLow      = 56000
-	defaultPortHigh     = 58999
-	flakeDirRelative    = ".local/bough-elasticsearch-flake"
-	startupLogRelative  = ".local/bough-elasticsearch-startup.log"
-	defaultGracefulSecs = 15 // ES shutdown is slower than mysql / redis
+	defaultPortLow     = 56000
+	defaultPortHigh    = 58999
+	flakeDirRelative   = ".local/bough-elasticsearch-flake"
+	startupLogRelative = ".local/bough-elasticsearch-startup.log"
+	// ES translog flush + Lucene commit can run long, so the graceful
+	// shutdown budget matches the docker backend's dockerStopTimeoutSec
+	// (docker.go) rather than the shorter 10s mysql / redis use.
+	defaultGracefulSecs = 60
 )
+
+// heapSizePattern matches a JVM heap size like "512m", "1g", "2048k"
+// (an integer with an optional k/m/g suffix, case-insensitive). Anything
+// else is rejected so a stray engines[].extras.heap value cannot break
+// out of the ES_JAVA_OPTS="-Xms${heap} -Xmx${heap}" shell interpolation
+// in the nix flake (nix/flake.nix).
+var heapSizePattern = regexp.MustCompile(`^\d+[kmgKMG]?$`)
 
 // Up extracts the embedded flake and launches Elasticsearch via
 // process-compose, detached so the WorktreeCreate hook returns before
@@ -90,7 +99,7 @@ func (p *Provider) Up(ctx context.Context, req *api.UpReq) error {
 		return fmt.Errorf("elasticsearch: Up: invalid port %d (Ports=%v)", port, req.Ports)
 	}
 	flakeDir := filepath.Join(req.WorktreeRoot, flakeDirRelative)
-	if err := deployFlake(flakeDir); err != nil {
+	if err := procutil.DeployFlake(nixAssets, "nix", flakeDir); err != nil {
 		return fmt.Errorf("elasticsearch: deploy flake: %w", err)
 	}
 	if req.Datadir != "" {
@@ -110,6 +119,10 @@ func (p *Provider) Up(ctx context.Context, req *api.UpReq) error {
 	heap := req.Extras["heap"]
 	if heap == "" {
 		heap = "1g"
+	}
+	if !heapSizePattern.MatchString(heap) {
+		return fmt.Errorf("elasticsearch: invalid heap %q from extras (want e.g. 512m, 1g); "+
+			"a stray value must not reach the ES_JAVA_OPTS shell interpolation in the nix flake", heap)
 	}
 	// Detached via Setsid so the process outlives this call — but
 	// exec.CommandContext arms a kill-on-ctx-done watchdog regardless
@@ -220,14 +233,14 @@ func (p *Provider) Down(ctx context.Context, req *api.DownReq) error {
 		_ = cmd.Run()
 		cancel()
 	}
-	if pid := lsofListener(port); pid > 0 {
+	if pid := procutil.LsofListener(port); pid > 0 {
 		_ = syscall.Kill(pid, syscall.SIGTERM)
 		time.Sleep(2 * time.Second) // ES needs a moment to flush translogs
-		if again := lsofListener(port); again == pid {
+		if again := procutil.LsofListener(port); again == pid {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	}
-	killStrayProcessCompose(req.WorktreeRoot)
+	procutil.KillStrayProcessCompose(req.WorktreeRoot)
 	return nil
 }
 
@@ -278,78 +291,4 @@ func (p *Provider) flakeRef(extracted string) string {
 		return p.FlakeRefOverride
 	}
 	return "path:" + extracted
-}
-
-func deployFlake(dst string) error {
-	if err := os.MkdirAll(dst, 0o755); err != nil {
-		return err
-	}
-	return fs.WalkDir(nixAssets, "nix", func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, _ := filepath.Rel("nix", p)
-		if rel == "" || rel == "." {
-			return nil
-		}
-		target := filepath.Join(dst, rel)
-		if d.IsDir() {
-			return os.MkdirAll(target, 0o755)
-		}
-		data, err := fs.ReadFile(nixAssets, p)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(target, data, 0o644)
-	})
-}
-
-func lsofListener(port int) int {
-	out, err := exec.Command("lsof", fmt.Sprintf("-tiTCP:%d", port), "-sTCP:LISTEN").Output()
-	if err != nil {
-		return 0
-	}
-	s := strings.TrimSpace(string(out))
-	if s == "" {
-		return 0
-	}
-	if i := strings.IndexAny(s, "\n\t "); i >= 0 {
-		s = s[:i]
-	}
-	pid, err := strconv.Atoi(s)
-	if err != nil {
-		return 0
-	}
-	return pid
-}
-
-func killStrayProcessCompose(cwdPrefix string) {
-	out, err := exec.Command("pgrep", "-f", "process-compose").Output()
-	if err != nil {
-		return
-	}
-	for _, ps := range strings.Fields(string(out)) {
-		pid, err := strconv.Atoi(ps)
-		if err != nil {
-			continue
-		}
-		cwdOut, err := exec.Command("lsof", "-p", ps).Output()
-		if err != nil {
-			continue
-		}
-		scanner := bufio.NewScanner(bytes.NewReader(cwdOut))
-		for scanner.Scan() {
-			fields := strings.Fields(scanner.Text())
-			if len(fields) >= 9 && fields[3] == "cwd" {
-				// Exact match or a real path-separator boundary — a bare
-				// HasPrefix would also match ".../auba-api-1394" against
-				// cwdPrefix ".../auba-api-139", SIGTERMing a sibling
-				// worktree's still-running supervisor.
-				if cwd := fields[len(fields)-1]; cwd == cwdPrefix || strings.HasPrefix(cwd, cwdPrefix+"/") {
-					_ = syscall.Kill(pid, syscall.SIGTERM)
-				}
-				break
-			}
-		}
-	}
 }

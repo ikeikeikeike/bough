@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	api "github.com/ikeikeikeike/bough/plugins/engine/api"
+
+	"github.com/ikeikeikeike/bough/pkg/procutil"
 )
 
 func TestProvider_PortRangeDefault(t *testing.T) {
@@ -59,11 +61,28 @@ func TestProvider_EnvVars(t *testing.T) {
 	}
 }
 
+func TestHeapSizePattern(t *testing.T) {
+	valid := []string{"1g", "512m", "2048k", "1G", "256M", "1024", "10g"}
+	for _, v := range valid {
+		if !heapSizePattern.MatchString(v) {
+			t.Errorf("heapSizePattern rejected a valid heap %q", v)
+		}
+	}
+	// Reject anything a stray extras.heap could smuggle into the
+	// ES_JAVA_OPTS="-Xms${heap}..." shell interpolation (issue #82 item 6).
+	invalid := []string{"", "1gb", "1.5g", "-1g", "abc", "1 g", `1g"`, "$(whoami)", "1g; rm -rf /"}
+	for _, v := range invalid {
+		if heapSizePattern.MatchString(v) {
+			t.Errorf("heapSizePattern accepted an invalid/injectable heap %q", v)
+		}
+	}
+}
+
 func TestDeployFlake_extractsEmbeddedAssets(t *testing.T) {
 	tmp := t.TempDir()
 	dst := filepath.Join(tmp, "extracted")
-	if err := deployFlake(dst); err != nil {
-		t.Fatalf("deployFlake: %v", err)
+	if err := procutil.DeployFlake(nixAssets, "nix", dst); err != nil {
+		t.Fatalf("DeployFlake: %v", err)
 	}
 	flakePath := filepath.Join(dst, "flake.nix")
 	if _, err := os.Stat(flakePath); err != nil {
