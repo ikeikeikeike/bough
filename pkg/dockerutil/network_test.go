@@ -3,7 +3,6 @@
 package dockerutil
 
 import (
-	"fmt"
 	"net"
 	"testing"
 )
@@ -28,7 +27,13 @@ func TestIsPortFree_FreePort(t *testing.T) {
 
 // TestIsPortFree_OccupiedPort opens a listener on a kernel-assigned
 // port, leaves it open, and verifies IsPortFree reports the port as
-// taken. This is the dockerUp pre-flight contract.
+// taken. This is the dockerUp pre-flight contract, and it doubles as
+// the dual-stack regression guard: IsPortFree binds "127.0.0.1:<port>"
+// specifically, not "localhost:<port>" (which can resolve to ::1 on a
+// dual-stack host and miss an IPv4-only conflict like the one this
+// listener creates) — a refactor introducing that regression would
+// make this test start failing since IsPortFree would then wrongly
+// report the occupied port as free.
 func TestIsPortFree_OccupiedPort(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -39,17 +44,5 @@ func TestIsPortFree_OccupiedPort(t *testing.T) {
 
 	if IsPortFree(port) {
 		t.Errorf("IsPortFree(%d) = true while listener is open, want false", port)
-	}
-}
-
-// Helper to assert the loopback address format that IsPortFree uses.
-// Pinned so a refactor that switches to "localhost" (which can resolve
-// to ::1 on dual-stack hosts and miss IPv4-only port conflicts) fails
-// loudly.
-func TestIsPortFree_BindString(t *testing.T) {
-	want := "127.0.0.1:1234"
-	got := fmt.Sprintf("127.0.0.1:%d", 1234)
-	if got != want {
-		t.Errorf("loopback bind string drift: got %q want %q", got, want)
 	}
 }

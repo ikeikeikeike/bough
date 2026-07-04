@@ -77,16 +77,38 @@ func dockerContainerName(port int) string {
 	return fmt.Sprintf("bough-mysql-%d", port)
 }
 
+// buildDockerEnv assembles the container Env slice. "database" and
+// "allow_empty_password" are reserved: both already have a hardcoded
+// MYSQL_* entry below, so an extras key of either name is dropped
+// rather than appended as a second, conflicting entry for the same
+// env var (the official mysql image's entrypoint script's behavior on
+// a duplicate env name is undefined by this code either way).
+func buildDockerEnv(initDB string, extras map[string]string) []string {
+	env := []string{
+		"MYSQL_ALLOW_EMPTY_PASSWORD=yes",
+		"MYSQL_DATABASE=" + initDB,
+	}
+	// Per-engine extras lift verbatim from YAML `engines[].extras` so
+	// projects can pin character_set_server, default_time_zone, etc.
+	// without a plugin change.
+	for k, v := range extras {
+		switch {
+		case strings.HasPrefix(k, "docker."),
+			k == "version", k == "backend",
+			k == "database", k == "allow_empty_password":
+			continue
+		}
+		env = append(env, "MYSQL_"+strings.ToUpper(k)+"="+v)
+	}
+	return env
+}
+
 // usingDockerBackend is the cheap self-detection used by Down /
 // ReadyCheck when neither RPC carries an explicit backend hint. A
 // container named `bough-mysql-<port>` is uniquely owned by this
 // plugin (the bough port allocator guarantees worktree-scoped
-// uniqueness), so finding one is sufficient evidence that Up went
-// via the Docker path.
-//
-// Returns false on any Docker error so the caller cleanly falls
-// through to the nix path — that keeps `bough remove` working on
-// machines where Docker was uninstalled between create and remove.
+// uniqueness). See dockerutil.IsBackendRunning for the shared
+// stale-container-detection logic all four engine plugins share.
 func usingDockerBackend(ctx context.Context, port int) bool {
 	if port <= 0 {
 		return false
@@ -96,23 +118,7 @@ func usingDockerBackend(ctx context.Context, port int) bool {
 		return false
 	}
 	defer func() { _ = cli.Close() }()
-	id, err := dockerutil.LookupByName(ctx, cli, dockerContainerName(port))
-	if err != nil || id == "" {
-		return false
-	}
-	// A stopped/leftover container must not count as "docker backend
-	// in use" — LookupByName lists with All:true, so a stale, already-
-	// stopped container from a prior run would otherwise make Down()
-	// take the docker path (stop+remove the irrelevant container,
-	// report success) while the real engine for this worktree/port —
-	// possibly nix-backed — keeps running untouched, and the
-	// subsequent Cleanup() would then rm -rf its datadir out from
-	// under it.
-	info, err := cli.ContainerInspect(ctx, id)
-	if err != nil || info.State == nil {
-		return false
-	}
-	return info.State.Running
+	return dockerutil.IsBackendRunning(ctx, cli, dockerContainerName(port))
 }
 
 func (p *Provider) dockerUp(ctx context.Context, req *api.UpReq) error {
@@ -158,19 +164,7 @@ func (p *Provider) dockerUp(ctx context.Context, req *api.UpReq) error {
 	if initDB == "" {
 		initDB = "bough"
 	}
-	env := []string{
-		"MYSQL_ALLOW_EMPTY_PASSWORD=yes",
-		"MYSQL_DATABASE=" + initDB,
-	}
-	// Per-engine extras lift verbatim from YAML `engines[].extras` so
-	// projects can pin character_set_server, default_time_zone, etc.
-	// without a plugin change.
-	for k, v := range req.Extras {
-		if strings.HasPrefix(k, "docker.") || k == "version" || k == "backend" {
-			continue
-		}
-		env = append(env, "MYSQL_"+strings.ToUpper(k)+"="+v)
-	}
+	env := buildDockerEnv(initDB, req.Extras)
 
 	hostPort := fmt.Sprintf("%d", port)
 	portBindings := nat.PortMap{
@@ -304,7 +298,3 @@ func (p *Provider) dockerDown(ctx context.Context, req *api.DownReq) error {
 	}
 	return cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true, RemoveVolumes: false})
 }
-
-// dockerCleanup mirrors the nix path's Cleanup — the bind-mounted
-// datadir is host-managed regardless of which backend wrote into it,
-// and Down already removed the container itself.

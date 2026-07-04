@@ -50,6 +50,33 @@ func TestConfigValidate_acceptsAubaLikeFixture(t *testing.T) {
 	}
 }
 
+// TestConfigValidate_noArgsSurfacesRealLoadError is the regression
+// guard for the wave-3 review finding (independently reported for
+// merged PR #1 and again for PR #18): when no path argument is given
+// and loadConfigAndRoot fails for a real reason (here, a malformed
+// YAML in the default-discovery cwd), the command used to discard
+// that error and always report the generic, actively-wrong "path
+// argument missing" message instead — even though the path DID
+// resolve; only loading it failed.
+func TestConfigValidate_noArgsSurfacesRealLoadError(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile(".bough.yaml", []byte("schema_version: 1\n"), 0o644); err != nil {
+		t.Fatalf("seed bad yaml: %v", err)
+	}
+	root := NewRootCmd("0.0.0-test")
+	buf := &bytes.Buffer{}
+	root.SetOut(buf)
+	root.SetErr(buf)
+	root.SetArgs([]string{"config", "validate"})
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected error for malformed .bough.yaml, got nil")
+	}
+	if strings.Contains(err.Error(), "path argument missing") {
+		t.Errorf("error misreported as \"path missing\" instead of the real load failure: %v", err)
+	}
+}
+
 func TestConfigValidate_rejectsBadYAML(t *testing.T) {
 	bad := filepath.Join(t.TempDir(), "bad.yaml")
 	if err := os.WriteFile(bad, []byte("schema_version: 1\n"), 0o644); err != nil {

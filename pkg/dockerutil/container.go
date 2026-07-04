@@ -51,7 +51,46 @@ func RemoveIfExists(ctx context.Context, cli *client.Client, name string) error 
 	if id == "" {
 		return nil
 	}
-	return cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true, RemoveVolumes: false})
+	// Mirrors UpOrReuse's tolerance: the container LookupByName just
+	// found can vanish before this call reaches the daemon (a
+	// concurrent retry, a parallel remove, a manual `docker rm`) —
+	// that race lands on the same "nothing there" state the id == ""
+	// branch above already treats as success.
+	if err := cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true, RemoveVolumes: false}); err != nil && !errdefs.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+// IsBackendRunning is the cheap self-detection every engine plugin's
+// Down/ReadyCheck uses when neither RPC carries an explicit backend
+// hint: a container named `name` is uniquely owned by one engine
+// instance (the bough port allocator guarantees worktree-scoped
+// uniqueness), so an actually-running one is sufficient evidence that
+// Up went via the Docker path.
+//
+// A stopped/leftover container must not count as "docker backend in
+// use" — LookupByName lists with All:true, so a stale, already-
+// stopped container from a prior run would otherwise make the caller
+// take the docker teardown path (stop+remove the irrelevant
+// container, report success) while the real engine for this
+// worktree/port — possibly nix-backed — keeps running untouched, and
+// a subsequent Cleanup() would then rm -rf its datadir out from under
+// it.
+//
+// Returns false on any Docker error so the caller cleanly falls
+// through to the nix path — that keeps `bough remove` working on
+// machines where Docker was uninstalled between create and remove.
+func IsBackendRunning(ctx context.Context, cli *client.Client, name string) bool {
+	id, err := LookupByName(ctx, cli, name)
+	if err != nil || id == "" {
+		return false
+	}
+	info, err := cli.ContainerInspect(ctx, id)
+	if err != nil || info.State == nil {
+		return false
+	}
+	return info.State.Running
 }
 
 // UpOrReuse implements the --resume idempotency contract for Up.
