@@ -107,12 +107,14 @@ bough ships as 5 binaries (`bough` + 4 `bough-plugin-*`). Pick one:
 
 ```bash
 # 1. GitHub Release tarball (recommended; no Go / Nix toolchain needed)
-#    Available for darwin/linux × arm64/amd64. The URL resolves the
-#    latest tagged release automatically. `uname -m` reports x86_64/
-#    aarch64, but release assets are named by Go's GOARCH (amd64/
-#    arm64) — the arch= mapping below translates between the two.
+#    Available for darwin/linux × arm64/amd64. Two translations are
+#    needed to build the asset URL: `uname -m` reports x86_64/aarch64
+#    but assets are named by Go's GOARCH (amd64/arm64), and the asset
+#    filename embeds the release version (bough_<ver>_<os>_<arch>) so
+#    the tag is resolved first via the /releases/latest redirect.
 arch=$(uname -m); case "$arch" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; esac
-curl -fsSL https://github.com/ikeikeikeike/bough/releases/latest/download/bough_$(uname -s | tr A-Z a-z)_${arch}.tar.gz \
+tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/ikeikeikeike/bough/releases/latest); tag=${tag##*/}
+curl -fsSL "https://github.com/ikeikeikeike/bough/releases/download/${tag}/bough_${tag#v}_$(uname -s | tr A-Z a-z)_${arch}.tar.gz" \
   | tar xz -C ~/.local/bin/  bough bough-plugin-mysql bough-plugin-postgres bough-plugin-redis bough-plugin-elasticsearch
 #
 # macOS (Apple Silicon) one-time step: the release binaries are not
