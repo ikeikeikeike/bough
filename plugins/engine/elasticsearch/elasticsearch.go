@@ -81,6 +81,21 @@ const (
 // in the nix flake (nix/flake.nix).
 var heapSizePattern = regexp.MustCompile(`^\d+[kmgKMG]?$`)
 
+// validateHeap rejects a heap value that cannot safely reach either
+// backend's JVM invocation: the nix backend interpolates it directly
+// into a shell string (see heapSizePattern's doc), and the docker
+// backend passes it into ES_JAVA_OPTS via the container env, where a
+// malformed value would otherwise surface late as an opaque JVM/
+// container startup failure instead of bough's own actionable error.
+// Both backends share this one check so a value rejected on one is
+// rejected on the other.
+func validateHeap(heap string) error {
+	if !heapSizePattern.MatchString(heap) {
+		return fmt.Errorf("invalid heap %q from extras (want e.g. 512m, 1g)", heap)
+	}
+	return nil
+}
+
 // Up extracts the embedded flake and launches Elasticsearch via
 // process-compose, detached so the WorktreeCreate hook returns before
 // the JVM has finished warming up. ReadyCheck is the host's gate.
@@ -108,6 +123,15 @@ func (p *Provider) Up(ctx context.Context, req *api.UpReq) error {
 		}
 	}
 	flakeRef := p.flakeRef(flakeDir)
+	heap := req.Extras["heap"]
+	if heap == "" {
+		heap = "1g"
+	}
+	// Validated before any file is opened below: an early return here
+	// must not leak a file handle (see validateHeap's doc).
+	if err := validateHeap(heap); err != nil {
+		return fmt.Errorf("elasticsearch: %w", err)
+	}
 	logPath := filepath.Join(req.WorktreeRoot, startupLogRelative)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return fmt.Errorf("elasticsearch: mkdir log dir: %w", err)
@@ -115,14 +139,6 @@ func (p *Provider) Up(ctx context.Context, req *api.UpReq) error {
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return fmt.Errorf("elasticsearch: open log: %w", err)
-	}
-	heap := req.Extras["heap"]
-	if heap == "" {
-		heap = "1g"
-	}
-	if !heapSizePattern.MatchString(heap) {
-		return fmt.Errorf("elasticsearch: invalid heap %q from extras (want e.g. 512m, 1g); "+
-			"a stray value must not reach the ES_JAVA_OPTS shell interpolation in the nix flake", heap)
 	}
 	// Detached via Setsid so the process outlives this call — but
 	// exec.CommandContext arms a kill-on-ctx-done watchdog regardless
