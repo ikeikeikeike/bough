@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,7 +84,7 @@ func TestTickOnce_HourlyCapAccumulatesAcrossTicks(t *testing.T) {
 	limiter.SetClock(func() time.Time { return fixedNow })
 
 	fired := 0
-	runTick := func(context.Context, string) { fired++ }
+	runTick := func(context.Context, string) error { fired++; return nil }
 	logPath := filepath.Join(t.TempDir(), "observer.log")
 
 	for i := 0; i < 5; i++ {
@@ -116,7 +117,7 @@ func TestTickOnce_UnboundedSessionCapWouldStillAllowManyTicks(t *testing.T) {
 	limiter.SetClock(func() time.Time { return fixedNow })
 
 	fired := 0
-	runTick := func(context.Context, string) { fired++ }
+	runTick := func(context.Context, string) error { fired++; return nil }
 	logPath := filepath.Join(t.TempDir(), "observer.log")
 
 	const moreThanDefaultSessionCap = claudecli.DefaultMaxCallsPerSession + 5
@@ -125,5 +126,62 @@ func TestTickOnce_UnboundedSessionCapWouldStillAllowManyTicks(t *testing.T) {
 	}
 	if fired != moreThanDefaultSessionCap {
 		t.Errorf("fired = %d, want %d (MaxCallsPerSession=0 must not cap daemon ticks)", fired, moreThanDefaultSessionCap)
+	}
+}
+
+// TestTickOnce_CircuitBreakerTripsOnConsecutiveFailures is the
+// regression guard for issue #86's second half: runObserverOnceQuiet
+// used to swallow the pass exit status (`_ = c.Run()`), so tickOnce
+// never called RecordFailure and the daemon-lifetime limiter's circuit
+// breaker never opened. A failing pass must now increment the failure
+// tally until the breaker trips and Acquire starts rejecting ticks.
+func TestTickOnce_CircuitBreakerTripsOnConsecutiveFailures(t *testing.T) {
+	limiter := claudecli.NewLimiter()
+	limiter.MaxCallsPerSession = 0
+	limiter.MaxCallsPerHour = 0 // isolate the circuit breaker from the caps
+	fixedNow := time.Now()
+	limiter.SetClock(func() time.Time { return fixedNow })
+
+	fired := 0
+	failing := func(context.Context, string) error { fired++; return errors.New("pass failed") }
+	logPath := filepath.Join(t.TempDir(), "observer.log")
+
+	for i := 0; i < claudecli.DefaultCircuitBreakerN+3; i++ {
+		tickOnce(context.Background(), logPath, 60, "/root", limiter, failing)
+	}
+	// Once failures reach CircuitBreakerN the breaker opens and Acquire
+	// rejects further ticks, so fired stops at exactly N.
+	if fired != claudecli.DefaultCircuitBreakerN {
+		t.Errorf("fired = %d, want %d (breaker must open after N consecutive failures and skip further ticks)",
+			fired, claudecli.DefaultCircuitBreakerN)
+	}
+	if !limiter.Snapshot().CircuitOpen {
+		t.Errorf("circuit breaker did not open after %d consecutive failures", claudecli.DefaultCircuitBreakerN)
+	}
+}
+
+// TestTickOnce_ShutdownKillDoesNotTripBreaker verifies that a pass which
+// fails because the daemon is shutting down (ctx cancelled → our Cancel
+// SIGKILLs it) is not counted as a transient failure: a clean stop must
+// not leave the breaker open or accumulate a failure tally.
+func TestTickOnce_ShutdownKillDoesNotTripBreaker(t *testing.T) {
+	limiter := claudecli.NewLimiter()
+	limiter.MaxCallsPerSession = 0
+	limiter.MaxCallsPerHour = 0
+	fixedNow := time.Now()
+	limiter.SetClock(func() time.Time { return fixedNow })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the daemon is shutting down before the pass returns
+
+	killed := func(context.Context, string) error { return errors.New("signal: killed") }
+	logPath := filepath.Join(t.TempDir(), "observer.log")
+
+	for i := 0; i < claudecli.DefaultCircuitBreakerN+3; i++ {
+		tickOnce(ctx, logPath, 60, "/root", limiter, killed)
+	}
+	if snap := limiter.Snapshot(); snap.Failures != 0 || snap.CircuitOpen {
+		t.Errorf("shutdown kills recorded a failure (failures=%d, open=%v); a clean stop must not trip the breaker",
+			snap.Failures, snap.CircuitOpen)
 	}
 }

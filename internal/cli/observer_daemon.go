@@ -255,7 +255,7 @@ func newObserverRunDaemonCmd() *cobra.Command {
 // without waiting on real --interval sleeps. When the limiter's
 // hourly cap (or circuit breaker) rejects the tick, it is logged and
 // skipped rather than firing runTick.
-func tickOnce(ctx context.Context, logPath string, interval int, root string, limiter *claudecli.Limiter, runTick func(context.Context, string)) {
+func tickOnce(ctx context.Context, logPath string, interval int, root string, limiter *claudecli.Limiter, runTick func(context.Context, string) error) {
 	if err := limiter.Acquire(); err != nil {
 		appendDaemonLog(logPath, fmt.Sprintf("tick skipped: %v", err))
 		return
@@ -266,7 +266,23 @@ func tickOnce(ctx context.Context, logPath string, interval int, root string, li
 	// lifecycle identical to a manual run; CommandContext lets a
 	// mid-pass SIGTERM interrupt the claude --print call instead of
 	// waiting it out.
-	runTick(ctx, root)
+	err := runTick(ctx, root)
+	// Feed the pass result back to the daemon-lifetime limiter so its
+	// circuit breaker can trip after CircuitBreakerN consecutive
+	// failures — without this the breaker never sees a failure and never
+	// opens. Skip recording entirely when the daemon is shutting down
+	// (ctx cancelled): the pass was SIGKILLed by our own Cancel, not a
+	// real transient failure, and counting it would trip the breaker on
+	// a clean stop.
+	if ctx.Err() != nil {
+		return
+	}
+	if err != nil {
+		limiter.RecordFailure()
+		appendDaemonLog(logPath, fmt.Sprintf("tick failed: %v", err))
+	} else {
+		limiter.RecordSuccess()
+	}
 }
 
 func resolveObserverProject(root string) (homunculus.ProjectIdentity, homunculus.Layout, error) {

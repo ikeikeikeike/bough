@@ -28,6 +28,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ikeikeikeike/bough/internal/fsutil"
 )
 
 // Registry maps `worktree name → kind → port`. The outer map is keyed by
@@ -142,7 +144,7 @@ func (s *Store) backup(action string) error {
 	if s.BackupDir == "" {
 		return nil
 	}
-	dir := expandHome(s.BackupDir)
+	dir := fsutil.ExpandHome(s.BackupDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -153,7 +155,7 @@ func (s *Store) backup(action string) error {
 	stem := strings.TrimSuffix(base, filepath.Ext(base))
 	ts := s.Now().UTC().Format("20060102-150405")
 	dst := filepath.Join(dir, fmt.Sprintf("%s-pre-%s-%s.json", stem, action, ts))
-	return copyFile(s.Path, dst)
+	return fsutil.CopyFile(s.Path, dst)
 }
 
 func (s *Store) atomicWriteJSON(reg Registry) error {
@@ -248,24 +250,4 @@ func TakenByKind(reg Registry, kind string) map[int]bool {
 		}
 	}
 	return out
-}
-
-// expandHome resolves a leading `~/` to the current user's home directory
-// — the YAML schema lets monorepo authors write `~/.claude/backups`
-// instead of an absolute path.
-func expandHome(path string) string {
-	if strings.HasPrefix(path, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, path[2:])
-		}
-	}
-	return path
-}
-
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dst, data, 0o644)
 }

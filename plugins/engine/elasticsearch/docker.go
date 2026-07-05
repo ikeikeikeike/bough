@@ -191,6 +191,9 @@ func (p *Provider) dockerUp(ctx context.Context, req *api.UpReq) error {
 	}
 
 	heap := pickHeap(req)
+	if err := validateHeap(heap); err != nil {
+		return fmt.Errorf("elasticsearch docker: %w", err)
+	}
 	hostPort := fmt.Sprintf("%d", port)
 	env := buildDockerEnv(heap, hostPort)
 	portBindings := nat.PortMap{

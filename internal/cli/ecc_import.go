@@ -3,7 +3,6 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/ikeikeikeike/bough/internal/fsutil"
 	"github.com/ikeikeikeike/bough/internal/homunculus"
 )
 
@@ -47,9 +47,9 @@ coexisting after the import.
 Default is --dry-run; pass --dry-run=false (or --apply) to perform
 the copy.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			eccRoot, err := expandHome(from)
+			eccRoot, err := fsutil.ExpandHomeStrict(from)
 			if err != nil {
-				return err
+				return fmt.Errorf("ecc import: resolve --from %q: %w", from, err)
 			}
 			if _, err := os.Stat(eccRoot); err != nil {
 				return fmt.Errorf("ecc import: ECC root not found at %s: %w", eccRoot, err)
@@ -289,24 +289,7 @@ func copyFile(src, dst string) error {
 	if strings.HasSuffix(src, ".md") && base != "INSTINCTS.md" && base != "MEMORY.md" && base != "README.md" {
 		return copyInstinctFile(src, dst)
 	}
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	tmp := dst + ".tmp"
-	out, err := os.Create(tmp)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
-	}
-	if err := out.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, dst)
+	return fsutil.CopyFile(src, dst)
 }
 
 // copyInstinctFile copies a .md file, un-escaping a single-line
@@ -327,17 +310,6 @@ func copyInstinctFile(src, dst string) error {
 		return err
 	}
 	return os.Rename(tmp, dst)
-}
-
-func expandHome(p string) (string, error) {
-	if !strings.HasPrefix(p, "~") {
-		return p, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, strings.TrimPrefix(p, "~")), nil
 }
 
 // newEccCmd is the `bough ecc` namespace parent.
