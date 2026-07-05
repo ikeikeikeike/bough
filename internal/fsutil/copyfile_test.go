@@ -61,3 +61,39 @@ func TestCopyFile_MissingSrc(t *testing.T) {
 		t.Error("CopyFile with a missing src = nil, want an error")
 	}
 }
+
+// TestCopyFile_CleansUpTmpOnRenameFailure guards the final os.Rename
+// step: unlike every earlier failure branch in CopyFile (which all
+// remove the temp file before returning), the final rename used to
+// return the raw error with no cleanup, orphaning the fully-written
+// temp file on disk. Renaming a regular file onto an existing
+// non-empty directory reliably fails (EISDIR on both Linux and Darwin)
+// without needing any platform-specific fault injection.
+func TestCopyFile_CleansUpTmpOnRenameFailure(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.txt")
+	if err := os.WriteFile(src, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	dst := filepath.Join(dir, "dst")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatalf("mkdir dst: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, "occupied"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed dst: %v", err)
+	}
+
+	if err := CopyFile(src, dst); err == nil {
+		t.Fatal("CopyFile onto an existing non-empty directory = nil, want an error")
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Errorf("leftover temp file after rename failure: %s", e.Name())
+		}
+	}
+}

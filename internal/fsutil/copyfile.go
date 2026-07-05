@@ -42,5 +42,9 @@ func CopyFile(src, dst string) error {
 		_ = os.Remove(tmpName)
 		return err
 	}
-	return os.Rename(tmpName, dst)
+	if err := os.Rename(tmpName, dst); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return nil
 }
