@@ -42,11 +42,10 @@ func TestElasticsearchConformance(t *testing.T) {
 		ReadyTimeout:    elasticsearchConformanceReadyMax,
 		IdempotentCount: 2,
 		NativeProbe:     conformance.ElasticsearchGetRoot,
-		// The ES plugin chowns Datadir to UID:GID 1000:0 on Linux but
-		// chmod 0o000 on the parent still does not surface via Up:
-		// the host-side mkdir succeeds inside the soft-fail wrapper.
-		// AssertReachable + the GET / probe cover the downstream
-		// failure that matters (which is what the v0.2.6 bug was).
-		SkipDatadirPermission: true,
+		// SkipDatadirPermission is intentionally NOT set: the
+		// Fault_DatadirPermission case forces the host-process
+		// (process-compose) backend, whose Up mkdirs Datadir
+		// synchronously and so surfaces a 0o000 parent as a real Up
+		// error. See conformance.Config.DatadirFaultBackend.
 	})
 }

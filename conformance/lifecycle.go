@@ -32,10 +32,12 @@ const quickPhaseTimeout = 60 * time.Second
 // The phases:
 //
 //  1. PortRangeDefault — every role's range has 0 < Low < High.
-//  2. Up → ReadyCheck → EnvVars → Down (IdempotentCount times).
-//     Running Up again on already-up state is up-or-reuse (no error);
-//     each EnvVars map is checked for non-empty / reachable / shell-
-//     safe values, plus an optional NativeProbe round-trip.
+//  2. Up → ReadyCheck → UpReuse → EnvVars → Down (IdempotentCount
+//     times). UpReuse calls Up a second time while the service is up
+//     and asserts it is a no-op returning nil (up-or-reuse), then
+//     re-checks readiness so the reuse cannot silently tear the engine
+//     down; each EnvVars map is checked for non-empty / reachable /
+//     shell-safe values, plus an optional NativeProbe round-trip.
 //  3. Cleanup — called twice. The second call must be a no-op (not
 //     an error), enforcing the idempotency clause of the contract.
 //
@@ -115,10 +117,10 @@ func assertPortRangeDefault(t *testing.T, prov engineapi.EngineProvider) map[str
 	return ranges
 }
 
-// runOneIteration drives Up → ReadyCheck → EnvVars → Down once.
-// Returns false on a fatal sub-test failure so runLifecycle can stop
-// the loop without dragging the operator through phases that cannot
-// pass on a never-up plugin.
+// runOneIteration drives Up → ReadyCheck → UpReuse → EnvVars → Down
+// once. Returns false on a fatal sub-test failure so runLifecycle can
+// stop the loop without dragging the operator through phases that
+// cannot pass on a never-up plugin.
 func runOneIteration(
 	t *testing.T,
 	prov engineapi.EngineProvider,
@@ -135,6 +137,12 @@ func runOneIteration(
 	}
 	t.Run(itername("ReadyCheck", iter), func(t *testing.T) {
 		runReadyCheckPhase(t, prov, portInts, mainPort, cfg, iter)
+	})
+	if t.Failed() {
+		return false
+	}
+	t.Run(itername("UpReuse", iter), func(t *testing.T) {
+		runUpReusePhase(t, prov, upReq, portInts, mainPort, cfg, iter)
 	})
 	if t.Failed() {
 		return false
@@ -172,6 +180,40 @@ func runReadyCheckPhase(t *testing.T, prov engineapi.EngineProvider, ports []int
 	if !ready {
 		t.Fatalf("ReadyCheck (iter %d): plugin returned not-ready within %s (main port %d)",
 			iter, cfg.ReadyTimeout, mainPort)
+	}
+}
+
+// runUpReusePhase calls Up a second time while the service is already
+// up and asserts it is a no-op that returns nil (up-or-reuse, CONTRACT
+// clause 3), then re-checks readiness to prove the reuse did not tear
+// the running engine down.
+//
+// This is the ONLY phase that exercises the already-up path. The
+// idempotent lifecycle loop Downs between iterations, so its second Up
+// starts from a downed state (a restart, not a reuse) — without this
+// phase a plugin whose Up errors on an already-existing container
+// (instead of reusing it) would pass conformance with the reuse clause
+// wholly unverified.
+func runUpReusePhase(t *testing.T, prov engineapi.EngineProvider, upReq *engineapi.UpReq, ports []int, mainPort int, cfg Config, iter int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), cfg.UpTimeout)
+	defer cancel()
+	if err := prov.Up(ctx, upReq); err != nil {
+		t.Fatalf("Up on already-up state (iter %d) must be a no-op returning nil (up-or-reuse); got: %v",
+			iter, err)
+	}
+	// A reuse must leave the service reachable, not silently torn down;
+	// re-check on its own ReadyTimeout (a running engine answers on the
+	// first poll, so this does not add the cold-start budget).
+	rctx, rcancel := context.WithTimeout(t.Context(), cfg.ReadyTimeout)
+	defer rcancel()
+	ready, err := prov.ReadyCheck(rctx, ports, int(cfg.ReadyTimeout.Seconds()))
+	if err != nil {
+		t.Fatalf("ReadyCheck after up-or-reuse (iter %d): %v", iter, err)
+	}
+	if !ready {
+		t.Fatalf("ReadyCheck after up-or-reuse (iter %d): not ready on main port %d — the second Up disrupted the running engine",
+			iter, mainPort)
 	}
 }
 

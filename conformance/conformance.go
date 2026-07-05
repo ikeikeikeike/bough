@@ -87,10 +87,12 @@ type Config struct {
 	// ReadyTimeout bounds ReadyCheck's poll loop. Default: 60s.
 	ReadyTimeout time.Duration
 
-	// IdempotentCount is how many times the suite loops the
-	// lifecycle (Up → Ready → EnvVars → Down) before final Cleanup.
-	// >=2 catches "Up on existing state" and "Down on already-down"
-	// regressions. Default: 2.
+	// IdempotentCount is how many times the suite loops the lifecycle
+	// (Up → Ready → UpReuse → EnvVars → Down) before final Cleanup.
+	// >=2 catches restart regressions — a plugin whose second
+	// Up-after-Down fails. The already-up path (up-or-reuse) is covered
+	// every iteration by the dedicated UpReuse phase, not by the loop
+	// count itself. Default: 2.
 	IdempotentCount int
 
 	// SkipPortConflict / SkipDatadirPermission / SkipImagePullFailure
@@ -99,8 +101,10 @@ type Config struct {
 	// provisioner that cannot bind a sidecar listener) declare a skip
 	// here rather than silently leaving the contract unverified.
 	//
-	// The fault checks themselves land in Λ-6.2; the fields ride
-	// the Config now so the signature is stable from v0.3.0 onward.
+	// SkipDatadirPermission specifically opts out of the host-process
+	// datadir fault (see DatadirFaultBackend): set it only for a plugin
+	// with no host-process path that prepares Datadir synchronously —
+	// a pure docker / in-cluster provisioner that merely bind-mounts.
 	SkipPortConflict      bool
 	SkipDatadirPermission bool
 	SkipImagePullFailure  bool
@@ -118,9 +122,13 @@ type Config struct {
 
 	// NativeProbe runs after EnvVars succeed. It receives the host:port
 	// pair the plugin advertised and is expected to issue a real-
-	// protocol query (mysql `SELECT 1`, redis `PING`, ...). If nil,
-	// the suite dispatches a default probe via kind→probe lookup; an
-	// unknown plugin kind without a probe is a Skip, not a Fail.
+	// protocol query (mysql handshake, redis `PING`, postgres
+	// SSLRequest, ...). If nil, the native-probe phase is skipped:
+	// AssertReachable's TCP-level check still runs, but no protocol
+	// round-trip is asserted. bough's own plugins each wire one up
+	// (RedisPing / ElasticsearchGetRoot / PostgresProbe / the mysql
+	// handshake probe) so contract clause 5 is enforced for every
+	// engine.
 	NativeProbe func(ctx context.Context, hostPort string) error
 
 	// MainPortRole is the role the suite treats as the engine's
@@ -134,6 +142,17 @@ type Config struct {
 	// returned by PortRangeDefault — MainPortRole only affects the
 	// single-port-shaped corners (faults + error messages).
 	MainPortRole string
+
+	// DatadirFaultBackend is the extras["backend"] token
+	// Fault_DatadirPermission injects to select the plugin's
+	// host-process path (services-flake / process-compose) — the
+	// inverse of Fault_ImagePullFailure forcing "docker". On that path
+	// the engine runs as the host user and the plugin prepares Datadir
+	// with a synchronous os.MkdirAll inside Up, so a 0o000 parent
+	// surfaces as a real Up error, deterministically and cross-platform.
+	// Defaults to "nix". A docker-only plugin with no such path sets
+	// SkipDatadirPermission=true instead.
+	DatadirFaultBackend string
 }
 
 // Run executes the conformance suite against the plugin binary
@@ -169,6 +188,9 @@ func applyDefaults(cfg Config) Config {
 	}
 	if cfg.MainPortRole == "" {
 		cfg.MainPortRole = "main"
+	}
+	if cfg.DatadirFaultBackend == "" {
+		cfg.DatadirFaultBackend = "nix"
 	}
 	return cfg
 }

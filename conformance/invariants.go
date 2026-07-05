@@ -32,8 +32,9 @@ type Reporter interface {
 //
 //   - paired keys: a `*_HOST` and a `*_PORT` with the same prefix.
 //     This is the bough convention (BOUGH_MYSQL_HOST + BOUGH_MYSQL_PORT).
-//   - URL keys: a `*_URL` value that parses as a URL with an
-//     explicit port (e.g. redis://127.0.0.1:6379/8).
+//   - URL keys: a `*_URL` value that parses as a URL with a host
+//     (e.g. redis://127.0.0.1:6379/8); a missing port falls back to
+//     the scheme's default so the value is still verified.
 //
 // If neither convention is present in env the assertion is a no-op
 // (logged, not failed) — there is no sensible default address to
@@ -113,9 +114,11 @@ func AssertNonEmpty(t Reporter, env map[string]string) {
 //   - Multi-port engines: a single `BOUGH_<KIND>_HOST` shared across
 //     every `BOUGH_<KIND>_<ROLE>_PORT` (rabbitmq amqp+management,
 //     kafka broker+controller, nats client+monitor+cluster).
-//   - URL keys: any `*_URL` value that parses as a URL with an
-//     explicit port, so plugins emitting a per-role
-//     `BOUGH_<KIND>_<ROLE>_URL` get dialed without a host lookup.
+//   - URL keys: any `*_URL` value that parses as a URL with a host, so
+//     plugins emitting a per-role `BOUGH_<KIND>_<ROLE>_URL` get dialed
+//     without a host lookup. A URL with no explicit port falls back to
+//     its scheme's default (schemeDefaultPort) rather than being
+//     dropped — the v0.2.6 guard must not go blind on a port-less URL.
 //
 // If a `*_PORT` key has no matching `*_HOST` family (not even an
 // ancestor prefix), it is skipped — there is no sensible address to
@@ -161,10 +164,40 @@ func extractDialableAddrs(env map[string]string) []string {
 			continue
 		}
 		u, err := url.Parse(v)
-		if err != nil || u.Host == "" || u.Port() == "" {
+		if err != nil || u.Hostname() == "" {
 			continue
 		}
-		out = append(out, u.Host)
+		if u.Port() != "" {
+			out = append(out, u.Host)
+			continue
+		}
+		// No explicit port: fall back to the scheme's default so the
+		// reachability guard still dials it. A *_URL that points at the
+		// scheme default while the engine listens on a bough-allocated
+		// port is exactly the unreachable-advertise class v0.2.6 guards
+		// against, so it must be dialed, not skipped. An unknown scheme
+		// has no dialable default — leave it unverified rather than guess.
+		if def, ok := schemeDefaultPort[strings.ToLower(u.Scheme)]; ok {
+			out = append(out, net.JoinHostPort(u.Hostname(), def))
+		}
 	}
 	return out
+}
+
+// schemeDefaultPort maps the URL schemes bough's engines emit to their
+// well-known TCP port, so AssertReachable can still dial a `*_URL`
+// value that omits an explicit port instead of silently skipping it
+// (issue #71). Only schemes with an unambiguous default are listed; an
+// unlisted scheme has no dialable default and is left unverified rather
+// than dialed at a guessed port.
+var schemeDefaultPort = map[string]string{
+	"redis":      "6379",
+	"rediss":     "6380",
+	"mysql":      "3306",
+	"postgres":   "5432",
+	"postgresql": "5432",
+	"http":       "80",
+	"https":      "443",
+	"amqp":       "5672",
+	"amqps":      "5671",
 }
