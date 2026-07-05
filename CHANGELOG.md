@@ -1,5 +1,47 @@
 # Changelog
 
+## v0.9.29
+
+Fixes a mysql:8.4 docker-backend readiness race reported via an
+external handover (threecorp extremo config, no `initial_resources`):
+`bough create` could declare the mysql engine ready ~1-2s before the
+real server's TCP listener existed, deterministically breaking
+`post_create` hooks (e.g. `make create-database`) that connect over
+host TCP immediately after `Up` returns, with `ERROR 2013 ... at
+handshake`.
+
+### Fixed
+
+- **`plugins/engine/mysql/docker.go`**: the official mysql:8.4 image
+  runs a two-phase first-run init — a socket-only "temporary server"
+  (`--skip-networking`) bootstraps the datadir/grant tables, then
+  restarts as the real, network-enabled server. `dockerReadyCheck`'s
+  old check (`mysqladmin ping -h localhost`, via docker exec) talks to
+  the container-internal unix socket, which the temporary server also
+  serves — so it answered ready during that phase. The host-side TCP
+  dial doesn't catch this either: docker-proxy accepts the host port
+  from the moment the container starts, regardless of mysqld's state.
+  `mysqlTCPReady` (renamed from `mysqlAdminPing`) now forces the
+  network path with `--protocol=TCP`, matching the nix backend's
+  already-correct contract (`mysql -h127.0.0.1 -P<port> -e 'SELECT
+  1'`) instead of the client's socket-preferring default —
+  `--skip-networking` refuses that outright, so the check can only
+  pass once the real server is actually listening on TCP.
+- The docker readiness auto-shift now also honors
+  `AUBA_API_DISABLE_PORT_FALLBACK`-style `netx.IsFallbackDisabled()`,
+  matching the sibling gRPC-style listener check already present
+  elsewhere — previously the mysql docker backend could silently
+  rebind to a neighboring port even when the caller asked it not to.
+
+### Added
+
+- `TestDockerReadyCheck_NoRaceWithTemporaryServer`: brings up a real
+  mysql:8.4 container via the public Provider API and asserts that the
+  instant `ReadyCheck` returns true, an immediate zero-retry handshake
+  also succeeds — closing the exact race the existing conformance
+  test's 30s retry probe was silently tolerating instead of the
+  readiness check being correct in the first place.
+
 ## v0.9.28
 
 Retires the v0.5-v0.8 memory-orchestration surface from user-facing
