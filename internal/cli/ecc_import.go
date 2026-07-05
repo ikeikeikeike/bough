@@ -47,7 +47,10 @@ coexisting after the import.
 Default is --dry-run; pass --dry-run=false (or --apply) to perform
 the copy.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			eccRoot := fsutil.ExpandHome(from)
+			eccRoot, err := fsutil.ExpandHomeStrict(from)
+			if err != nil {
+				return fmt.Errorf("ecc import: resolve --from %q: %w", from, err)
+			}
 			if _, err := os.Stat(eccRoot); err != nil {
 				return fmt.Errorf("ecc import: ECC root not found at %s: %w", eccRoot, err)
 			}
