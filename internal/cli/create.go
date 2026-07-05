@@ -295,6 +295,13 @@ func startEngines(
 		logf(stderr, "[bough] %s: plugin discovered, starting on port %d", eng.Kind, port)
 
 		extras := buildEngineExtras(eng, detected)
+		// The compose backend's compose.file is authored relative to the
+		// worktree root (e.g. "auba-api/compose.yml"); resolve it to an
+		// absolute path here, where the worktree base is known, since the
+		// plugin only receives the engine-provider subdir as WorktreeRoot.
+		if cf := extras["compose.file"]; cf != "" && !filepath.IsAbs(cf) {
+			extras["compose.file"] = filepath.Join(worktreeRoot, cf)
+		}
 		ports := []engineapi.PortSpec{{Role: "main", Port: port}}
 		resources := toResourceSpecs(eng.InitialResources)
 		dataDir := filepath.Join(worktreeRoot, fmt.Sprintf(".local/%s-data", eng.Kind))

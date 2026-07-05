@@ -88,6 +88,36 @@ engine in `.bough.yaml` always overrides auto-detect.
 |----------|------------------------------------------------------|-------------------|
 | `docker` | nix-with-flakes not on PATH, docker daemon reachable (= typical install) | A Docker-compatible daemon (Docker Desktop / OrbStack / Colima / podman with the docker socket) |
 | `nix`    | nix-with-flakes on PATH                              | Nix with flakes enabled + network access to flakehub.com / github.com on first invocation |
+| `compose` | never auto-detected — always explicit                | A docker daemon + the `docker compose` v2 CLI, and a compose file in the repo |
+
+### `backend: compose` — adopt your existing docker-compose file (v0.9.30+)
+
+If a repo already has a `compose.yml`, bough can drive **that** service as
+the engine instead of its own mysqld/redis/es. bough keeps owning
+per-worktree port allocation + lifecycle; the compose file stays the source
+of truth for image, volume, healthcheck, and env. It works by rendering a
+derived compose file that retargets the one service's published port to
+`127.0.0.1:<bough-port>` and running it under a per-worktree compose project
+name (`bough-<kind>-<port>`), which isolates the named-volume datadir
+between worktrees. Nothing in your compose file needs to change.
+
+```yaml
+engines:
+  - kind: mysql
+    backend: compose
+    extras:
+      compose.file: auba-api/compose.yml   # relative to the worktree root
+      compose.service: db                  # the service in that file
+      compose.target_port: "3306"          # its container-internal port
+  - kind: redis
+    backend: compose
+    extras: { compose.file: auba-api/compose.yml, compose.service: redis, compose.target_port: "6379" }
+```
+
+Each engine drives its own service under its own compose project, so a
+multi-service compose file (db + redis + elasticsearch) maps cleanly onto
+bough's per-engine model. `ready_timeout_sec` waits on the compose file's
+own healthcheck (`docker compose up --wait`).
 
 Cold-start cost (first `bough create` invocation on a fresh machine):
 

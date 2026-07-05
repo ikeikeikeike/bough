@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.9.30
+
+Adds a third engine backend, `backend: compose`, that lets bough ADOPT a
+project's existing `docker-compose` file as the runtime for an engine
+instead of bringing up its own mysqld / redis / es. bough keeps owning
+per-worktree port allocation + lifecycle; the compose file stays the source
+of truth for image, volume, healthcheck, and env. This onboards teams who
+already run their services via compose without asking them to rewrite that
+file or move to bough's nix/docker engine images.
+
+### Added
+
+- **`pkg/composeutil`** + a `compose.go` per engine plugin (mysql / redis /
+  elasticsearch / postgres). On Up, bough renders a *derived* compose file
+  that retargets the one service's published port to
+  `127.0.0.1:<bough-allocated-port>:<target>` and runs it via
+  `docker compose -p bough-<kind>-<port> up -d <service> --wait`. Two
+  properties make this safe:
+  - **Port override without editing the user's file.** Compose's own
+    `-f base -f override` merge *concatenates* the `ports` list, so it
+    cannot retarget a hardcoded `3306:3306`; bough re-renders the file
+    instead, rewriting only that service's ports and copying everything
+    else (image, volume, healthcheck, multi-line command, ulimits)
+    verbatim.
+  - **Per-worktree datadir isolation.** The compose project name
+    (`bough-<kind>-<port>`, port is worktree-unique) namespaces the named
+    volume, so two worktrees running the same compose file never share a
+    datadir — verified end-to-end.
+  - Readiness reuses `docker compose up --wait` (the compose file's own
+    healthcheck), which is the correct signal — a naive host-TCP dial
+    would go green during e.g. the mysql:8.4 temporary-server phase.
+  - Teardown (Down / Cleanup) removes the project's containers, network,
+    and named volumes via the Docker SDK filtered by the compose project
+    label, so it needs neither the derived file nor the CLI.
+- `config.Engine.Backend` now accepts `compose` (never auto-detected — it
+  must be explicit, and requires extras `compose.file` / `compose.service`
+  / `compose.target_port`). `compose.file` is resolved against the worktree
+  root by the host.
+- Tests: `composeutil` unit tests (port-rewrite + adopt-verbatim + missing
+  service) and a real-docker end-to-end conformance test
+  (`TestComposeBackend_EndToEnd`: Up adopts a fixture compose file → the
+  service comes up on the bough-allocated port → handshake → Down →
+  Cleanup, project gone).
+
 ## v0.9.29
 
 Fixes a mysql:8.4 docker-backend readiness race reported via an

@@ -131,10 +131,14 @@ type Engine struct {
 	// Backend selects the lifecycle implementation inside the plugin.
 	// Allowed values: "nix" (default for v0.1.x), "docker" (v0.2+,
 	// bind-mounts datadir into the engine's official Docker image),
-	// or empty for "auto-detect" (= the host's hybrid selector picks
-	// based on runtime detection: nix-with-flakes on PATH → nix,
-	// else docker daemon → docker).
-	Backend string `yaml:"backend" validate:"omitempty,oneof=nix docker"`
+	// "compose" (v0.9.30+, adopts the project's existing docker-compose
+	// service — bough allocates the per-worktree port + drives lifecycle,
+	// the compose file owns image/volume/healthcheck; requires extras
+	// compose.file / compose.service / compose.target_port), or empty for
+	// "auto-detect" (= the host's hybrid selector picks based on runtime
+	// detection: nix-with-flakes on PATH → nix, else docker daemon →
+	// docker; "compose" is never auto-detected — it must be explicit).
+	Backend string `yaml:"backend" validate:"omitempty,oneof=nix docker compose"`
 	// ReadyTimeoutSec caps how long the host waits for the plugin's
 	// ReadyCheck loop to report ready. Zero means use the plugin's
 	// own default (typically 300-600 s). Capped well under int32 max:

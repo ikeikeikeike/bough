@@ -82,6 +82,9 @@ const (
 // When `req.Extras["backend"] == "docker"` the Docker-backed code path
 // (docker.go) is used instead, bypassing the nix flake entirely.
 func (p *Provider) Up(ctx context.Context, req *api.UpReq) error {
+	if req.Extras["backend"] == "compose" {
+		return p.composeUp(ctx, req)
+	}
 	if req.Extras["backend"] == "docker" {
 		return p.dockerUp(ctx, req)
 	}
@@ -158,6 +161,9 @@ func (p *Provider) ReadyCheck(ctx context.Context, ports []int, timeoutSec int) 
 	if port <= 0 {
 		return false, fmt.Errorf("mysql: ReadyCheck: invalid ports %v", ports)
 	}
+	if usingComposeBackend(ctx, port) {
+		return p.composeReadyCheck(ctx, port, timeoutSec)
+	}
 	if usingDockerBackend(ctx, port) {
 		return p.dockerReadyCheck(ctx, port, timeoutSec)
 	}
@@ -190,6 +196,9 @@ func (p *Provider) ReadyCheck(ctx context.Context, ports []int, timeoutSec int) 
 // `bough-mysql-<port>` exists, dockerDown is invoked instead.
 func (p *Provider) Down(ctx context.Context, req *api.DownReq) error {
 	port := firstListenPort(req.Ports)
+	if usingComposeBackend(ctx, port) {
+		return p.composeDown(ctx, req)
+	}
 	if usingDockerBackend(ctx, port) {
 		return p.dockerDown(ctx, req)
 	}
@@ -229,10 +238,14 @@ func (p *Provider) Down(ctx context.Context, req *api.DownReq) error {
 // Cleanup removes the mysqld datadir. Down must have already converged
 // on "nothing listening on Port"; calling Cleanup with mysqld still
 // alive would delete the datadir under an open mysqld and crash it.
-func (p *Provider) Cleanup(_ context.Context, datadir string, _ []int) error {
+func (p *Provider) Cleanup(ctx context.Context, datadir string, ports []int) error {
 	if datadir == "" {
 		return errors.New("mysql: Cleanup: datadir is required")
 	}
+	// The compose backend keeps its datadir in a named volume, not this
+	// directory; remove it by the per-worktree compose project label. No-op
+	// for the nix / docker backends, so it is safe to attempt every time.
+	composeCleanupVolumes(ctx, ports)
 	return os.RemoveAll(datadir)
 }
 

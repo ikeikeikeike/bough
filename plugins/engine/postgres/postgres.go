@@ -78,6 +78,9 @@ const (
 // When `req.Extras["backend"] == "docker"` the Docker code path is
 // used (docker.go) instead, bypassing the nix flake entirely.
 func (p *Provider) Up(ctx context.Context, req *api.UpReq) error {
+	if req.Extras["backend"] == "compose" {
+		return p.composeUp(ctx, req)
+	}
 	if req.Extras["backend"] == "docker" {
 		return p.dockerUp(ctx, req)
 	}
@@ -153,6 +156,9 @@ func (p *Provider) ReadyCheck(ctx context.Context, ports []int, timeoutSec int) 
 	if port <= 0 {
 		return false, fmt.Errorf("postgres: ReadyCheck: invalid ports %v", ports)
 	}
+	if usingComposeBackend(ctx, port) {
+		return p.composeReadyCheck(ctx, port, timeoutSec)
+	}
 	if usingDockerBackend(ctx, port) {
 		return p.dockerReadyCheck(ctx, port, timeoutSec)
 	}
@@ -195,6 +201,9 @@ func (p *Provider) ReadyCheck(ctx context.Context, ports []int, timeoutSec int) 
 // Backend detection mirrors ReadyCheck.
 func (p *Provider) Down(ctx context.Context, req *api.DownReq) error {
 	port := firstListenPort(req.Ports)
+	if usingComposeBackend(ctx, port) {
+		return p.composeDown(ctx, req)
+	}
 	if usingDockerBackend(ctx, port) {
 		return p.dockerDown(ctx, req)
 	}
@@ -227,11 +236,14 @@ func (p *Provider) Down(ctx context.Context, req *api.DownReq) error {
 }
 
 // Cleanup removes the postgres datadir. Down must have already
-// converged on "nothing listening on Port".
-func (p *Provider) Cleanup(_ context.Context, datadir string, _ []int) error {
+// converged on "nothing listening on Port". For the compose backend the
+// datadir lives in a named volume, removed by project label; a no-op
+// otherwise.
+func (p *Provider) Cleanup(ctx context.Context, datadir string, ports []int) error {
 	if datadir == "" {
 		return errors.New("postgres: Cleanup: datadir is required")
 	}
+	composeCleanupVolumes(ctx, ports)
 	return os.RemoveAll(datadir)
 }
 
