@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/ikeikeikeike/bough/conformance"
+	api "github.com/ikeikeikeike/bough/plugins/engine/api"
+	"github.com/ikeikeikeike/bough/plugins/engine/mysql"
 )
 
 const (
@@ -112,4 +114,75 @@ func mysqlHandshakeOnce(ctx context.Context, hostPort string) error {
 			buf[4], mysqlHandshakeProtoVersion)
 	}
 	return nil
+}
+
+// TestDockerReadyCheck_NoRaceWithTemporaryServer is the regression
+// guard for the mysql:8.4 two-phase-init race (bough handover
+// 2026-07-04, threecorp extremo config): the official image runs a
+// socket-only "temporary server" (--skip-networking) to bootstrap
+// the datadir/grant tables before restarting as the real,
+// network-enabled server. Before the fix, dockerReadyCheck's
+// socket-based mysqladmin ping answered success against that
+// temporary server, so bough declared the engine ready before the
+// real server's TCP listener existed — deterministically breaking
+// post_create hooks that connect over host TCP immediately after Up
+// returns, with none of mysqlHandshakeProbe's retry tolerance above.
+//
+// This drives the Provider's public Up/ReadyCheck/Down directly
+// (docker backend, no go-plugin spawn needed — the RPC layer is not
+// what this asserts) and checks that the instant ReadyCheck returns
+// true, an immediate, zero-retry mysqlHandshakeOnce also succeeds:
+// no window where bough says ready but the real server cannot yet
+// answer a connection.
+func TestDockerReadyCheck_NoRaceWithTemporaryServer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), mysqlConformanceReadyMax)
+	defer cancel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("pick free port: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	// Not t.TempDir(): mysqld writes files (e.g. its auto-generated SSL
+	// certs) as its own container-internal uid, which a non-root CI
+	// runner often can't remove. That's the same known, tracked-elsewhere
+	// limitation conformance/lifecycle.go's assertCleanup tolerates via
+	// t.Skip rather than failing the test — but t.TempDir()'s own
+	// automatic cleanup has no such tolerance (it calls t.Fatalf), so
+	// this test owns its directory and cleanup instead.
+	datadir, err := os.MkdirTemp("", "bough-mysql-readiness-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer func() {
+		if rmErr := os.RemoveAll(datadir); rmErr != nil {
+			t.Logf("cleanup datadir %s: %v (tolerated, same class as lifecycle.go's assertCleanup)", datadir, rmErr)
+		}
+	}()
+
+	p := mysql.New()
+	req := &api.UpReq{
+		Ports:   []api.PortSpec{{Role: "main", Port: port}},
+		Datadir: datadir,
+		Extras:  map[string]string{"backend": "docker", "docker.image": mysqlConformanceImage},
+	}
+	if err := p.Up(ctx, req); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	defer func() {
+		_ = p.Down(context.Background(), &api.DownReq{Ports: []int{port}, GracefulTimeoutSec: 10})
+	}()
+
+	ready, err := p.ReadyCheck(ctx, []int{port}, int(mysqlConformanceReadyMax.Seconds()))
+	if err != nil || !ready {
+		t.Fatalf("ReadyCheck: ready=%v err=%v", ready, err)
+	}
+
+	hostPort := fmt.Sprintf("127.0.0.1:%d", port)
+	if err := mysqlHandshakeOnce(ctx, hostPort); err != nil {
+		t.Fatalf("mysqlHandshakeOnce immediately after ReadyCheck()=true: %v "+
+			"(bough declared ready before the real server could serve a connection)", err)
+	}
 }
