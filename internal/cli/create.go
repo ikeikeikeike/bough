@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/ikeikeikeike/bough/internal/allocator"
@@ -387,6 +388,17 @@ func buildEngineExtras(eng config.Engine, detected string) map[string]string {
 	}
 	if eng.Version != "" {
 		extras["version"] = eng.Version
+	}
+	if eng.Compose != nil {
+		extras["compose.file"] = eng.Compose.File
+		extras["compose.service"] = eng.Compose.Service
+		extras["compose.target_port"] = strconv.Itoa(eng.Compose.TargetPort)
+		if eng.Compose.Project != "" {
+			extras["compose.project"] = eng.Compose.Project
+		}
+		if eng.Compose.EnvPrefix != "" {
+			extras["compose.env_prefix"] = eng.Compose.EnvPrefix
+		}
 	}
 	return extras
 }
