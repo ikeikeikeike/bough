@@ -143,6 +143,51 @@ func TestProvider_Up_RejectsMissingComposeFile(t *testing.T) {
 	}
 }
 
+// TestProvider_Up_ReusesAlreadyRunningContainer is the regression
+// guard for the conformance suite's UpReuse phase (CONTRACT.md clause
+// 3): calling Up a second time while the service is ALREADY running
+// (no Down in between) must be a no-op returning nil, not an error.
+// This brings up an actual redis:7-alpine container, matching the
+// same real-docker assumption TestProvider_Up_RejectsPortAlreadyInUse
+// already makes in this file.
+func TestProvider_Up_ReusesAlreadyRunningContainer(t *testing.T) {
+	p := New()
+	worktreeRoot := t.TempDir()
+	repoDir := filepath.Join(worktreeRoot, "auba-api")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "compose.yml"), []byte("services: {redis: {image: redis:7-alpine}}"), 0o644); err != nil {
+		t.Fatalf("seed compose.yml: %v", err)
+	}
+	const port = 59201
+	req := &api.UpReq{
+		WorktreeRoot: repoDir,
+		Ports:        []api.PortSpec{{Role: "main", Port: port}},
+		Extras: map[string]string{
+			"compose.file":        "auba-api/compose.yml",
+			"compose.service":     "redis",
+			"compose.target_port": "6379",
+		},
+	}
+	ctx := context.Background()
+	if err := p.Up(ctx, req); err != nil {
+		t.Fatalf("first Up: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = p.Down(ctx, &api.DownReq{Ports: []int{port}, WorktreeRoot: repoDir, GracefulTimeoutSec: 10})
+	})
+
+	if err := p.Up(ctx, req); err != nil {
+		t.Errorf("second Up on an already-running container must be a no-op returning nil (up-or-reuse); got: %v", err)
+	}
+
+	ok, err := p.ReadyCheck(ctx, []int{port}, 10)
+	if err != nil || !ok {
+		t.Errorf("service must still be reachable after reuse: ok=%v err=%v", ok, err)
+	}
+}
+
 // TestProvider_Up_RejectsPortAlreadyInUse is the regression guard for
 // the Fault_PortConflict finding: docker compose up's own bind
 // failure is not reliably surfaced on every Docker backend (Docker

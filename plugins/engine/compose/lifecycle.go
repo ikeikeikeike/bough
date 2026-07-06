@@ -74,16 +74,6 @@ func (p *Provider) Up(ctx context.Context, req *api.UpReq) error {
 		return fmt.Errorf("compose: Up: compose file %s: %w", composeFile, err)
 	}
 
-	// docker compose up's own bind failure is not reliably surfaced on
-	// every backend (Docker Desktop's macOS proxy layer can silently
-	// paper over a host-side conflict a native Linux daemon would
-	// reject), so check proactively rather than trust the exit code —
-	// same pattern the mysql/postgres/redis/elasticsearch docker.go
-	// plugins already use via this exact helper.
-	if !dockerutil.IsPortFree(port) {
-		return fmt.Errorf("compose: Up: port %d already in use on 127.0.0.1 — stop the conflicting service or move bough's port range", port)
-	}
-
 	project := req.Extras["compose.project"]
 	if project == "" {
 		project = composeProjectName(worktreeName, file)
@@ -93,6 +83,25 @@ func (p *Provider) Up(ctx context.Context, req *api.UpReq) error {
 		envPrefix = strings.ToUpper(service)
 	}
 
+	// container_name is deterministic by host port alone (see
+	// renderOverride's doc), so a container already running under this
+	// exact name IS this same worktree's own service — reuse it rather
+	// than treating its own published port as a foreign conflict.
+	// UpOrReuse also removes a stale STOPPED container of this name
+	// (e.g. left over from an interrupted prior run) before signalling
+	// "not reusable," so the create path below never hits a stale
+	// name collision either.
+	containerName := fmt.Sprintf("bough-compose-%d", port)
+	cli, err := dockerutil.NewClient()
+	if err != nil {
+		return fmt.Errorf("compose: Up: docker client: %w", err)
+	}
+	defer func() { _ = cli.Close() }()
+	reuse, err := dockerutil.UpOrReuse(ctx, cli, containerName)
+	if err != nil {
+		return fmt.Errorf("compose: Up: reuse check %s: %w", containerName, err)
+	}
+
 	overridePath, err := writeOverrideFile(req.WorktreeRoot, port, overrideSpec{
 		Service: service, TargetPort: targetPort, HostPort: port,
 	})
@@ -100,25 +109,46 @@ func (p *Provider) Up(ctx context.Context, req *api.UpReq) error {
 		return fmt.Errorf("compose: Up: %w", err)
 	}
 
-	upCmd := exec.CommandContext(ctx, "docker", "compose",
-		"-f", composeFile, "-f", overridePath, "-p", project, "up", "-d", service)
-	if out, err := upCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("compose: Up: docker compose up failed: %w\n%s", err, out)
+	if !reuse {
+		// Only a GENUINE fresh start reaches here — checking port
+		// availability now (rather than unconditionally, which would
+		// wrongly flag this worktree's own already-running container
+		// as a foreign conflict on every reuse) still closes the gap
+		// docker compose up's own bind failure does not reliably
+		// surface on every backend (Docker Desktop's macOS proxy layer
+		// can silently paper over a host-side conflict a native Linux
+		// daemon would reject) — same pattern the mysql/postgres/
+		// redis/elasticsearch docker.go plugins already use via this
+		// exact helper.
+		if !dockerutil.IsPortFree(port) {
+			return fmt.Errorf("compose: Up: port %d already in use on 127.0.0.1 — stop the conflicting service or move bough's port range", port)
+		}
+
+		upCmd := exec.CommandContext(ctx, "docker", "compose",
+			"-f", composeFile, "-f", overridePath, "-p", project, "up", "-d", service)
+		if out, err := upCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("compose: Up: docker compose up failed: %w\n%s", err, out)
+		}
+
+		// Verify the override's port mapping actually took effect
+		// rather than trusting it silently — CONTRACT.md's own
+		// reachability clause expects this class of check for every
+		// backend.
+		portCmd := exec.CommandContext(ctx, "docker", "compose",
+			"-f", composeFile, "-f", overridePath, "-p", project, "port", service, strconv.Itoa(targetPort))
+		out, err := portCmd.Output()
+		if err != nil {
+			return fmt.Errorf("compose: Up: docker compose port: %w", err)
+		}
+		if bound := parseBoundPort(string(out)); bound != port {
+			return fmt.Errorf("compose: Up: container published port %d, want %d (override did not take effect)", bound, port)
+		}
 	}
 
-	// Verify the override's port mapping actually took effect rather
-	// than trusting it silently — CONTRACT.md's own reachability
-	// clause expects this class of check for every backend.
-	portCmd := exec.CommandContext(ctx, "docker", "compose",
-		"-f", composeFile, "-f", overridePath, "-p", project, "port", service, strconv.Itoa(targetPort))
-	out, err := portCmd.Output()
-	if err != nil {
-		return fmt.Errorf("compose: Up: docker compose port: %w", err)
-	}
-	if bound := parseBoundPort(string(out)); bound != port {
-		return fmt.Errorf("compose: Up: container published port %d, want %d (override did not take effect)", bound, port)
-	}
-
+	// Persisted/cached regardless of reuse-vs-fresh: Down/Cleanup/
+	// EnvVars/ReadyCheck must work correctly even when THIS process
+	// instance is not the one that originally created the container
+	// (pluginhost spawns one fresh subprocess per bough create call).
 	st := &upState{
 		File: file, Service: service, Project: project,
 		TargetPort: targetPort, HostPort: port, EnvPrefix: envPrefix,
