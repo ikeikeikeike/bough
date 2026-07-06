@@ -4,6 +4,7 @@ package compose
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,6 +140,50 @@ func TestProvider_Up_RejectsMissingComposeFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "does-not-exist.yml") {
 		t.Errorf("error %q should name the missing file", err.Error())
+	}
+}
+
+// TestProvider_Up_RejectsPortAlreadyInUse is the regression guard for
+// the Fault_PortConflict finding: docker compose up's own bind
+// failure is not reliably surfaced on every Docker backend (Docker
+// Desktop's macOS proxy layer can silently paper over a host-side
+// conflict that a native Linux daemon would reject) — Up() must
+// proactively check port availability itself, the same way the
+// mysql/postgres/redis/elasticsearch docker.go plugins already do via
+// dockerutil.IsPortFree, rather than trusting `docker compose up`'s
+// exit code alone.
+func TestProvider_Up_RejectsPortAlreadyInUse(t *testing.T) {
+	p := New()
+	worktreeRoot := t.TempDir()
+	repoDir := filepath.Join(worktreeRoot, "auba-api")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "compose.yml"), []byte("services: {redis: {}}"), 0o644); err != nil {
+		t.Fatalf("seed compose.yml: %v", err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	err = p.Up(context.Background(), &api.UpReq{
+		WorktreeRoot: repoDir,
+		Ports:        []api.PortSpec{{Role: "main", Port: port}},
+		Extras: map[string]string{
+			"compose.file":        "auba-api/compose.yml",
+			"compose.service":     "redis",
+			"compose.target_port": "6379",
+		},
+	})
+	if err == nil {
+		t.Fatal("Up on a port already held by a sidecar listener = nil error, want an error")
+	}
+	if !strings.Contains(err.Error(), "already in use") {
+		t.Errorf("error %q should mention the port conflict", err.Error())
 	}
 }
 

@@ -15,15 +15,31 @@
 //     the operator's own compose.yml) so the host-allocated port and a
 //     bough-owned container_name are injected without any edits to the
 //     checked-in file.
-//   - Down stops only the target service (never the sibling services
-//     that may share the same compose file), by re-deriving the same
-//     override + project name a sidecar state file recorded at Up
-//     time — DownReq carries no Extras, so this information cannot
-//     otherwise survive between RPCs.
+//   - Down stops AND removes only the target service's container
+//     (never the sibling services that may share the same compose
+//     file, and never `down`, which would also tear down the shared
+//     project network/volumes). It re-derives the override + project
+//     name from a sidecar state file Up recorded — DownReq carries no
+//     Extras, so this information cannot otherwise survive between
+//     RPCs. The container is removed (not just stopped) because its
+//     name is deterministic by host port alone (bough-compose-<port>,
+//     not project-scoped): leaving a stopped-but-present container
+//     behind would collide with a LATER worktree's Up() once bough's
+//     allocator reuses that same port.
 //   - Cleanup is an intentional no-op: compose owns its own named
 //     volumes, which Cleanup's (ctx, datadir, ports) signature has no
 //     way to address, and reaching into an operator-owned compose
 //     project's storage is arguably not this plugin's business anyway.
+//
+// Known gap: Down never removes the compose project's own network
+// (`docker network rm`), by design — scoping every operation to the
+// single target service means this plugin never knows whether a
+// sibling service (from the same compose file, under a different
+// Engine entry) still needs that shared network. The network is
+// harmless leftover cruft (no port/name collision risk, since network
+// names are project-scoped) rather than a functional defect; an
+// operator who wants it gone can `docker network prune` or remove it
+// manually.
 //
 // darwin / linux only — the docker CLI's compose plugin targets both;
 // Windows is out of scope for the same reason the other 4 plugins are.
@@ -137,9 +153,18 @@ type composeOverrideDoc struct {
 }
 
 type composeOverrideService struct {
-	ContainerName string            `yaml:"container_name"`
-	Ports         []composePortSpec `yaml:"ports"`
-	Labels        map[string]string `yaml:"labels"`
+	ContainerName string `yaml:"container_name"`
+	// Ports is a yaml.Node (not []composePortSpec directly) so its Tag
+	// can be forced to "!override" — the compose-spec merge directive
+	// that replaces the base file's ports list wholesale. Without it,
+	// `docker compose -f base -f override` APPENDS this plugin's port
+	// mapping alongside whatever the operator's own compose file
+	// already declared (e.g. a hardcoded "6379:6379"), publishing the
+	// service on BOTH ports and defeating worktree isolation —
+	// confirmed empirically against docker compose v5.0.2 before
+	// landing this fix.
+	Ports  yaml.Node         `yaml:"ports"`
+	Labels map[string]string `yaml:"labels"`
 }
 
 // composePortSpec uses compose's long-form port syntax (target/
@@ -172,13 +197,19 @@ const (
 // `bough-<engine>-<port>` requirement, so this plugin forces it via
 // the override rather than compose's default).
 func renderOverride(spec overrideSpec) ([]byte, error) {
+	var portsNode yaml.Node
+	if err := portsNode.Encode([]composePortSpec{
+		{Target: spec.TargetPort, Published: strconv.Itoa(spec.HostPort), Protocol: "tcp"},
+	}); err != nil {
+		return nil, fmt.Errorf("encode ports node: %w", err)
+	}
+	portsNode.Tag = "!override"
+
 	doc := composeOverrideDoc{
 		Services: map[string]composeOverrideService{
 			spec.Service: {
 				ContainerName: fmt.Sprintf("bough-compose-%d", spec.HostPort),
-				Ports: []composePortSpec{
-					{Target: spec.TargetPort, Published: strconv.Itoa(spec.HostPort), Protocol: "tcp"},
-				},
+				Ports:         portsNode,
 				Labels: map[string]string{
 					labelManaged:        "true",
 					labelEngine:         "compose",

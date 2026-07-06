@@ -14,6 +14,8 @@ import (
 	"time"
 
 	api "github.com/ikeikeikeike/bough/plugins/engine/api"
+
+	"github.com/ikeikeikeike/bough/pkg/dockerutil"
 )
 
 // composeURLSchemes maps a well-known compose service name to the URL
@@ -70,6 +72,16 @@ func (p *Provider) Up(ctx context.Context, req *api.UpReq) error {
 	}
 	if _, err := os.Stat(composeFile); err != nil {
 		return fmt.Errorf("compose: Up: compose file %s: %w", composeFile, err)
+	}
+
+	// docker compose up's own bind failure is not reliably surfaced on
+	// every backend (Docker Desktop's macOS proxy layer can silently
+	// paper over a host-side conflict a native Linux daemon would
+	// reject), so check proactively rather than trust the exit code —
+	// same pattern the mysql/postgres/redis/elasticsearch docker.go
+	// plugins already use via this exact helper.
+	if !dockerutil.IsPortFree(port) {
+		return fmt.Errorf("compose: Up: port %d already in use on 127.0.0.1 — stop the conflicting service or move bough's port range", port)
 	}
 
 	project := req.Extras["compose.project"]
@@ -200,10 +212,24 @@ func (p *Provider) Down(ctx context.Context, req *api.DownReq) error {
 	}
 	gctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(gctx, "docker", "compose",
+	stopCmd := exec.CommandContext(gctx, "docker", "compose",
 		"-f", composeFile, "-f", overridePath, "-p", st.Project, "stop", st.Service)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := stopCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("compose: Down: docker compose stop failed: %w\n%s", err, out)
+	}
+
+	// container_name is deterministic by HOST PORT ALONE (bough-
+	// compose-<port>), not scoped by project — stop-without-remove
+	// would leave that name occupied by an Exited container, so a
+	// LATER worktree that gets allocated the same (now-free) port
+	// hits a container-name conflict on its own Up() instead of
+	// cleanly reusing the name. `rm` (no -v) removes only the
+	// container instance, never the compose-managed volumes Cleanup
+	// intentionally leaves alone.
+	rmCmd := exec.CommandContext(ctx, "docker", "compose",
+		"-f", composeFile, "-f", overridePath, "-p", st.Project, "rm", "-f", st.Service)
+	if out, err := rmCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("compose: Down: docker compose rm failed: %w\n%s", err, out)
 	}
 	return nil
 }
