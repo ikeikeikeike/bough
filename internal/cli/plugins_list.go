@@ -3,7 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os/exec"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -69,10 +69,5 @@ func runPluginsList(ctx context.Context, stdout interface{ Write([]byte) (int, e
 }
 
 func pathEnv() string {
-	// indirection so unit tests can inject a fixture PATH via fakeExec
-	out, err := exec.Command("sh", "-c", "printf %s \"$PATH\"").Output()
-	if err != nil {
-		return ""
-	}
-	return string(out)
+	return os.Getenv("PATH")
 }

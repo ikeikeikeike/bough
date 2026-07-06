@@ -38,10 +38,10 @@ func TestRedisConformance(t *testing.T) {
 		ReadyTimeout:    redisConformanceReadyMax,
 		IdempotentCount: 2,
 		NativeProbe:     conformance.RedisPing,
-		// The plugin only bind-mounts Datadir; redis-server writes
-		// AOF to /data inside the container. chmod 0o000 on the host
-		// would crash redis-server after Up returns, not before, so
-		// the fault path cannot surface through Up's error.
-		SkipDatadirPermission: true,
+		// SkipDatadirPermission is intentionally NOT set: the
+		// Fault_DatadirPermission case forces the host-process
+		// (services-flake) backend, whose Up mkdirs Datadir
+		// synchronously and so surfaces a 0o000 parent as a real Up
+		// error. See conformance.Config.DatadirFaultBackend.
 	})
 }

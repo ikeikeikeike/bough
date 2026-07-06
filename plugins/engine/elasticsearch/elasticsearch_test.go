@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	api "github.com/ikeikeikeike/bough/plugins/engine/api"
+
+	"github.com/ikeikeikeike/bough/pkg/procutil"
 )
 
 func TestProvider_PortRangeDefault(t *testing.T) {
@@ -59,11 +61,71 @@ func TestProvider_EnvVars(t *testing.T) {
 	}
 }
 
+func TestHeapSizePattern(t *testing.T) {
+	valid := []string{"1g", "512m", "2048k", "1G", "256M", "1024", "10g"}
+	for _, v := range valid {
+		if !heapSizePattern.MatchString(v) {
+			t.Errorf("heapSizePattern rejected a valid heap %q", v)
+		}
+	}
+	// Reject anything a stray extras.heap could smuggle into the
+	// ES_JAVA_OPTS="-Xms${heap}..." shell interpolation (issue #82 item 6).
+	invalid := []string{"", "1gb", "1.5g", "-1g", "abc", "1 g", `1g"`, "$(whoami)", "1g; rm -rf /"}
+	for _, v := range invalid {
+		if heapSizePattern.MatchString(v) {
+			t.Errorf("heapSizePattern accepted an invalid/injectable heap %q", v)
+		}
+	}
+}
+
+func TestValidateHeap(t *testing.T) {
+	valid := []string{"1g", "512m", "2048k", "1G", "256M", "1024", "10g"}
+	for _, v := range valid {
+		if err := validateHeap(v); err != nil {
+			t.Errorf("validateHeap(%q) = %v, want nil", v, err)
+		}
+	}
+	invalid := []string{"", "1gb", "1.5g", "-1g", "abc", "1 g", `1g"`, "$(whoami)", "1g; rm -rf /"}
+	for _, v := range invalid {
+		if err := validateHeap(v); err == nil {
+			t.Errorf("validateHeap(%q) = nil, want an error", v)
+		}
+	}
+}
+
+// TestProvider_Up_InvalidHeapRejectedBeforeLogFileOpen is the
+// regression guard for the fd-leak found by reviewing this PR: the
+// heap-format check used to run AFTER opening the startup log file, so
+// the early-return on an invalid heap leaked that file handle (the
+// sibling cmd.Start() failure path a few lines later does close it).
+// Validating the heap before any file is opened both fixes the leak
+// and is directly observable: the startup log must not exist at all
+// after Up() rejects a bad heap.
+func TestProvider_Up_InvalidHeapRejectedBeforeLogFileOpen(t *testing.T) {
+	tmp := t.TempDir()
+	p := New()
+	err := p.Up(context.Background(), &api.UpReq{
+		WorktreeRoot: tmp,
+		Ports:        []api.PortSpec{{Role: "main", Port: 59200}},
+		Extras:       map[string]string{"heap": "1g; rm -rf /"},
+	})
+	if err == nil {
+		t.Fatal("Up with an invalid heap = nil error, want an error")
+	}
+	if !strings.Contains(err.Error(), "invalid heap") {
+		t.Errorf("Up error = %q, want it to mention invalid heap", err)
+	}
+	logPath := filepath.Join(tmp, startupLogRelative)
+	if _, statErr := os.Stat(logPath); statErr == nil {
+		t.Errorf("Up with an invalid heap created the startup log at %s — heap validation must run before opening it", logPath)
+	}
+}
+
 func TestDeployFlake_extractsEmbeddedAssets(t *testing.T) {
 	tmp := t.TempDir()
 	dst := filepath.Join(tmp, "extracted")
-	if err := deployFlake(dst); err != nil {
-		t.Fatalf("deployFlake: %v", err)
+	if err := procutil.DeployFlake(nixAssets, "nix", dst); err != nil {
+		t.Fatalf("DeployFlake: %v", err)
 	}
 	flakePath := filepath.Join(dst, "flake.nix")
 	if _, err := os.Stat(flakePath); err != nil {

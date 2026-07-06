@@ -254,6 +254,30 @@ func TestCopyProject_FollowsFileSymlink(t *testing.T) {
 	}
 }
 
+// TestEccImport_UnresolvableHomeSurfacesRealCause is the regression
+// guard for the fsutil.ExpandHome/ExpandHomeStrict unification: ecc
+// import's own RunE used to propagate a UserHomeDir failure directly;
+// after unifying on the shared ExpandHome (which never errors), a
+// "~"-prefixed --from with $HOME unset silently continued with the
+// literal, un-expanded path and failed later with a generic "ECC root
+// not found at ~/..." instead of the real cause. RunE must use the
+// strict variant and surface that cause.
+func TestEccImport_UnresolvableHomeSurfacesRealCause(t *testing.T) {
+	t.Setenv("HOME", "")
+	cmd := newEccImportCmd()
+	cmd.SetArgs([]string{"--from", "~/some-ecc-root"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected an error when $HOME is unset and --from starts with ~")
+	}
+	if strings.Contains(err.Error(), "ECC root not found") {
+		t.Errorf("error masked the real UserHomeDir cause behind a generic not-found message: %v", err)
+	}
+}
+
 func TestReadECCProjects(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "projects.json"),

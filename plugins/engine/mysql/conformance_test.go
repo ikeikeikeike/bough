@@ -48,13 +48,11 @@ func TestMySQLConformance(t *testing.T) {
 		// no DSN — so the AssertShellSafe stays strict.
 		AllowShellMetachars: false,
 		NativeProbe:         mysqlHandshakeProbe,
-		// The plugin only bind-mounts Datadir; it never writes there
-		// itself, so a chmod 0o000 parent does not surface as an Up
-		// error. The mysqld process inside the container would crash
-		// on its first transaction log write, but by then Up has long
-		// returned success. AssertReachable + NativeProbe cover the
-		// downstream failure already.
-		SkipDatadirPermission: true,
+		// SkipDatadirPermission is intentionally NOT set: the
+		// Fault_DatadirPermission case forces the host-process
+		// (services-flake) backend, whose Up mkdirs Datadir
+		// synchronously and so surfaces a 0o000 parent as a real Up
+		// error. See conformance.Config.DatadirFaultBackend.
 	})
 }
 

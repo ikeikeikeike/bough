@@ -119,7 +119,9 @@ func runRemove(ctx context.Context, stderr io.Writer, cfg *config.Config, monore
 			c.Dir = repoDst
 			c.Stdout = hookOut
 			c.Stderr = hookOut
-			_ = c.Run()
+			if err := c.Run(); err != nil {
+				logf(stderr, "[bough] %s pre_remove: %v", repo.Name, err)
+			}
 		}
 		if _, err := os.Stat(repoSrc); err != nil {
 			continue
