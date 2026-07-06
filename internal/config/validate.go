@@ -22,6 +22,10 @@ import (
 //  4. Engine.Kind values must be unique — spawning two
 //     `bough-plugin-mysql` instances for the same worktree would
 //     clash on /tmp socket path.
+//  5. An Engine with Kind == "compose" must carry a compose: block
+//     (file, service) — the plugin wraps an existing docker-compose
+//     file/service rather than provisioning its own, so it has
+//     nothing to do without one.
 //
 // All semantic errors are accumulated and returned as a single joined
 // error so a config-file author sees every problem at once instead of
@@ -59,6 +63,14 @@ func (c *Config) validateSemantic() error {
 			if pr[0] <= 0 || pr[1] <= pr[0] {
 				errs = append(errs, fmt.Errorf("config: engines[%d].port_ranges[%s]=%v must be [low,high] with 0<low<high", i, role, pr))
 			}
+		}
+		// kind: compose has nothing to provision without a compose:
+		// block naming the file/service it wraps — struct tags alone
+		// cannot express "required only when Kind == compose" (once
+		// Compose is non-nil, its own File/Service "required" tags
+		// already run first via v.Struct(c) in Validate()).
+		if eng.Kind == "compose" && eng.Compose == nil {
+			errs = append(errs, fmt.Errorf("config: engines[%d].kind=compose requires a compose: block (file, service, target_port)", i))
 		}
 	}
 
