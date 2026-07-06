@@ -8,13 +8,17 @@ auto-generated `.env.local` in every sub-repo, and a worktree-local
 instance of every declared engine — all driven by one `.bough.yaml`
 at the monorepo root.
 
-bough itself is a small Go CLI plus four engine plugins
-(`bough-plugin-{mysql,postgres,redis,elasticsearch}`), wired together
-via Hashicorp go-plugin (gRPC over Unix socket). Each plugin defers
-the actual lifecycle (`up` / `ready check` / `down`) to a backend you
-choose: today that's [services-flake][services-flake] on top of Nix
-or a direct Docker SDK backend; the host's auto-detect picks one
-based on what's on the runner.
+bough itself is a small Go CLI plus five engine plugins
+(`bough-plugin-{mysql,postgres,redis,elasticsearch,compose}`), wired
+together via Hashicorp go-plugin (gRPC over Unix socket). Each of the
+first four defers the actual lifecycle (`up` / `ready check` / `down`)
+to a backend you choose: today that's [services-flake][services-flake]
+on top of Nix or a direct Docker SDK backend; the host's auto-detect
+picks one based on what's on the runner. `compose` is different by
+design — instead of provisioning its own engine, it wraps an EXISTING
+`docker-compose.yml`/service an operator already has, giving it only
+worktree-scoped port isolation (see [Compose-wrapped
+services](#compose-wrapped-services) below).
 
 The "what to isolate" is fully declarative — pick which repositories
 appear under `.worktrees/<name>/` and which engines spawn per worktree
@@ -103,7 +107,7 @@ users who prefer Docker over Nix can avoid Nix entirely.
 
 ## Install
 
-bough ships as 5 binaries (`bough` + 4 `bough-plugin-*`). Pick one:
+bough ships as 6 binaries (`bough` + 5 `bough-plugin-*`). Pick one:
 
 ```bash
 # 1. GitHub Release tarball (recommended; no Go / Nix toolchain needed)
@@ -115,7 +119,7 @@ bough ships as 5 binaries (`bough` + 4 `bough-plugin-*`). Pick one:
 arch=$(uname -m); case "$arch" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; esac
 tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/ikeikeikeike/bough/releases/latest); tag=${tag##*/}
 curl -fsSL "https://github.com/ikeikeikeike/bough/releases/download/${tag}/bough_${tag#v}_$(uname -s | tr A-Z a-z)_${arch}.tar.gz" \
-  | tar xz -C ~/.local/bin/  bough bough-plugin-mysql bough-plugin-postgres bough-plugin-redis bough-plugin-elasticsearch
+  | tar xz -C ~/.local/bin/  bough bough-plugin-mysql bough-plugin-postgres bough-plugin-redis bough-plugin-elasticsearch bough-plugin-compose
 #
 # macOS (Apple Silicon) one-time step: the release binaries are not
 # notarized, so Gatekeeper kills them on first run ("zsh: killed").
@@ -130,6 +134,7 @@ go install github.com/ikeikeikeike/bough/cmd/bough-plugin-mysql@latest
 go install github.com/ikeikeikeike/bough/cmd/bough-plugin-postgres@latest
 go install github.com/ikeikeikeike/bough/cmd/bough-plugin-redis@latest
 go install github.com/ikeikeikeike/bough/cmd/bough-plugin-elasticsearch@latest
+go install github.com/ikeikeikeike/bough/cmd/bough-plugin-compose@latest
 
 # 3. Nix flake (requires Nix with flakes enabled)
 nix run    github:ikeikeikeike/bough -- create --stdin-json
@@ -191,6 +196,17 @@ engines:
   #   initial_resources:
   #     - { type: vhost, name: dev }
 
+  # Wrap an EXISTING docker-compose.yml instead of provisioning a new
+  # engine — see "Compose-wrapped services" below.
+  # - kind: compose
+  #   version: "7-alpine"      # descriptive only; the real version lives in the compose file
+  #   port_ranges:
+  #     main: [59000, 59999]
+  #   compose:
+  #     file: "demo-api/compose.yml"   # relative to the monorepo worktree root
+  #     service: "redis"
+  #     target_port: 6379
+
 ports:
   api:    { range: [45000, 47999] }
 
@@ -243,6 +259,55 @@ After that, `claude --worktree F-FeatureName` deterministically:
 graceful plugin Down → lsof PID kill fallback → `git worktree remove`
 per sub-repo → registry cleanup → datadir teardown.
 
+## Compose-wrapped services
+
+The four bundled engines above are ones bough fully provisions itself
+(nix flake or a bough-managed Docker container). `kind: compose` is
+different: it wraps a `docker-compose.yml` you already have — no
+duplicate nix flake, no second source of truth for the image/version —
+and gives it only the one thing bough is actually good at:
+deterministic, worktree-scoped port isolation.
+
+```yaml
+engines:
+  - kind: compose
+    version: "7-alpine"       # descriptive only; the compose file owns the real version
+    port_ranges:
+      main: [59000, 59999]    # HOST port range bough allocates from
+    compose:
+      file: "demo-api/compose.yml"  # relative to the monorepo worktree root
+      service: "redis"              # only this service is touched — siblings in
+                                     # the same file are left alone
+      target_port: 6379             # the CONTAINER-side port the service listens on
+      # project: ""                 # optional; default "bough-<worktree>-<file>"
+      # env_prefix: ""              # optional; default upper(service) → BOUGH_REDIS_*
+```
+
+What bough does under the hood, without ever editing your compose
+file: it renders a small worktree-scoped override (fixed host port +
+a `bough-compose-<port>` container name) and runs `docker compose -f
+demo-api/compose.yml -f <override> -p <worktree-scoped-project> up -d
+redis`. Two worktrees pointing at the textually-identical file never
+collide — different project, different container, different port.
+
+Trade-offs versus the four native plugins, by design:
+
+- **`teardown.remove_datadir: true` does not touch compose-managed
+  volumes.** `Down` stops and removes the container; deleting the
+  data your compose file's own volumes hold is left to you, since
+  bough does not own that lifecycle here.
+- **`ReadyCheck` defaults to a plain TCP dial**, not a protocol-level
+  handshake (unlike the native plugins' mysql/redis/postgres/HTTP
+  probes). Set `extras: {compose.ready_probe: "redis"}` (or
+  `postgres` / `http`) on the engine entry if you want a real
+  protocol check instead.
+- **One compose service per `Engine` entry.** Wrapping two services
+  from the same compose file needs two separate `kind: compose`
+  engine entries pointing at the same `file` with different
+  `service`/`target_port` values — bough tears down each
+  independently but never removes the file's shared network, so it
+  is left behind as harmless cruft after the last one exits.
+
 ## CLI surface
 
 ```
@@ -277,7 +342,8 @@ bough/
 │   ├── bough-plugin-mysql/                 MySQL plugin entrypoint
 │   ├── bough-plugin-postgres/              PostgreSQL plugin entrypoint
 │   ├── bough-plugin-redis/                 Redis plugin entrypoint
-│   └── bough-plugin-elasticsearch/         Elasticsearch plugin entrypoint
+│   ├── bough-plugin-elasticsearch/         Elasticsearch plugin entrypoint
+│   └── bough-plugin-compose/               Compose-wrapper plugin entrypoint
 ├── internal/                              # worktree isolation core
 │   ├── cli/                                cobra subcommands
 │   ├── config/                             .bough.yaml schema (validator/v10)
@@ -304,7 +370,8 @@ bough/
 │       ├── mysql/                          MySQL 8.4 provider + embedded services-flake
 │       ├── postgres/                       PostgreSQL 16 provider + embedded services-flake
 │       ├── redis/                          Redis 7 provider + embedded services-flake
-│       └── elasticsearch/                  Elasticsearch 7 provider + process-compose-flake
+│       ├── elasticsearch/                  Elasticsearch 7 provider + process-compose-flake
+│       └── compose/                        Wraps an existing docker-compose.yml/service
 ├── tests/
 │   └── integration/                        real-services E2E (build tag: integration)
 ├── flake.nix                               devShells.ci / devShells.default
