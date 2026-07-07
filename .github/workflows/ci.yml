@@ -46,7 +46,7 @@ jobs:
       fail-fast: false
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
-        plugin: [mysql, postgres, redis, elasticsearch]
+        plugin: [mysql, postgres, redis, elasticsearch, compose]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -79,6 +79,9 @@ jobs:
             postgres)      docker pull postgres:17 ;;
             redis)         docker pull redis:7 ;;
             elasticsearch) docker pull docker.elastic.co/elasticsearch/elasticsearch:7.17.29 ;;
+            # compose wraps whatever image its own testdata/compose.yml
+            # declares (redis:7-alpine) rather than extras["docker.image"].
+            compose)       docker pull redis:7-alpine ;;
           esac
 
       - name: Build plugin binary

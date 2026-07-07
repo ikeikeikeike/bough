@@ -142,6 +142,30 @@ type Engine struct {
 	// an unbounded value here could silently wrap negative there.
 	ReadyTimeoutSec int               `yaml:"ready_timeout_sec" validate:"omitempty,min=1,max=86400"`
 	Extras          map[string]string `yaml:"extras"`
+	// Compose carries the parameters for kind: compose — a plugin that
+	// wraps an existing docker-compose file/service instead of
+	// provisioning its own engine. Nil for every other kind.
+	// validateSemantic requires it (non-nil, File/Service set) exactly
+	// when Kind == "compose".
+	Compose *ComposeSpec `yaml:"compose"`
+}
+
+// ComposeSpec identifies the pre-existing docker-compose file/service
+// a kind: compose Engine wraps. File is resolved by the plugin
+// relative to the raw worktree root (the directory containing every
+// declared repository as a sibling), not the engine-provider repo's
+// own worktree path.
+type ComposeSpec struct {
+	File       string `yaml:"file" validate:"required"`
+	Service    string `yaml:"service" validate:"required"`
+	TargetPort int    `yaml:"target_port" validate:"required,min=1,max=65535"`
+	// Project overrides the auto-derived, worktree-scoped compose
+	// project name (default: "bough-<worktree>-<service>").
+	Project string `yaml:"project"`
+	// EnvPrefix overrides the env-var prefix EnvVars() emits
+	// (BOUGH_<PREFIX>_HOST/_PORT/_URL). Defaults to
+	// strings.ToUpper(Service).
+	EnvPrefix string `yaml:"env_prefix"`
 }
 
 // InitialResource describes one resource (DB schema, kafka topic,

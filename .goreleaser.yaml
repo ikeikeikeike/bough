@@ -1,7 +1,7 @@
 # GoReleaser config for bough.
-# Builds the host + the four bundled engine plugins
-# (mysql / postgres / redis / elasticsearch) together so every release
-# archive is self-contained: an operator who downloads
+# Builds the host + the five bundled engine plugins
+# (mysql / postgres / redis / elasticsearch / compose) together so
+# every release archive is self-contained: an operator who downloads
 # `bough_v0.4.0_darwin_arm64.tar.gz` already has every
 # `bough-plugin-<kind>` on PATH without a second install step.
 # (External plugin authors keep distributing their own
@@ -105,6 +105,23 @@ builds:
     env:
       - CGO_ENABLED=0
 
+  - id: bough-plugin-compose
+    main: ./cmd/bough-plugin-compose
+    binary: bough-plugin-compose
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s
+      - -w
+    env:
+      - CGO_ENABLED=0
+
   # v0.5-v0.8 memory subsystem + MCP server: deleted on the v0.9
   # reset (= ECC verbatim port). claude --print subprocess does the
   # LLM work, so neither bough-plugin-memory-{sqlite,mem0} nor
@@ -119,6 +136,7 @@ archives:
       - bough-plugin-postgres
       - bough-plugin-redis
       - bough-plugin-elasticsearch
+      - bough-plugin-compose
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     formats:

@@ -36,6 +36,74 @@ func (f *fakeEngineProvider) EnvVars(context.Context, *engineapi.EnvVarsReq) (ma
 	return f.envVars, f.envErr
 }
 
+// TestBuildEngineExtras_FlattensCompose is the regression guard for
+// the kind: compose wiring: Engine.Compose is the only conduit for
+// compose.file/service/target_port/project/env_prefix to reach
+// UpReq.Extras, since UpReq.Extras (a map[string]string) is the sole
+// channel from config to plugin — the typed ComposeSpec field exists
+// purely for config-time validation and must still be flattened here.
+func TestBuildEngineExtras_FlattensCompose(t *testing.T) {
+	eng := config.Engine{
+		Kind:    "compose",
+		Version: "7-alpine",
+		Compose: &config.ComposeSpec{
+			File:       "auba-api/compose.yml",
+			Service:    "redis",
+			TargetPort: 6379,
+		},
+	}
+	extras := buildEngineExtras(eng, "")
+	want := map[string]string{
+		"compose.file":        "auba-api/compose.yml",
+		"compose.service":     "redis",
+		"compose.target_port": "6379",
+		"version":             "7-alpine",
+	}
+	for k, v := range want {
+		if got := extras[k]; got != v {
+			t.Errorf("extras[%q] = %q, want %q", k, got, v)
+		}
+	}
+	if _, ok := extras["compose.project"]; ok {
+		t.Errorf("compose.project should be absent when ComposeSpec.Project is empty, got %q", extras["compose.project"])
+	}
+	if _, ok := extras["compose.env_prefix"]; ok {
+		t.Errorf("compose.env_prefix should be absent when ComposeSpec.EnvPrefix is empty, got %q", extras["compose.env_prefix"])
+	}
+}
+
+// TestBuildEngineExtras_ComposeOptionalFields confirms Project/
+// EnvPrefix pass through when the operator does set them.
+func TestBuildEngineExtras_ComposeOptionalFields(t *testing.T) {
+	eng := config.Engine{
+		Kind: "compose",
+		Compose: &config.ComposeSpec{
+			File: "a/compose.yml", Service: "redis", TargetPort: 6379,
+			Project: "my-project", EnvPrefix: "CACHE",
+		},
+	}
+	extras := buildEngineExtras(eng, "")
+	if got := extras["compose.project"]; got != "my-project" {
+		t.Errorf("compose.project = %q, want %q", got, "my-project")
+	}
+	if got := extras["compose.env_prefix"]; got != "CACHE" {
+		t.Errorf("compose.env_prefix = %q, want %q", got, "CACHE")
+	}
+}
+
+// TestBuildEngineExtras_NonComposeEngineUnaffected guards against a
+// future edit accidentally emitting compose.* keys for the other four
+// engine kinds, which never set Engine.Compose.
+func TestBuildEngineExtras_NonComposeEngineUnaffected(t *testing.T) {
+	eng := config.Engine{Kind: "mysql", Backend: "docker"}
+	extras := buildEngineExtras(eng, "")
+	for k := range extras {
+		if strings.HasPrefix(k, "compose.") {
+			t.Errorf("non-compose engine got a compose.* extras key: %q", k)
+		}
+	}
+}
+
 // engineTestConfig declares one mysql engine with an explicit backend
 // (so detectBackendIfNeeded never probes the real host) and a fixed
 // ready timeout the timeout-message assertion can pin.

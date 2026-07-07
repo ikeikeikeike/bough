@@ -160,6 +160,51 @@ func TestLoad_validExample(t *testing.T) {
 	}
 }
 
+// TestLoad_ComposeEngine_roundTrip is the positive-path companion to
+// the "compose kind" cases in TestLoad_rejectsInvalid: a well-formed
+// compose: block must load and populate Engine.Compose verbatim.
+func TestLoad_ComposeEngine_roundTrip(t *testing.T) {
+	tmpdir := t.TempDir()
+	path := filepath.Join(tmpdir, "config.yaml")
+	yaml := `schema_version: 2
+monorepo_root: "."
+repositories:
+  - {name: a, branch_strategy: develop, role: engine-provider}
+engines:
+  - kind: compose
+    version: "7-alpine"
+    port_ranges: {main: [56000, 56999]}
+    compose:
+      file: "auba-api/compose.yml"
+      service: redis
+      target_port: 6379
+registry: {path: .bough-ports.json}
+`
+	if err := writeFile(t, path, yaml); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: unexpected error: %v", err)
+	}
+	if got, want := len(c.Engines), 1; got != want {
+		t.Fatalf("Engines: got %d want %d", got, want)
+	}
+	eng := c.Engines[0]
+	if eng.Compose == nil {
+		t.Fatalf("Engine.Compose is nil, want a populated *ComposeSpec")
+	}
+	if got, want := eng.Compose.File, "auba-api/compose.yml"; got != want {
+		t.Errorf("Compose.File: got %q want %q", got, want)
+	}
+	if got, want := eng.Compose.Service, "redis"; got != want {
+		t.Errorf("Compose.Service: got %q want %q", got, want)
+	}
+	if got, want := eng.Compose.TargetPort, 6379; got != want {
+		t.Errorf("Compose.TargetPort: got %d want %d", got, want)
+	}
+}
+
 // Each entry exercises one of the validateSemantic / struct-tag
 // failure modes. The test asserts both that Load returns an error and
 // that the error message contains an identifying substring, so a
@@ -279,6 +324,37 @@ repositories:
 registry: {path: .bough-ports.json}
 `,
 			wantInErr: "typo_field",
+		},
+		{
+			// kind: compose delegates to an existing docker-compose.yml
+			// instead of provisioning its own engine — the plugin has
+			// nothing to do without a compose: block naming the file/
+			// service/target_port.
+			name: "compose kind without compose block",
+			yaml: `schema_version: 2
+monorepo_root: "."
+repositories:
+  - {name: a, branch_strategy: develop, role: engine-provider}
+engines:
+  - {kind: compose, version: "7-alpine", port_ranges: {main: [56000, 56999]}}
+registry: {path: .bough-ports.json}
+`,
+			wantInErr: "compose",
+		},
+		{
+			// Compose is non-nil here, so this exercises ComposeSpec's
+			// own struct-tag validation (v.Struct(c) in Validate()),
+			// not the validateSemantic "Compose == nil" rule above.
+			name: "compose kind with compose block missing file",
+			yaml: `schema_version: 2
+monorepo_root: "."
+repositories:
+  - {name: a, branch_strategy: develop, role: engine-provider}
+engines:
+  - {kind: compose, version: "7-alpine", port_ranges: {main: [56000, 56999]}, compose: {service: redis, target_port: 6379}}
+registry: {path: .bough-ports.json}
+`,
+			wantInErr: "File",
 		},
 	}
 

@@ -1,5 +1,45 @@
 # Changelog
 
+## v0.10.0
+
+Adds a 5th engine plugin, `bough-plugin-compose`. Instead of
+provisioning its own service, `kind: compose` wraps an EXISTING
+`docker-compose.yml` file/service (e.g. a monorepo's own
+`compose.yml`), giving it worktree-scoped port isolation without ever
+editing the operator's file. Chosen over a separate
+`external_services:` top-level concept for a smaller, cleaner
+`.bough.yaml` surface — the implementation-side workarounds a wrapped
+service needs (a sidecar state file, a no-op `Cleanup`, forced port
+replacement) are contained entirely inside the plugin.
+
+### Added
+
+- **`kind: compose`**: new `Engine.Compose` config block
+  (`file` / `service` / `target_port` / `project` / `env_prefix`). `Up`
+  renders a generated override compose file — forcing `container_name`
+  to `bough-compose-<port>` and replacing (not appending to) the
+  service's `ports:` mapping via the compose-spec `!override` tag —
+  and shells out to `docker compose up -d <service>`. `ReadyCheck`
+  defaults to a plain TCP probe, with `redis` / `postgres` / `http`
+  protocol variants selectable via `compose.ready_probe`. `Down` stops
+  and removes the container (`container_name` is deterministic by host
+  port alone, not project-scoped, so a stopped-but-present container
+  from a prior worktree would otherwise collide with a later worktree
+  reusing that port); a second `Up` against an already-running
+  container is a no-op, matching every other plugin's up-or-reuse
+  contract.
+
+### Known limitations
+
+- One compose service per `Engine` entry (`Engine.Kind` uniqueness);
+  wrapping multiple services from the same compose file is out of
+  scope for this release.
+- `Cleanup` is a no-op — compose-managed volumes are untouched by
+  `teardown.remove_datadir`.
+- `Down` does not remove the compose project's shared network (the
+  plugin cannot safely tell whether a sibling service still needs it)
+  — harmless cruft, not a collision risk.
+
 ## v0.9.29
 
 Fixes a mysql:8.4 docker-backend readiness race reported via an
