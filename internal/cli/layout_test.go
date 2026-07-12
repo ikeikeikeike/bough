@@ -7,22 +7,81 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ikeikeikeike/bough/internal/config"
 )
+
+// TestWorktreeSourceRepo pins Fix for the create/remove drift: the
+// source repo of a linked worktree must be recoverable from the
+// worktree's own gitlink, so `bough remove` targets the exact repo
+// `bough create` registered the worktree against regardless of what
+// resolveRepoSrc would now guess from live disk state.
+func TestWorktreeSourceRepo(t *testing.T) {
+	src := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		full := append([]string{"-C", src}, args...)
+		if out, err := exec.Command("git", full...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-b", "main")
+	git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init")
+
+	wt := filepath.Join(t.TempDir(), "wt")
+	if out, err := exec.Command("git", "-C", src, "worktree", "add", wt, "-b", "feat").CombinedOutput(); err != nil {
+		t.Fatalf("worktree add: %v\n%s", err, out)
+	}
+
+	got, ok := worktreeSourceRepo(wt)
+	if !ok {
+		t.Fatal("worktreeSourceRepo returned ok=false for a real linked worktree")
+	}
+	// macOS t.TempDir() lives behind /private symlinks; compare resolved.
+	want, _ := filepath.EvalSymlinks(src)
+	gotResolved, _ := filepath.EvalSymlinks(got)
+	if gotResolved != want {
+		t.Errorf("worktreeSourceRepo = %q (resolved %q), want the source repo %q", got, gotResolved, want)
+	}
+
+	if _, ok := worktreeSourceRepo(t.TempDir()); ok {
+		t.Error("worktreeSourceRepo must return ok=false for a non-git dir (caller falls back to resolveRepoSrc)")
+	}
+}
 
 // TestWarnIfRootNotGit pins the 竹 heads-up: a non-git monorepo root
 // gets a warning that `--worktree X --resume Y` won't find sessions
-// started there (plus the two-line .gitignore suggestion), while a
-// git-initialised root stays silent.
+// started there, plus a .gitignore suggestion that reflects the layout
+// THIS monorepo actually uses; a git-initialised root stays silent.
 func TestWarnIfRootNotGit(t *testing.T) {
-	t.Run("non-git root warns about resume + suggests gitignore", func(t *testing.T) {
+	t.Run("fresh non-git root suggests the v0.11 layout", func(t *testing.T) {
 		root := t.TempDir()
 		var buf bytes.Buffer
-		warnIfRootNotGit(&buf, root)
+		warnIfRootNotGit(&buf, &config.Config{}, root)
 		out := buf.String()
 		for _, want := range []string{"not a git repository", "--resume", ".bough/", "worktrees/"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("warning missing %q; got:\n%s", want, out)
 			}
+		}
+	})
+
+	t.Run("legacy .worktrees/ layout is suggested verbatim, not the new name", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, ".worktrees"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		// A pre-v0.11 root-level checkout that .bough/ would NOT cover.
+		mkGitRepo(t, filepath.Join(root, "auba-api"))
+		var buf bytes.Buffer
+		warnIfRootNotGit(&buf, &config.Config{Repositories: []config.Repository{{Name: "auba-api"}}}, root)
+		got := gitignoreSuggestions(&config.Config{Repositories: []config.Repository{{Name: "auba-api"}}}, root)
+		want := []string{".bough/", ".worktrees/", "auba-api/"}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("gitignoreSuggestions = %v, want %v (legacy .worktrees/ + root-level checkout must be covered)", got, want)
+		}
+		if strings.Contains(buf.String(), " worktrees/\n") {
+			t.Errorf("must not suggest the non-hidden worktrees/ when the legacy .worktrees/ is in use:\n%s", buf.String())
 		}
 	})
 
@@ -32,7 +91,7 @@ func TestWarnIfRootNotGit(t *testing.T) {
 			t.Fatalf("git init: %v\n%s", err, out)
 		}
 		var buf bytes.Buffer
-		warnIfRootNotGit(&buf, root)
+		warnIfRootNotGit(&buf, &config.Config{}, root)
 		if buf.Len() != 0 {
 			t.Errorf("git root must stay silent; got:\n%s", buf.String())
 		}

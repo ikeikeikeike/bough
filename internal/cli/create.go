@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -97,7 +98,7 @@ func runCreate(ctx context.Context, stderr, stdout io.Writer, cfg *config.Config
 	// wrapper and behave as before.
 	stderr = termio.Wrap(stderr)
 	logf(stderr, "[bough] create %s @ %s", name, monorepoRoot)
-	warnIfRootNotGit(stderr, monorepoRoot)
+	warnIfRootNotGit(stderr, cfg, monorepoRoot)
 	worktreeRoot := filepath.Join(worktreesDir(monorepoRoot), name)
 	if err := os.MkdirAll(worktreeRoot, 0o755); err != nil {
 		return fmt.Errorf("mkdir worktree root: %w", err)
@@ -542,9 +543,47 @@ func isGitRepo(p string) bool {
 // "Can only use --worktree in a git repository" error is this check
 // failing). Walks up like git itself, so a monorepo root nested inside
 // a parent repo also counts.
-func insideGitWorkTree(dir string) bool {
+//
+// determined is false when git could not even be run (binary missing
+// from PATH, dir unreadable): git ran-and-said-no is an *exec.ExitError
+// and yields a definite (false, true), but a launch failure must NOT be
+// reported as a confident "not a git repo" — callers skip their warning
+// rather than mis-diagnose a PATH problem as a missing `git init`.
+func insideGitWorkTree(dir string) (inside, determined bool) {
 	out, err := exec.Command("git", "-C", dir, "rev-parse", "--is-inside-work-tree").Output()
-	return err == nil && strings.TrimSpace(string(out)) == "true"
+	if err == nil {
+		return strings.TrimSpace(string(out)) == "true", true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return false, true
+	}
+	return false, false
+}
+
+// worktreeSourceRepo returns the source repository a linked worktree at
+// worktreeDst was created from, read from the worktree's OWN gitlink
+// (`git rev-parse --git-common-dir` resolves to `<sourceRepo>/.git`).
+// This is authoritative at remove time — unlike re-deriving the source
+// via resolveRepoSrc, which reads live on-disk state and can drift to a
+// different location than create used (e.g. after the operator migrates
+// a checkout into .bough/repos/), pointing `git worktree remove` at a
+// repo that never registered this worktree. ok is false when worktreeDst
+// is absent or not a linked worktree, so the caller can fall back.
+func worktreeSourceRepo(worktreeDst string) (string, bool) {
+	out, err := exec.Command("git", "-C", worktreeDst, "rev-parse", "--git-common-dir").Output()
+	if err != nil {
+		return "", false
+	}
+	commonDir := strings.TrimSpace(string(out))
+	if commonDir == "" {
+		return "", false
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(worktreeDst, commonDir)
+	}
+	// commonDir is the shared <sourceRepo>/.git; its parent is the repo.
+	return filepath.Dir(commonDir), true
 }
 
 // warnIfRootNotGit prints a heads-up when the monorepo root is not inside
@@ -559,9 +598,12 @@ func insideGitWorkTree(dir string) bool {
 // making `--worktree ... --resume` work.
 //
 // bough only SUGGESTS the .gitignore lines; it never edits .gitignore
-// itself — the repo's ignore policy is the operator's to own.
-func warnIfRootNotGit(stderr io.Writer, monorepoRoot string) {
-	if insideGitWorkTree(monorepoRoot) {
+// itself — the repo's ignore policy is the operator's to own. The
+// suggested lines reflect the layout THIS monorepo actually uses (see
+// gitignoreSuggestions), so an operator on the legacy layout is not
+// told to ignore paths that do not exist while the real ones leak in.
+func warnIfRootNotGit(stderr io.Writer, cfg *config.Config, monorepoRoot string) {
+	if inside, determined := insideGitWorkTree(monorepoRoot); inside || !determined {
 		return
 	}
 	logf(stderr, "[bough] note: %s is not a git repository.", monorepoRoot)
@@ -569,8 +611,33 @@ func warnIfRootNotGit(stderr io.Writer, monorepoRoot string) {
 	logf(stderr, "[bough]   (Claude Code anchors hook-based worktree sessions to the launch dir). Resume with")
 	logf(stderr, "[bough]   plain `claude --resume <id>` from %s instead.", monorepoRoot)
 	logf(stderr, "[bough]   To enable `--worktree ... --resume`, `git init` this dir and .gitignore:")
-	logf(stderr, "[bough]     .bough/")
-	logf(stderr, "[bough]     worktrees/")
+	for _, entry := range gitignoreSuggestions(cfg, monorepoRoot) {
+		logf(stderr, "[bough]     %s", entry)
+	}
+}
+
+// gitignoreSuggestions returns the .gitignore entries that actually
+// cover this monorepo's bough-generated artifacts under whichever
+// layout is in use: `.bough/` (registry + v0.11 checkouts), the real
+// worktrees dir (`worktrees/` or the legacy hidden `.worktrees/`), and
+// — for a monorepo still on the pre-v0.11 layout — every sub-repo whose
+// checkout sits directly at the root, which `.bough/` does not cover.
+func gitignoreSuggestions(cfg *config.Config, monorepoRoot string) []string {
+	set := map[string]struct{}{
+		boughDir + "/": {},
+		filepath.Base(worktreesDir(monorepoRoot)) + "/": {},
+	}
+	for _, repo := range cfg.Repositories {
+		if resolveRepoSrc(monorepoRoot, repo.Name) == filepath.Join(monorepoRoot, repo.Name) {
+			set[repo.Name+"/"] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for e := range set {
+		out = append(out, e)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ensureSymlink makes linkPath an absolute symlink to target, idempotently. An
@@ -810,11 +877,11 @@ func toResourceSpecs(in []config.InitialResource) []engineapi.ResourceSpec {
 	return out
 }
 
-// resolveRegistryPath picks the v0.4 canonical `.bough-ports.json`
-// when it exists, otherwise falls back to whatever the YAML declared
-// (typically v0.3's `.worktree-ports.json`). The host's registry
-// loader auto-upgrades legacy keys in either case, so the operator
-// can rename at any pace during the v0.4.x transition.
+// resolveRegistryPath picks the v0.11 canonical `.bough/ports.json`
+// when it exists, then the pre-v0.11 `.bough-ports.json`, and finally
+// whatever the YAML declared (typically v0.3's `.worktree-ports.json`).
+// The host's registry loader auto-upgrades legacy keys in every case,
+// so the operator can migrate at any pace.
 func resolveRegistryPath(monorepoRoot, yamlPath string) string {
 	// Preference order: the v0.11 `.bough/ports.json` (so a migrated
 	// monorepo stops reading the flat file), then the pre-v0.11
