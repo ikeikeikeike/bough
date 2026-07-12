@@ -117,31 +117,58 @@ func pickHeap(req *api.UpReq) string {
 }
 
 // defaultMemLimitMultiplier follows Elastic's own Docker sizing
-// guidance (heap <= 50% of container memory, with 1-2 GB headroom for
-// Lucene + the filesystem cache above the heap): doubling the heap
+// guidance (heap <= 50% of container memory): doubling the heap
 // satisfies that ratio with a single, easy-to-reason-about knob.
 const defaultMemLimitMultiplier = 2
 
+// minHeadroomBytes is the floor on how much RAM the container limit
+// leaves ABOVE the JVM heap for Lucene, the filesystem cache, and bulk
+// workloads (esreindex). Elastic recommends 1-2 GB of such headroom;
+// 2x heap alone only supplies heap-sized headroom, which is under 1 GB
+// once the heap drops below 1 GB — so the default takes the max of the
+// two. 1 GiB.
+const minHeadroomBytes = 1 << 30
+
 // pickMemoryLimitBytes returns the Docker container memory limit (the
-// `--memory` equivalent) to enforce alongside the JVM heap. An explicit
-// `extras["es.mem_limit"]` always wins; otherwise it defaults to
-// defaultMemLimitMultiplier times the (already-validated) heap size.
-// heap is guaranteed parseable by RAMInBytes too: validateHeap's
-// pattern (`\d+[kmgKMG]?`) is a strict subset of what RAMInBytes
-// accepts.
+// `--memory` equivalent) to enforce alongside the JVM heap.
+//
+//   - An explicit `extras["es.mem_limit"]` wins, but must be >= the heap
+//     (a cap below -Xmx OOM-kills the JVM at startup, then dockerReadyCheck
+//     just times out with a misleading "not ready").
+//   - Otherwise the default is max(2x heap, heap + minHeadroomBytes), so
+//     even a small heap keeps Elastic's recommended above-heap budget.
+//
+// heap is already validated by validateHeap, whose pattern
+// (`\d+[kmgKMG]?`) is a strict subset of what RAMInBytes accepts — but
+// it admits "0", so the non-positive guard below still matters.
 func pickMemoryLimitBytes(req *api.UpReq, heap string) (int64, error) {
+	heapBytes, err := units.RAMInBytes(heap)
+	if err != nil {
+		return 0, fmt.Errorf("invalid heap %q for memory-limit derivation: %w", heap, err)
+	}
+	if heapBytes <= 0 {
+		return 0, fmt.Errorf("invalid heap %q for memory-limit derivation (want e.g. 512m, 1g)", heap)
+	}
+
 	if v := req.Extras["es.mem_limit"]; v != "" {
 		limit, err := units.RAMInBytes(v)
-		if err != nil || limit <= 0 {
+		if err != nil {
 			return 0, fmt.Errorf("invalid es.mem_limit %q from extras (want e.g. 2g, 1500m): %w", v, err)
+		}
+		if limit <= 0 {
+			return 0, fmt.Errorf("invalid es.mem_limit %q from extras (want e.g. 2g, 1500m)", v)
+		}
+		if limit < heapBytes {
+			return 0, fmt.Errorf("es.mem_limit %q (%d bytes) is below the JVM heap %q (%d bytes); the container would OOM at startup — set es.mem_limit >= es.heap (Elastic recommends >= 2x heap)", v, limit, heap, heapBytes)
 		}
 		return limit, nil
 	}
-	heapBytes, err := units.RAMInBytes(heap)
-	if err != nil || heapBytes <= 0 {
-		return 0, fmt.Errorf("invalid heap %q for memory-limit derivation: %w", heap, err)
+
+	doubled := heapBytes * defaultMemLimitMultiplier
+	if withHeadroom := heapBytes + minHeadroomBytes; withHeadroom > doubled {
+		return withHeadroom, nil
 	}
-	return heapBytes * defaultMemLimitMultiplier, nil
+	return doubled, nil
 }
 
 // pluginsYAMLFilename is the name Elastic's own Docker entrypoint looks
@@ -169,6 +196,11 @@ type pluginsYAMLEntry struct {
 // in its YAML behaves exactly as it did before this feature existed —
 // dockerUp skips the bind-mount entirely rather than mounting an empty
 // file over the image's own config dir.
+//
+// Like every other container-shaping input (image, env, ulimits), this
+// only takes effect on a FRESH Up: dockerUp's up-or-reuse short-circuit
+// returns before this is called, so a plugin newly added to `plugins:`
+// installs on the next Down+Up, not into an already-running container.
 func writePluginsYAML(datadir string, plugins []api.PluginSpec) (string, error) {
 	if len(plugins) == 0 {
 		return "", nil
@@ -214,13 +246,13 @@ func resolveConfigMount(req *api.UpReq) (string, error) {
 	if src == "" {
 		return "", nil
 	}
-	if !filepath.IsAbs(src) {
-		if req.WorktreeRoot == "" {
-			return "", errors.New("es.config_mount is a relative path but WorktreeRoot is empty")
-		}
-		rawWorktreeRoot := filepath.Dir(req.WorktreeRoot)
-		src = filepath.Join(rawWorktreeRoot, src)
+	if !filepath.IsAbs(src) && req.WorktreeRoot == "" {
+		return "", errors.New("es.config_mount is a relative path but WorktreeRoot is empty")
 	}
+	// Same raw-worktree-root resolution kind: compose uses for
+	// compose.file — shared via api.ResolveUnderRawWorktreeRoot so the
+	// convention lives in one place.
+	src = api.ResolveUnderRawWorktreeRoot(req.WorktreeRoot, src)
 	if _, err := os.Stat(src); err != nil {
 		return "", fmt.Errorf("es.config_mount %s: %w", src, err)
 	}

@@ -100,17 +100,27 @@ func TestPickMemoryLimitBytes(t *testing.T) {
 		wantErr bool
 	}{
 		{"override via extras", &api.UpReq{Extras: map[string]string{"es.mem_limit": "3g"}}, "1g", 3 * 1024 * 1024 * 1024, false},
-		{"no override → 2x heap default", &api.UpReq{}, "1g", 2 * 1024 * 1024 * 1024, false},
-		{"no override → 2x heap default (512m)", &api.UpReq{}, "512m", 1024 * 1024 * 1024, false},
+		{"no override, 1g heap → 2x heap (>= heap+1GiB)", &api.UpReq{}, "1g", 2 * 1024 * 1024 * 1024, false},
+		{"no override, 512m heap → heap+1GiB headroom floor beats 2x", &api.UpReq{}, "512m", 512*1024*1024 + 1024*1024*1024, false},
+		{"no override, 2g heap → 2x heap (4GiB) beats heap+1GiB", &api.UpReq{}, "2g", 4 * 1024 * 1024 * 1024, false},
 		{"empty override falls back to default", &api.UpReq{Extras: map[string]string{"es.mem_limit": ""}}, "1g", 2 * 1024 * 1024 * 1024, false},
+		{"override equal to heap is allowed", &api.UpReq{Extras: map[string]string{"es.mem_limit": "1g"}}, "1g", 1024 * 1024 * 1024, false},
+		{"override below heap is rejected", &api.UpReq{Extras: map[string]string{"es.mem_limit": "512m"}}, "1g", 0, true},
 		{"invalid override", &api.UpReq{Extras: map[string]string{"es.mem_limit": "not-a-size"}}, "1g", 0, true},
+		{"zero override is rejected cleanly", &api.UpReq{Extras: map[string]string{"es.mem_limit": "0"}}, "1g", 0, true},
 		{"invalid heap with no override", &api.UpReq{}, "not-a-size", 0, true},
+		{"zero heap is rejected cleanly", &api.UpReq{}, "0", 0, true},
 	}
 	for _, c := range cases {
 		got, err := pickMemoryLimitBytes(c.req, c.heap)
 		if c.wantErr {
 			if err == nil {
 				t.Errorf("%s: pickMemoryLimitBytes(heap=%q) = %d, nil, want an error", c.name, c.heap, got)
+			} else if strings.Contains(err.Error(), "%!w(<nil>)") {
+				// Regression guard: the non-positive-size branches must not
+				// fmt.Errorf("...%w", nilErr) — RAMInBytes returns (0, nil)
+				// for "0", which used to produce a garbled ': %!w(<nil>)'.
+				t.Errorf("%s: error contains a nil-%%w artifact: %v", c.name, err)
 			}
 			continue
 		}
