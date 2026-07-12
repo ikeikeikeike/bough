@@ -97,7 +97,8 @@ func runCreate(ctx context.Context, stderr, stdout io.Writer, cfg *config.Config
 	// wrapper and behave as before.
 	stderr = termio.Wrap(stderr)
 	logf(stderr, "[bough] create %s @ %s", name, monorepoRoot)
-	worktreeRoot := filepath.Join(monorepoRoot, ".worktrees", name)
+	warnIfRootNotGit(stderr, monorepoRoot)
+	worktreeRoot := filepath.Join(worktreesDir(monorepoRoot), name)
 	if err := os.MkdirAll(worktreeRoot, 0o755); err != nil {
 		return fmt.Errorf("mkdir worktree root: %w", err)
 	}
@@ -418,7 +419,7 @@ func materializeRepositories(
 	runner := gitwt.NewRunner()
 	runner.Fetch = !noFetch
 	for _, repo := range cfg.Repositories {
-		repoSrc := filepath.Join(monorepoRoot, repo.Name)
+		repoSrc := resolveRepoSrc(monorepoRoot, repo.Name)
 		repoDst := filepath.Join(worktreeRoot, repo.Name)
 		// Acquire the repo first if it is not already present and a
 		// `source:` is declared (git URL → clone, local path → clone
@@ -438,6 +439,14 @@ func materializeRepositories(
 			// A first-time clone of a large repo is the longest silent gap
 			// in create (the user sees nothing between engines-ready and
 			// the worktree appearing); animate a spinner across it.
+			// resolveRepoSrc points a fresh clone at <root>/.bough/repos/<name>,
+			// whose parent may not exist yet — git clone creates the leaf
+			// dir but not intermediate parents.
+			if err := os.MkdirAll(filepath.Dir(repoSrc), 0o755); err != nil {
+				logf(stderr, "[bough] %s: mkdir %s FAILED: %v", repo.Name, filepath.Dir(repoSrc), err)
+				failed = append(failed, repo.Name)
+				continue
+			}
 			sp := startSpinner(stderr, fmt.Sprintf("%s: cloning from %s", repo.Name, repo.Source))
 			cerr := runner.Clone(ctx, repo.Source, repoSrc, monorepoRoot)
 			sp.Stop()
@@ -526,6 +535,42 @@ func isDir(p string) bool {
 func isGitRepo(p string) bool {
 	_, err := os.Lstat(filepath.Join(p, ".git"))
 	return err == nil
+}
+
+// insideGitWorkTree reports whether dir sits inside a git work tree —
+// the exact condition Claude Code's `--worktree` flag enforces (its
+// "Can only use --worktree in a git repository" error is this check
+// failing). Walks up like git itself, so a monorepo root nested inside
+// a parent repo also counts.
+func insideGitWorkTree(dir string) bool {
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--is-inside-work-tree").Output()
+	return err == nil && strings.TrimSpace(string(out)) == "true"
+}
+
+// warnIfRootNotGit prints a heads-up when the monorepo root is not inside
+// a git work tree. bough's WorktreeCreate hook still lets `claude
+// --worktree` run there (the hook is the documented non-git escape
+// hatch), but Claude Code keeps such hook-based worktree sessions
+// anchored to the launch directory — so `claude --worktree <name>
+// --resume <id>` (the git-native resume path, which looks in the
+// worktree's own project bucket) cannot find them. Plain `claude
+// --resume <id>` from the monorepo root does find them. Initialising the
+// root as a git repo switches Claude Code onto the git-native path,
+// making `--worktree ... --resume` work.
+//
+// bough only SUGGESTS the .gitignore lines; it never edits .gitignore
+// itself — the repo's ignore policy is the operator's to own.
+func warnIfRootNotGit(stderr io.Writer, monorepoRoot string) {
+	if insideGitWorkTree(monorepoRoot) {
+		return
+	}
+	logf(stderr, "[bough] note: %s is not a git repository.", monorepoRoot)
+	logf(stderr, "[bough]   `claude --worktree <name> --resume <id>` will NOT find sessions started here")
+	logf(stderr, "[bough]   (Claude Code anchors hook-based worktree sessions to the launch dir). Resume with")
+	logf(stderr, "[bough]   plain `claude --resume <id>` from %s instead.", monorepoRoot)
+	logf(stderr, "[bough]   To enable `--worktree ... --resume`, `git init` this dir and .gitignore:")
+	logf(stderr, "[bough]     .bough/")
+	logf(stderr, "[bough]     worktrees/")
 }
 
 // ensureSymlink makes linkPath an absolute symlink to target, idempotently. An

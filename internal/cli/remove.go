@@ -111,7 +111,7 @@ func runRemove(ctx context.Context, stderr io.Writer, cfg *config.Config, monore
 	hookOut := termio.ExecWriter(stderr)
 	runner := gitwt.NewRunner()
 	for _, repo := range cfg.Repositories {
-		repoSrc := filepath.Join(monorepoRoot, repo.Name)
+		repoSrc := resolveRepoSrc(monorepoRoot, repo.Name)
 		repoDst := filepath.Join(worktreePath, repo.Name)
 		for _, line := range repo.PreRemove {
 			logf(stderr, "[bough] %s pre_remove: %s", repo.Name, line)

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
 	"github.com/ikeikeikeike/bough/internal/config"
 	"github.com/ikeikeikeike/bough/internal/registry"
@@ -41,7 +40,7 @@ written registry.`,
 // is what actually allocates ports — backfill alone is the "stop
 // allocator from re-issuing this name's slot" pass.
 func runBackfill(stderr io.Writer, cfg *config.Config, monorepoRoot string) error {
-	root := filepath.Join(monorepoRoot, ".worktrees")
+	root := worktreesDir(monorepoRoot)
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		if os.IsNotExist(err) {

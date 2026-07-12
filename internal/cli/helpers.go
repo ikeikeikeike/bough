@@ -101,7 +101,7 @@ func resolveRemoveTarget(name, worktreePath string) (monorepoRoot, wtName, path 
 	case name != "":
 		monorepoRoot, _ = os.Getwd()
 		wtName = name
-		path = filepath.Join(monorepoRoot, ".worktrees", name)
+		path = filepath.Join(worktreesDir(monorepoRoot), name)
 	default:
 		err = errors.New("removal needs a worktree path or name (--path/--name, or hook worktree_path/name)")
 	}
