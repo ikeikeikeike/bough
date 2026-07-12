@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.11.0
+## v0.12.0
 
 Engine-managed plugins + a container memory cap for the elasticsearch
 docker backend. Both address the same failure mode a heavily-parallel
@@ -19,7 +19,9 @@ comes up without the analyzer plugin an index mapping needs.
   is no hand-rolled entrypoint or install-marker to maintain. `location`
   is a direct download URL for third-party plugins and empty for
   official ones. The other four plugins (mysql/redis/postgres/compose)
-  ignore the field.
+  ignore the field. Declaring `plugins:` on an elasticsearch engine that
+  resolves to the nix backend is a config error (only the docker backend
+  installs them).
 - **`extras.es.config_mount`** (+ optional `es.config_mount_target`):
   bind-mounts a host directory of auxiliary plugin data an installed
   plugin needs at runtime (e.g. an analyzer's dictionary, which
@@ -28,10 +30,12 @@ comes up without the analyzer plugin an index mapping needs.
   same convention `kind: compose`'s `compose.file` uses.
 - **`extras.es.mem_limit`** on the elasticsearch docker backend: caps
   the container's memory via Docker's own `--memory` limit. Defaults to
-  2x the JVM heap (Elastic's own sizing guidance is heap <= 50% of
-  container memory). Without it, one worktree's ES could grow unbounded
-  and tip the whole Docker Desktop VM into its OOM killer, which then
-  kills containers indiscriminately instead of the one misbehaving.
+  `max(2x heap, heap + 1 GiB)` so even a small heap keeps Elastic's
+  recommended 1-2 GB of above-heap headroom for Lucene / the filesystem
+  cache / bulk workloads (esreindex). An explicit value below the heap is
+  rejected. Without a cap, one worktree's ES could grow unbounded and tip
+  the whole Docker Desktop VM into its OOM killer, which then kills
+  containers indiscriminately instead of the one misbehaving.
 
 ### Changed
 
@@ -41,6 +45,43 @@ comes up without the analyzer plugin an index mapping needs.
   `bough-plugin-*` binaries from one release, so this only turns an
   accidental partial upgrade (a stale plugin binary on PATH) into a loud
   handshake error rather than a silently-dropped field.
+
+## v0.11.0
+
+Groups everything bough generates at the monorepo root so that a
+git-initialised root needs only two `.gitignore` entries — `.bough/`
+and `worktrees/` — and adds a heads-up about Claude Code's git-native
+`--worktree` resume.
+
+Background: `claude --worktree` is git-native. In a non-git monorepo
+root, bough's `WorktreeCreate` hook still lets `claude --worktree` run
+(the hook is Claude Code's documented escape hatch for non-git / other
+VCS), but Claude Code anchors such hook-based worktree sessions to the
+launch directory — so `claude --worktree <name> --resume <id>` cannot
+find them (only plain `claude --resume <id>` from the root can).
+Initialising the monorepo root as a git repository switches Claude
+Code onto the git-native path and makes `--worktree ... --resume` work.
+
+### Changed
+
+- **Workspace layout (v0.11):** source checkouts now live under
+  `<root>/.bough/repos/<name>` (was `<root>/<name>`), the port registry
+  default moves to `<root>/.bough/ports.json` (was `.bough-ports.json`),
+  and worktrees use the non-hidden `<root>/worktrees/<name>` (was
+  `.worktrees/`). All three are **backward-compatible**: a pre-v0.11
+  monorepo whose checkouts sit at `<root>/<name>`, whose worktrees live
+  under `.worktrees/`, and whose registry is `.bough-ports.json` is
+  detected and reused unchanged — only freshly-created artifacts adopt
+  the new locations, so upgrading never orphans an existing workspace.
+
+### Added
+
+- **`bough create` git heads-up:** when the monorepo root is not inside
+  a git work tree, bough prints a one-time note explaining that
+  `claude --worktree <name> --resume <id>` won't find sessions started
+  there (use plain `claude --resume <id>`, or `git init` the root), and
+  SUGGESTS — never writes — the `.bough/` + `worktrees/` `.gitignore`
+  lines. The ignore policy stays the operator's to own.
 
 ## v0.10.0
 
