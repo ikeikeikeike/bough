@@ -816,12 +816,17 @@ func toResourceSpecs(in []config.InitialResource) []engineapi.ResourceSpec {
 // loader auto-upgrades legacy keys in either case, so the operator
 // can rename at any pace during the v0.4.x transition.
 func resolveRegistryPath(monorepoRoot, yamlPath string) string {
-	canonical := filepath.Join(monorepoRoot, registry.CanonicalPath)
-	if _, err := os.Stat(canonical); err == nil {
-		return canonical
+	// Preference order: the v0.11 `.bough/ports.json` (so a migrated
+	// monorepo stops reading the flat file), then the pre-v0.11
+	// `.bough-ports.json`, then whatever the operator wrote in
+	// registry.path. The registry loader auto-upgrades legacy keys in
+	// any case, so operators can migrate at their own pace.
+	for _, rel := range []string{filepath.Join(boughDir, portsFile), registry.CanonicalPath} {
+		p := filepath.Join(monorepoRoot, rel)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
 	}
-	// `yamlPath` is whatever the operator wrote in registry.path —
-	// honour it relative to the monorepo root.
 	return filepath.Join(monorepoRoot, yamlPath)
 }
 

@@ -83,6 +83,49 @@ func TestResolveRepoSrc(t *testing.T) {
 	})
 }
 
+// TestResolveRegistryPath pins the registry-file resolution order: the
+// v0.11 `.bough/ports.json` wins when present (so a migrated monorepo
+// stops reading the flat file), the pre-v0.11 `.bough-ports.json` is
+// still honored, and otherwise the operator's configured path is used.
+func TestResolveRegistryPath(t *testing.T) {
+	write := func(t *testing.T, p string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+
+	t.Run("new .bough/ports.json wins over the legacy flat file", func(t *testing.T) {
+		root := t.TempDir()
+		newp := filepath.Join(root, ".bough", "ports.json")
+		write(t, newp)
+		write(t, filepath.Join(root, ".bough-ports.json")) // legacy also present
+		if got := resolveRegistryPath(root, ".bough/ports.json"); got != newp {
+			t.Errorf("resolveRegistryPath = %q, want the new %q", got, newp)
+		}
+	})
+
+	t.Run("legacy .bough-ports.json still found", func(t *testing.T) {
+		root := t.TempDir()
+		legacy := filepath.Join(root, ".bough-ports.json")
+		write(t, legacy)
+		if got := resolveRegistryPath(root, ".bough/ports.json"); got != legacy {
+			t.Errorf("resolveRegistryPath = %q, want the legacy %q (must stay readable)", got, legacy)
+		}
+	})
+
+	t.Run("neither present falls back to the configured path", func(t *testing.T) {
+		root := t.TempDir()
+		want := filepath.Join(root, ".bough", "ports.json")
+		if got := resolveRegistryPath(root, ".bough/ports.json"); got != want {
+			t.Errorf("resolveRegistryPath = %q, want the configured %q", got, want)
+		}
+	})
+}
+
 // TestWorktreesDir pins the worktrees-directory choice: a monorepo that
 // already has the legacy hidden `.worktrees/` keeps using it (existing
 // worktrees stay findable), while a fresh monorepo uses the non-hidden

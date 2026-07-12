@@ -18,6 +18,7 @@ import "path/filepath"
 const (
 	boughDir      = ".bough"
 	reposSubdir   = "repos"
+	portsFile     = "ports.json"
 	worktreesName = "worktrees"
 	legacyWtName  = ".worktrees"
 )
