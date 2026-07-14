@@ -81,4 +81,40 @@ func renderContinuousLearningPosture(w io.Writer) {
 	} else {
 		fmt.Fprintf(w, "  homunculus root  · %s (will be created on first `bough observer run-once`)\n", layout.Root)
 	}
+
+	// Observer autostart posture: whether this monorepo opts into
+	// auto-running the minting daemon, and whether it is up right now.
+	// This keeps the "is bough minting in the background?" answer explicit
+	// even when autostart is on. Best-effort: no config / no project just
+	// reports the OFF line. Resolves the config file via resolveConfigPath
+	// (the same canonical .bough.yaml → legacy .worktree-isolation.yaml
+	// fallback every other bough command uses) rather than an ad hoc join,
+	// so a monorepo that has not renamed its legacy config still gets an
+	// accurate line instead of a false "autostart OFF" (observerDaemonRunning
+	// below is a pure process check and would otherwise disagree with it).
+	autostart := false
+	running := false
+	if cwd, err := os.Getwd(); err == nil {
+		root := resolveMonorepoRoot(cwd)
+		if cfg, err := loadConfigQuiet(resolveConfigPath(&cobra.Command{}, root)); err == nil {
+			autostart = cfg.Instinct.Observer.Autostart
+		}
+		running = observerDaemonRunning(root)
+	}
+	fmt.Fprintln(w, observerAutostartLine(autostart, running))
+}
+
+// observerAutostartLine renders the doctor's observer-autostart line so
+// the posture (off / on+running / on+idle) is unit-testable without a
+// real daemon or an on-disk config. An OFF autostart never claims the
+// daemon is running even if one happens to be up from a manual start.
+func observerAutostartLine(autostart, running bool) string {
+	switch {
+	case autostart && running:
+		return "  observer daemon  ✓ autostart ON — daemon running (minting instincts each interval via claude --print)"
+	case autostart:
+		return "  observer daemon  · autostart ON — not running yet (starts on the next UserPromptSubmit)"
+	default:
+		return "  observer daemon  · autostart OFF — LLM minting is manual (`bough observer start` or .bough.yaml instinct.observer.autostart)"
+	}
 }

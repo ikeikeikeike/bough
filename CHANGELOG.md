@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## v0.13.0
+
+Drive bough from inside a Claude Code session (`/bough:*` slash commands +
+install-one hook wiring), plus an opt-in switch that keeps the
+continuous-learning observer daemon running so instincts mint
+automatically. Includes an instinct-inject dedup fix.
 
 ### Added
 
@@ -26,12 +31,26 @@
   The plugin ships markdown + JSON only; the binary still comes from the
   existing release channels (tarball / nix / `go install`). See
   [`docs/PLUGIN_CLAUDE_CODE.md`](./docs/PLUGIN_CLAUDE_CODE.md).
+- **`instinct.observer.autostart`** — an opt-in switch that makes the
+  `UserPromptSubmit` hook ensure the continuous-learning observer daemon
+  (`bough observer start`) is running for the monorepo, so instincts are
+  minted automatically once the operator opts in, instead of remembering
+  a manual `bough observer start` per machine. The check runs once per
+  turn (not per tool call) and is silent (it never touches the hook's
+  stdout). **Off by default** — the daemon spawns `claude --print`, so
+  bough never starts it silently. `instinct.observer.interval_sec` tunes
+  the cadence (default 10 min, floored at 60s). This auto-mints instincts
+  only; clustering them into skills/agents/commands stays the explicit
+  `bough evolve --generate`. A start-lock guards the check-then-spawn
+  section so concurrent worktrees cannot each spawn a duplicate daemon.
 
 ### Changed
 
 - `bough doctor` now prints a heads-up when bough hooks are present in
   `settings.json`, since a `settings.json` copy plus the installed plugin
-  double-fires every event (run `bough hook uninstall` to keep one).
+  double-fires every event (run `bough hook uninstall` to keep one), and
+  shows the observer-autostart posture (OFF / ON but idle / ON and
+  running) so a background minting daemon is never silent.
 
 ### Fixed
 
@@ -40,9 +59,9 @@
   project→global promotion case), the inject block now emits only the
   project version and suppresses the global twin, matching ECC's
   project-overrides-global precedence. The merge runs before the
-  confidence floor, so a below-floor project instinct still shadows its
-  promoted global copy instead of letting the stale global version
-  resurface.
+  confidence floor, so a below-floor project instinct that itself decayed
+  below the floor still drops out cleanly while its still-valid global
+  twin keeps surfacing.
 
 ## v0.12.0
 

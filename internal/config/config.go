@@ -367,6 +367,20 @@ type InstinctPoisoningGuard struct {
 // through `bough instinct ingest --stdin` instead.
 type InstinctObserver struct {
 	FileWatch InstinctFileWatch `yaml:"file_watch"`
+
+	// Autostart makes the UserPromptSubmit hook ensure the v0.9
+	// continuous-learning observer daemon (`bough observer start`) is
+	// running for this monorepo, so instinct minting happens automatically
+	// once the operator opts in — instead of remembering a manual
+	// `bough observer start` per machine. Default false preserves the
+	// cost-safe posture: the daemon spawns `claude --print` on an interval,
+	// so bough must never start it silently. `bough doctor` surfaces the
+	// autostart posture so an enabled daemon is always visible.
+	Autostart bool `yaml:"autostart"`
+	// IntervalSec is the autostart daemon's minting cadence in seconds
+	// (the operator-tunable knob; 0 = the 10-minute default). The daemon
+	// floors anything below 60s, so the validator matches that floor.
+	IntervalSec int `yaml:"interval_sec" validate:"omitempty,min=60"`
 }
 
 // InstinctFileWatch is the opt-in beta `.jsonl` tail config. The

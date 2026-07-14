@@ -37,6 +37,123 @@ func observerPidFile(layout homunculus.Layout, projectID string) string {
 	return filepath.Join(layout.ProjectDir(projectID), "observer.pid")
 }
 
+// defaultObserverIntervalSec is the daemon's default minting cadence
+// when no --interval / instinct.observer.interval_sec is given. Named so
+// the CLI flag defaults and the autostart fallback (observerAutostartInterval
+// in hook.go) share one source of truth instead of three independent
+// bare-600 literals.
+const defaultObserverIntervalSec = 600
+
+// startLockStaleAfter bounds how long a start-lock file (see
+// acquireStartLock) is honored before a later caller reclaims it as
+// abandoned. The critical section it guards is a liveness check plus one
+// process spawn — well under a second normally — so a lock still held
+// after this long means its owner crashed mid-section without reaching
+// the deferred release, not that it is legitimately still working.
+const startLockStaleAfter = 10 * time.Second
+
+// acquireStartLock atomically claims lockPath as a short-lived mutex
+// around startObserverDaemon's check-then-spawn section, so two
+// concurrent callers for the same root cannot both observe "not
+// running" and each spawn their own daemon. A lock older than
+// startLockStaleAfter is treated as abandoned (its holder crashed before
+// releasing) and reclaimed once. ok=false means another live caller
+// currently holds it; the caller should not spawn.
+func acquireStartLock(lockPath string) (release func(), ok bool) {
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err == nil {
+		f.Close()
+		return func() { _ = os.Remove(lockPath) }, true
+	}
+	if !os.IsExist(err) {
+		return func() {}, false
+	}
+	if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > startLockStaleAfter {
+		if os.Remove(lockPath) == nil {
+			f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+			if err == nil {
+				f.Close()
+				return func() { _ = os.Remove(lockPath) }, true
+			}
+		}
+	}
+	return func() {}, false
+}
+
+// startObserverDaemon ensures a detached observer daemon is running for
+// the monorepo resolved from root ("" = cwd), starting one only if none
+// is. started=false with a non-error means one was already running (pid =
+// its pid), OR a concurrent caller currently owns the start decision (see
+// below) — either way the caller must not spawn a second daemon. Shared
+// by `bough observer start` and the UserPromptSubmit autostart gate so
+// the spawn + pid-file bookkeeping cannot diverge between the two entry
+// points.
+func startObserverDaemon(root string, interval int) (started bool, pid int, logPath string, err error) {
+	ident, layout, err := resolveObserverProject(root)
+	if err != nil {
+		return false, 0, "", err
+	}
+	if err := layout.EnsureProjectDirs(ident.ID); err != nil {
+		return false, 0, "", err
+	}
+	logPath = layout.ObserverLog(ident.ID)
+	pidPath := observerPidFile(layout, ident.ID)
+
+	// resolveObserverProject canonicalises every worktree of a monorepo to
+	// the SAME root/pid path, and the autostart gate now calls this on
+	// every UserPromptSubmit from a fresh `bough hook handle` process —
+	// so two sessions in different worktrees of the same monorepo can
+	// race here. Without a lock, both could observe "not running" before
+	// either has written the pid file and each spawn their own orphaned
+	// daemon, silently doubling the LLM call rate. The lock only needs to
+	// live for this function's check-then-spawn section.
+	release, ok := acquireStartLock(pidPath + ".lock")
+	if !ok {
+		if running, existing := daemonRunning(pidPath, ident.Root); running {
+			return false, existing, logPath, nil
+		}
+		return false, 0, logPath, nil
+	}
+	defer release()
+
+	if running, existing := daemonRunning(pidPath, ident.Root); running {
+		return false, existing, logPath, nil
+	}
+	// Re-exec ourselves in --daemon mode as a detached child.
+	exe, err := os.Executable()
+	if err != nil {
+		return false, 0, logPath, fmt.Errorf("observer start: locate self: %w", err)
+	}
+	child := makeDetachedCmd(exe, []string{
+		"observer", "_run-daemon",
+		"--root", ident.Root,
+		"--interval", strconv.Itoa(interval),
+	})
+	if err := child.Start(); err != nil {
+		return false, 0, logPath, fmt.Errorf("observer start: spawn: %w", err)
+	}
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(child.Process.Pid)), 0o644); err != nil {
+		return false, child.Process.Pid, logPath, fmt.Errorf("observer start: write pid: %w", err)
+	}
+	return true, child.Process.Pid, logPath, nil
+}
+
+// observerDaemonRunning reports whether a live observer daemon exists for
+// the monorepo resolved from root. Used by `bough doctor` to show the
+// autostart posture. Best-effort: a resolution failure reads as "not
+// running" rather than erroring the doctor report.
+func observerDaemonRunning(root string) bool {
+	ident, layout, err := resolveObserverProject(root)
+	if err != nil {
+		return false
+	}
+	if running, _ := daemonRunning(observerPidFile(layout, ident.ID), ident.Root); running {
+		return true
+	}
+	_, ok := findDaemonByRoot(ident.Root)
+	return ok
+}
+
 // newObserverStartCmd / Stop / Status extend the `bough observer`
 // namespace. They are added to newObserverCmd in observer.go.
 func newObserverStartCmd() *cobra.Command {
@@ -57,40 +174,19 @@ Each tick spawns the same claude --print pass "bough observer
 run-once" runs, so the v0.9.0 self-DoS limiter still caps the call
 rate.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ident, layout, err := resolveObserverProject(root)
+			started, pid, logPath, err := startObserverDaemon(root, interval)
 			if err != nil {
 				return err
 			}
-			if err := layout.EnsureProjectDirs(ident.ID); err != nil {
-				return err
-			}
-			pidPath := observerPidFile(layout, ident.ID)
-			if running, pid := daemonRunning(pidPath, ident.Root); running {
+			if !started {
 				return fmt.Errorf("observer already running (pid %d); `bough observer stop` first", pid)
 			}
-			// Re-exec ourselves in --daemon mode as a detached child.
-			exe, err := os.Executable()
-			if err != nil {
-				return fmt.Errorf("observer start: locate self: %w", err)
-			}
-			child := makeDetachedCmd(exe, []string{
-				"observer", "_run-daemon",
-				"--root", ident.Root,
-				"--interval", strconv.Itoa(interval),
-			})
-			if err := child.Start(); err != nil {
-				return fmt.Errorf("observer start: spawn: %w", err)
-			}
-			if err := os.WriteFile(pidPath, []byte(strconv.Itoa(child.Process.Pid)), 0o644); err != nil {
-				return fmt.Errorf("observer start: write pid: %w", err)
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "observer started (pid %d, interval %ds)\nlog: %s\n",
-				child.Process.Pid, interval, layout.ObserverLog(ident.ID))
+			fmt.Fprintf(cmd.OutOrStdout(), "observer started (pid %d, interval %ds)\nlog: %s\n", pid, interval, logPath)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&root, "root", "", "monorepo root (default: $PWD)")
-	cmd.Flags().IntVar(&interval, "interval", 600, "seconds between extraction passes (>= 60 recommended)")
+	cmd.Flags().IntVar(&interval, "interval", defaultObserverIntervalSec, "seconds between extraction passes (>= 60 recommended)")
 	return cmd
 }
 
@@ -245,7 +341,7 @@ func newObserverRunDaemonCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&root, "root", "", "monorepo root")
-	cmd.Flags().IntVar(&interval, "interval", 600, "seconds between passes")
+	cmd.Flags().IntVar(&interval, "interval", defaultObserverIntervalSec, "seconds between passes")
 	return cmd
 }
 
