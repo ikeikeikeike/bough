@@ -58,6 +58,42 @@ func TestBuild_ProjectBeatsGlobalAtEqualConfidence(t *testing.T) {
 	}
 }
 
+func TestBuild_ProjectShadowsGlobalOnIDCollision(t *testing.T) {
+	// Same ID in both corpora (the promotion case): the project version
+	// is injected once, the global twin is suppressed — no duplicate
+	// line, even though the global copy has higher confidence.
+	project := []*homunculus.Instinct{mkI("shared", 0.70, "project version")}
+	global := []*homunculus.Instinct{
+		mkI("shared", 0.95, "global version"),
+		mkI("global-only", 0.80, "global only rule"),
+	}
+	block, n := Build(project, global, Options{})
+	if n != 2 {
+		t.Fatalf("included = %d, want 2 (shared deduped, global-only kept)", n)
+	}
+	if strings.Contains(block, "global version") {
+		t.Errorf("global twin of a project instinct must be suppressed:\n%s", block)
+	}
+	if !strings.Contains(block, "project version") {
+		t.Errorf("project version of the shared instinct must be injected:\n%s", block)
+	}
+	if !strings.Contains(block, "global only rule") {
+		t.Errorf("a global-only instinct must still be injected:\n%s", block)
+	}
+}
+
+func TestBuild_BelowFloorProjectStillShadowsGlobal(t *testing.T) {
+	// The merge is project-replaces-global BEFORE the confidence floor:
+	// a below-floor project instinct suppresses its promoted global twin,
+	// so neither surfaces (the stale global copy must not resurface).
+	project := []*homunculus.Instinct{mkI("shared", 0.30, "weak project version")}
+	global := []*homunculus.Instinct{mkI("shared", 0.95, "strong global version")}
+	block, n := Build(project, global, Options{})
+	if n != 0 || block != "" {
+		t.Errorf("below-floor project instinct must shadow its global twin (neither injected), got n=%d block=%q", n, block)
+	}
+}
+
 func TestBuild_ByteCap(t *testing.T) {
 	// 100 instincts, tiny cap → only a few fit.
 	project := make([]*homunculus.Instinct, 100)

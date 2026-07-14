@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Instinct inject no longer double-lists a promoted instinct.** When a
+  project instinct and a global instinct share the same ID (the
+  project→global promotion case), the inject block now emits only the
+  project version and suppresses the global twin, matching ECC's
+  project-overrides-global precedence. The merge runs before the
+  confidence floor, so a below-floor project instinct still shadows its
+  promoted global copy instead of letting the stale global version
+  resurface.
+
 ## v0.12.0
 
 Engine-managed plugins + a container memory cap for the elasticsearch

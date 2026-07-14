@@ -65,12 +65,16 @@ func (o Options) withDefaults() Options {
 // Build assembles the injection block from the project + global
 // instinct corpora. Selection order:
 //
-//  1. Drop instincts below MinConfidence.
-//  2. Sort by confidence descending (= ECC's confidence-sort, the
+//  1. Merge by ID — a project instinct shadows a global one with the
+//     same ID (= ECC's project-overrides-global precedence: the local
+//     repo's version is the more-specific one, so the global copy — a
+//     promoted sibling — must not be injected as a second line).
+//  2. Drop instincts below MinConfidence.
+//  3. Sort by confidence descending (= ECC's confidence-sort, the
 //     threecorp improvement over the original alphabetical order
 //     that truncated mid-corpus by filename).
-//  3. Take the top MaxInstincts.
-//  4. Render one line per instinct, stopping before the byte cap so
+//  4. Take the top MaxInstincts.
+//  5. Render one line per instinct, stopping before the byte cap so
 //     the block never exceeds MaxBytes mid-line.
 //
 // project instincts rank above global ones at equal confidence (=
@@ -84,12 +88,22 @@ func Build(project, global []*homunculus.Instinct, opts Options) (string, int) {
 		isProject bool
 	}
 	pool := make([]ranked, 0, len(project)+len(global))
+	// Every project ID shadows the same-ID global one — recorded before
+	// the floor check so the merge is "project version replaces global
+	// version" first, confidence filtering second: a below-floor project
+	// instinct still suppresses its promoted global twin rather than
+	// letting the stale global copy resurface.
+	projectIDs := make(map[string]bool, len(project))
 	for _, in := range project {
+		projectIDs[in.ID] = true
 		if in.Confidence >= *opts.MinConfidence {
 			pool = append(pool, ranked{in: in, isProject: true})
 		}
 	}
 	for _, in := range global {
+		if projectIDs[in.ID] {
+			continue // project overrides global on ID collision (ECC precedence)
+		}
 		if in.Confidence >= *opts.MinConfidence {
 			pool = append(pool, ranked{in: in, isProject: false})
 		}
