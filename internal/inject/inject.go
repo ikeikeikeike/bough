@@ -65,11 +65,16 @@ func (o Options) withDefaults() Options {
 // Build assembles the injection block from the project + global
 // instinct corpora. Selection order:
 //
-//  1. Merge by ID — a project instinct shadows a global one with the
-//     same ID (= ECC's project-overrides-global precedence: the local
-//     repo's version is the more-specific one, so the global copy — a
-//     promoted sibling — must not be injected as a second line).
-//  2. Drop instincts below MinConfidence.
+//  1. Drop instincts below MinConfidence.
+//  2. Merge by ID — an above-floor project instinct shadows a global
+//     one with the same ID (= ECC's project-overrides-global
+//     precedence: the local repo's version is the more-specific one,
+//     so the global copy — a promoted sibling — must not be injected
+//     as a second line). A project instinct that itself falls below
+//     the floor does NOT shadow its global twin, since the global
+//     copy may have since diverged into independently-valid,
+//     cross-project-validated knowledge (session evaluation only ever
+//     adjusts the project-scope copy's confidence).
 //  3. Sort by confidence descending (= ECC's confidence-sort, the
 //     threecorp improvement over the original alphabetical order
 //     that truncated mid-corpus by filename).
@@ -88,15 +93,21 @@ func Build(project, global []*homunculus.Instinct, opts Options) (string, int) {
 		isProject bool
 	}
 	pool := make([]ranked, 0, len(project)+len(global))
-	// Every project ID shadows the same-ID global one — recorded before
-	// the floor check so the merge is "project version replaces global
-	// version" first, confidence filtering second: a below-floor project
-	// instinct still suppresses its promoted global twin rather than
-	// letting the stale global copy resurface.
+	// A project ID shadows the same-ID global one ONLY when the project
+	// copy itself clears the confidence floor (= is actually being
+	// injected). Session evaluation (internal/session/evaluate.go) only
+	// ever adjusts confidence for the project-scope instinct file; the
+	// promoted global twin (internal/cli/instinct_promote.go) is never
+	// touched by it. So a project instinct that independently decays
+	// below the floor after promotion must NOT suppress its still-valid,
+	// cross-project-validated global twin — recording the shadow only
+	// for above-floor project instincts lets that promoted knowledge keep
+	// surfacing instead of silently disappearing once the local copy
+	// decays.
 	projectIDs := make(map[string]bool, len(project))
 	for _, in := range project {
-		projectIDs[in.ID] = true
 		if in.Confidence >= *opts.MinConfidence {
+			projectIDs[in.ID] = true
 			pool = append(pool, ranked{in: in, isProject: true})
 		}
 	}

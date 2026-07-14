@@ -82,15 +82,24 @@ func TestBuild_ProjectShadowsGlobalOnIDCollision(t *testing.T) {
 	}
 }
 
-func TestBuild_BelowFloorProjectStillShadowsGlobal(t *testing.T) {
-	// The merge is project-replaces-global BEFORE the confidence floor:
-	// a below-floor project instinct suppresses its promoted global twin,
-	// so neither surfaces (the stale global copy must not resurface).
+func TestBuild_BelowFloorProjectDoesNotShadowGlobal(t *testing.T) {
+	// A project instinct that has independently decayed below the floor
+	// (e.g. via session evaluation correcting it after promotion) must
+	// NOT suppress its global twin: session evaluation only ever adjusts
+	// the project-scope copy, so the global copy can still be valid,
+	// cross-project-validated knowledge. The floor drops the weak project
+	// copy from the pool, but the healthy global copy still injects.
 	project := []*homunculus.Instinct{mkI("shared", 0.30, "weak project version")}
 	global := []*homunculus.Instinct{mkI("shared", 0.95, "strong global version")}
 	block, n := Build(project, global, Options{})
-	if n != 0 || block != "" {
-		t.Errorf("below-floor project instinct must shadow its global twin (neither injected), got n=%d block=%q", n, block)
+	if n != 1 {
+		t.Fatalf("included = %d, want 1 (global twin still injected)", n)
+	}
+	if !strings.Contains(block, "strong global version") {
+		t.Errorf("a below-floor project instinct must not shadow its still-valid global twin:\n%s", block)
+	}
+	if strings.Contains(block, "weak project version") {
+		t.Errorf("the below-floor project instinct itself must not be injected:\n%s", block)
 	}
 }
 
