@@ -379,6 +379,42 @@ func TestManager_Doctor_AfterInstall(t *testing.T) {
 	}
 }
 
+// TestDoctorRender_PluginDoubleWireNote covers the plugin double-fire
+// heads-up: it renders only when settings.json actually carries bough
+// hooks (the case where a settings.json copy could collide with the
+// bough Claude Code plugin's own hooks), and stays silent on a fresh
+// repo so users who never wired settings.json see no spurious warning.
+func TestDoctorRender_PluginDoubleWireNote(t *testing.T) {
+	const marker = "bough hook uninstall"
+
+	// with bough hooks in settings.json -> note present
+	installed := New(filepath.Join(t.TempDir(), ".claude", "settings.json"))
+	if err := installed.Install(context.Background(), "bough hook handle"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	report, err := installed.Doctor(context.Background(), "")
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	var withHooks strings.Builder
+	report.Render(&withHooks)
+	if !strings.Contains(withHooks.String(), marker) {
+		t.Errorf("expected the plugin double-wire note when bough hooks are in settings.json:\n%s", withHooks.String())
+	}
+
+	// fresh repo (no bough hooks) -> note absent
+	fresh := New(filepath.Join(t.TempDir(), ".claude", "settings.json"))
+	freshReport, err := fresh.Doctor(context.Background(), "")
+	if err != nil {
+		t.Fatalf("Doctor(fresh): %v", err)
+	}
+	var noHooks strings.Builder
+	freshReport.Render(&noHooks)
+	if strings.Contains(noHooks.String(), marker) {
+		t.Errorf("did not expect the double-wire note on a fresh repo:\n%s", noHooks.String())
+	}
+}
+
 // TestManager_List_ParsesExistingHandEdited reads a settings.json
 // the operator authored by hand and verifies bough's decoder
 // round-trips its matcher groups untouched.

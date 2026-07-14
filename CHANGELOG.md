@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Claude Code plugin packaging.** The repo now doubles as a Claude Code
+  plugin so bough can be driven from inside a session, not just from a
+  shell. `/plugin marketplace add threecorp/bough` +
+  `/plugin install bough@bough` wires:
+  - **Slash commands** (`commands/*.md`) for the user-facing verbs —
+    `/bough:create`, `/bough:remove`, `/bough:list`, `/bough:status`,
+    `/bough:verify`, `/bough:doctor`, `/bough:instinct-status`,
+    `/bough:instinct-list`, `/bough:instinct-promote`, `/bough:evolve`,
+    `/bough:config-validate` — each a thin wrapper that shells out to the
+    `bough` binary on `PATH`.
+  - **Hooks** (`hooks/hooks.json`) that mirror, verbatim, the
+    `bough hook handle --event <E>` dispatcher `bough hook install`
+    writes, so installing the plugin auto-wires the whole
+    observe → instinct → evolve → preserve + WorktreeCreate/Remove loop
+    without touching `settings.json`. A regression test
+    (`internal/hooks/plugin_sync_test.go`) fails CI if the manifest ever
+    drifts from `hooks.CanonicalCommand` / `hooks.AllEvents`.
+  - A `using-bough` orchestration skill (model-invoked) with a
+    `command -v bough` PATH preflight.
+  The plugin ships markdown + JSON only; the binary still comes from the
+  existing release channels (tarball / nix / `go install`). See
+  [`docs/PLUGIN_CLAUDE_CODE.md`](./docs/PLUGIN_CLAUDE_CODE.md).
+
+### Changed
+
+- `bough doctor` now prints a heads-up when bough hooks are present in
+  `settings.json`, since a `settings.json` copy plus the installed plugin
+  double-fires every event (run `bough hook uninstall` to keep one).
+
 ## v0.12.0
 
 Engine-managed plugins + a container memory cap for the elasticsearch

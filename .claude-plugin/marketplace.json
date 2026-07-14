@@ -1,0 +1,15 @@
+{
+  "name": "bough",
+  "description": "bough — per-worktree isolated dev environments + continuous-learning instincts, driven from Claude Code.",
+  "owner": {
+    "name": "ikeikeikeike",
+    "email": "jp.ne.co.jp@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "bough",
+      "source": "./",
+      "description": "Drive bough — per-worktree dev-environment orchestration + continuous-learning instincts — from inside a Claude Code session."
+    }
+  ]
+}

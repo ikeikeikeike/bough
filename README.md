@@ -145,6 +145,40 @@ nix profile install github:threecorp/bough
 # brew install bough
 ```
 
+## Use from Claude Code (plugin)
+
+bough is also packaged as a Claude Code plugin, so you can drive it from inside a
+session instead of dropping to a shell. The plugin ships the commands + hooks;
+the `bough` binary itself still comes from **Install** above (install it on
+`PATH` first).
+
+```text
+/plugin marketplace add threecorp/bough
+/plugin install bough@bough
+```
+
+Installing wires two things:
+
+- **Slash commands** — type them in any session: `/bough:create <name>`,
+  `/bough:remove <name>`, `/bough:list`, `/bough:status`, `/bough:verify <name>`,
+  `/bough:doctor`, `/bough:instinct-status`, `/bough:instinct-list`,
+  `/bough:instinct-promote`, `/bough:evolve`, `/bough:config-validate`. Each one
+  shells out to `bough` and summarises the result.
+- **Hooks** — the plugin's `hooks/hooks.json` wires every event to the same
+  `bough hook handle` dispatcher `bough hook install` writes, so the
+  observe → instinct → evolve → preserve loop plus WorktreeCreate/Remove are
+  live without editing `settings.json`. (A committed test keeps that manifest in
+  lockstep with the canonical wiring.) LLM instinct minting stays opt-in
+  (`bough observer start`).
+
+**Don't double-wire.** If you install the plugin *and* run `bough hook install`,
+both copies fire on every event. Pick one — for the plugin path, run
+`bough hook uninstall` to drop the `settings.json` copy. `bough doctor` prints a
+heads-up when it sees bough hooks in `settings.json`.
+
+See [`docs/PLUGIN_CLAUDE_CODE.md`](./docs/PLUGIN_CLAUDE_CODE.md) for the plugin
+layout and how the hook manifest is kept honest.
+
 ## Quick start
 
 Drop a `.bough.yaml` at the monorepo root that declares which sub-repos
