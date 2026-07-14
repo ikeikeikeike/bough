@@ -66,11 +66,20 @@ func (o Options) withDefaults() Options {
 // instinct corpora. Selection order:
 //
 //  1. Drop instincts below MinConfidence.
-//  2. Sort by confidence descending (= ECC's confidence-sort, the
+//  2. Merge by ID — an above-floor project instinct shadows a global
+//     one with the same ID (= ECC's project-overrides-global
+//     precedence: the local repo's version is the more-specific one,
+//     so the global copy — a promoted sibling — must not be injected
+//     as a second line). A project instinct that itself falls below
+//     the floor does NOT shadow its global twin, since the global
+//     copy may have since diverged into independently-valid,
+//     cross-project-validated knowledge (session evaluation only ever
+//     adjusts the project-scope copy's confidence).
+//  3. Sort by confidence descending (= ECC's confidence-sort, the
 //     threecorp improvement over the original alphabetical order
 //     that truncated mid-corpus by filename).
-//  3. Take the top MaxInstincts.
-//  4. Render one line per instinct, stopping before the byte cap so
+//  4. Take the top MaxInstincts.
+//  5. Render one line per instinct, stopping before the byte cap so
 //     the block never exceeds MaxBytes mid-line.
 //
 // project instincts rank above global ones at equal confidence (=
@@ -84,12 +93,28 @@ func Build(project, global []*homunculus.Instinct, opts Options) (string, int) {
 		isProject bool
 	}
 	pool := make([]ranked, 0, len(project)+len(global))
+	// A project ID shadows the same-ID global one ONLY when the project
+	// copy itself clears the confidence floor (= is actually being
+	// injected). Session evaluation (internal/session/evaluate.go) only
+	// ever adjusts confidence for the project-scope instinct file; the
+	// promoted global twin (internal/cli/instinct_promote.go) is never
+	// touched by it. So a project instinct that independently decays
+	// below the floor after promotion must NOT suppress its still-valid,
+	// cross-project-validated global twin — recording the shadow only
+	// for above-floor project instincts lets that promoted knowledge keep
+	// surfacing instead of silently disappearing once the local copy
+	// decays.
+	projectIDs := make(map[string]bool, len(project))
 	for _, in := range project {
 		if in.Confidence >= *opts.MinConfidence {
+			projectIDs[in.ID] = true
 			pool = append(pool, ranked{in: in, isProject: true})
 		}
 	}
 	for _, in := range global {
+		if projectIDs[in.ID] {
+			continue // project overrides global on ID collision (ECC precedence)
+		}
 		if in.Confidence >= *opts.MinConfidence {
 			pool = append(pool, ranked{in: in, isProject: false})
 		}

@@ -58,6 +58,51 @@ func TestBuild_ProjectBeatsGlobalAtEqualConfidence(t *testing.T) {
 	}
 }
 
+func TestBuild_ProjectShadowsGlobalOnIDCollision(t *testing.T) {
+	// Same ID in both corpora (the promotion case): the project version
+	// is injected once, the global twin is suppressed — no duplicate
+	// line, even though the global copy has higher confidence.
+	project := []*homunculus.Instinct{mkI("shared", 0.70, "project version")}
+	global := []*homunculus.Instinct{
+		mkI("shared", 0.95, "global version"),
+		mkI("global-only", 0.80, "global only rule"),
+	}
+	block, n := Build(project, global, Options{})
+	if n != 2 {
+		t.Fatalf("included = %d, want 2 (shared deduped, global-only kept)", n)
+	}
+	if strings.Contains(block, "global version") {
+		t.Errorf("global twin of a project instinct must be suppressed:\n%s", block)
+	}
+	if !strings.Contains(block, "project version") {
+		t.Errorf("project version of the shared instinct must be injected:\n%s", block)
+	}
+	if !strings.Contains(block, "global only rule") {
+		t.Errorf("a global-only instinct must still be injected:\n%s", block)
+	}
+}
+
+func TestBuild_BelowFloorProjectDoesNotShadowGlobal(t *testing.T) {
+	// A project instinct that has independently decayed below the floor
+	// (e.g. via session evaluation correcting it after promotion) must
+	// NOT suppress its global twin: session evaluation only ever adjusts
+	// the project-scope copy, so the global copy can still be valid,
+	// cross-project-validated knowledge. The floor drops the weak project
+	// copy from the pool, but the healthy global copy still injects.
+	project := []*homunculus.Instinct{mkI("shared", 0.30, "weak project version")}
+	global := []*homunculus.Instinct{mkI("shared", 0.95, "strong global version")}
+	block, n := Build(project, global, Options{})
+	if n != 1 {
+		t.Fatalf("included = %d, want 1 (global twin still injected)", n)
+	}
+	if !strings.Contains(block, "strong global version") {
+		t.Errorf("a below-floor project instinct must not shadow its still-valid global twin:\n%s", block)
+	}
+	if strings.Contains(block, "weak project version") {
+		t.Errorf("the below-floor project instinct itself must not be injected:\n%s", block)
+	}
+}
+
 func TestBuild_ByteCap(t *testing.T) {
 	// 100 instincts, tiny cap → only a few fit.
 	project := make([]*homunculus.Instinct, 100)
