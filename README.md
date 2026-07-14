@@ -496,7 +496,19 @@ Enable it per-monorepo in `.bough.yaml` (off by default):
 ```yaml
 instinct:
   enabled: true
+  observer:
+    autostart: true      # opt-in: auto-run the minting daemon per session
+    interval_sec: 600     # minting cadence; optional, defaults to 10 min
 ```
+
+`observer.autostart` is the "opt-in once, then automatic" switch: with it on,
+the `UserPromptSubmit` hook ensures the `bough observer start` daemon is running
+for this monorepo, so instincts are minted automatically without a manual start
+per machine. It is **off by default** — the daemon calls `claude --print`, so
+bough never starts it silently, and `bough doctor` always reports whether it is
+running. Minting stays subject to the self-DoS limiter. (This auto-mints
+instincts only; turning them into skills/agents/commands is still the explicit
+`bough evolve --generate`.)
 
 LLM calls happen **only** in the explicit `bough observer run-once` /
 `bough evolve --generate` (and the opt-in `bough observer start`

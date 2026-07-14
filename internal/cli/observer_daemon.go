@@ -37,6 +37,60 @@ func observerPidFile(layout homunculus.Layout, projectID string) string {
 	return filepath.Join(layout.ProjectDir(projectID), "observer.pid")
 }
 
+// startObserverDaemon ensures a detached observer daemon is running for
+// the monorepo resolved from root ("" = cwd), starting one only if none
+// is. started=false with a non-error means one was already running (pid =
+// its pid). Shared by `bough observer start` and the UserPromptSubmit
+// autostart gate so the spawn + pid-file bookkeeping cannot diverge
+// between the two entry points.
+func startObserverDaemon(root string, interval int) (started bool, pid int, logPath string, err error) {
+	ident, layout, err := resolveObserverProject(root)
+	if err != nil {
+		return false, 0, "", err
+	}
+	if err := layout.EnsureProjectDirs(ident.ID); err != nil {
+		return false, 0, "", err
+	}
+	logPath = layout.ObserverLog(ident.ID)
+	pidPath := observerPidFile(layout, ident.ID)
+	if running, existing := daemonRunning(pidPath, ident.Root); running {
+		return false, existing, logPath, nil
+	}
+	// Re-exec ourselves in --daemon mode as a detached child.
+	exe, err := os.Executable()
+	if err != nil {
+		return false, 0, logPath, fmt.Errorf("observer start: locate self: %w", err)
+	}
+	child := makeDetachedCmd(exe, []string{
+		"observer", "_run-daemon",
+		"--root", ident.Root,
+		"--interval", strconv.Itoa(interval),
+	})
+	if err := child.Start(); err != nil {
+		return false, 0, logPath, fmt.Errorf("observer start: spawn: %w", err)
+	}
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(child.Process.Pid)), 0o644); err != nil {
+		return false, child.Process.Pid, logPath, fmt.Errorf("observer start: write pid: %w", err)
+	}
+	return true, child.Process.Pid, logPath, nil
+}
+
+// observerDaemonRunning reports whether a live observer daemon exists for
+// the monorepo resolved from root. Used by `bough doctor` to show the
+// autostart posture. Best-effort: a resolution failure reads as "not
+// running" rather than erroring the doctor report.
+func observerDaemonRunning(root string) bool {
+	ident, layout, err := resolveObserverProject(root)
+	if err != nil {
+		return false
+	}
+	if running, _ := daemonRunning(observerPidFile(layout, ident.ID), ident.Root); running {
+		return true
+	}
+	_, ok := findDaemonByRoot(ident.Root)
+	return ok
+}
+
 // newObserverStartCmd / Stop / Status extend the `bough observer`
 // namespace. They are added to newObserverCmd in observer.go.
 func newObserverStartCmd() *cobra.Command {
@@ -57,35 +111,14 @@ Each tick spawns the same claude --print pass "bough observer
 run-once" runs, so the v0.9.0 self-DoS limiter still caps the call
 rate.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ident, layout, err := resolveObserverProject(root)
+			started, pid, logPath, err := startObserverDaemon(root, interval)
 			if err != nil {
 				return err
 			}
-			if err := layout.EnsureProjectDirs(ident.ID); err != nil {
-				return err
-			}
-			pidPath := observerPidFile(layout, ident.ID)
-			if running, pid := daemonRunning(pidPath, ident.Root); running {
+			if !started {
 				return fmt.Errorf("observer already running (pid %d); `bough observer stop` first", pid)
 			}
-			// Re-exec ourselves in --daemon mode as a detached child.
-			exe, err := os.Executable()
-			if err != nil {
-				return fmt.Errorf("observer start: locate self: %w", err)
-			}
-			child := makeDetachedCmd(exe, []string{
-				"observer", "_run-daemon",
-				"--root", ident.Root,
-				"--interval", strconv.Itoa(interval),
-			})
-			if err := child.Start(); err != nil {
-				return fmt.Errorf("observer start: spawn: %w", err)
-			}
-			if err := os.WriteFile(pidPath, []byte(strconv.Itoa(child.Process.Pid)), 0o644); err != nil {
-				return fmt.Errorf("observer start: write pid: %w", err)
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "observer started (pid %d, interval %ds)\nlog: %s\n",
-				child.Process.Pid, interval, layout.ObserverLog(ident.ID))
+			fmt.Fprintf(cmd.OutOrStdout(), "observer started (pid %d, interval %ds)\nlog: %s\n", pid, interval, logPath)
 			return nil
 		},
 	}

@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`instinct.observer.autostart`** — an opt-in switch that makes the
+  `UserPromptSubmit` hook ensure the continuous-learning observer daemon
+  (`bough observer start`) is running for the monorepo, so instincts are
+  minted automatically once the operator opts in, instead of remembering
+  a manual `bough observer start` per machine. The check runs once per
+  turn (not per tool call) and is silent (it never touches the hook's
+  stdout). **Off by default** — the daemon spawns `claude --print`, so
+  bough never starts it silently. `instinct.observer.interval_sec` tunes
+  the cadence (default 10 min, floored at 60s). This auto-mints instincts
+  only; clustering them into skills/agents/commands stays the explicit
+  `bough evolve --generate`.
+- `bough doctor` now shows the observer-autostart posture (OFF / ON but
+  idle / ON and running), so a background minting daemon is never silent.
+
 ## v0.12.0
 
 Engine-managed plugins + a container memory cap for the elasticsearch

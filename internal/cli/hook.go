@@ -350,6 +350,7 @@ func newHookHandleCmd() *cobra.Command {
 			switch event {
 			case string(hooks.EventUserPromptSubmit):
 				dispatchInjectContext(c)
+				dispatchObserverAutostart()
 			case string(hooks.EventSessionEnd):
 				_ = runSessionEnd(c.OutOrStdout(), "", extractSessionID(payload), sessionEndDefaultWindow)
 				dispatchEvolveClaudeMD(c)
@@ -497,6 +498,43 @@ func dispatchEvolveClaudeMD(c *cobra.Command) {
 		return
 	}
 	_ = runEvolveClaudeMD(c.OutOrStdout(), root, "", true, time.Now())
+}
+
+// dispatchObserverAutostart ensures the continuous-learning observer
+// daemon is running when the monorepo's .bough.yaml sets
+// instinct.observer.autostart: true. It is wired on UserPromptSubmit
+// (once per turn, not per tool call) so the check is cheap and the daemon
+// starts early in the session. Best-effort + SILENT: UserPromptSubmit's
+// stdout carries the injected instinct block, so this must print nothing;
+// gate off / config missing / already running / a spawn failure are all
+// no-ops that never break the prompt. The started daemon detaches its own
+// stdio, and `bough doctor` surfaces its posture — minting is never
+// silent, and it stays subject to the self-DoS limiter.
+func dispatchObserverAutostart() {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return
+	}
+	root := resolveMonorepoRoot(cwd)
+	cfgPath := filepath.Join(root, ".bough.yaml")
+	if v := os.Getenv("BOUGH_CONFIG"); v != "" {
+		cfgPath = v
+	}
+	cfg, err := loadConfigQuiet(cfgPath)
+	if err != nil || !cfg.Instinct.Observer.Autostart {
+		return
+	}
+	_, _, _, _ = startObserverDaemon(root, observerAutostartInterval(cfg))
+}
+
+// observerAutostartInterval is the autostart daemon's minting cadence:
+// the operator's instinct.observer.interval_sec, or a 10-minute default
+// when it is unset or below the daemon's own 60s floor.
+func observerAutostartInterval(cfg *config.Config) int {
+	if iv := cfg.Instinct.Observer.IntervalSec; iv >= 60 {
+		return iv
+	}
+	return 600
 }
 
 // dispatchQualityGates loads .bough.yaml's quality_gates: section
