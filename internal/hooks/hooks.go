@@ -435,6 +435,18 @@ func (m *Manager) Doctor(ctx context.Context, obsPath string) (*DoctorReport, er
 	return report, nil
 }
 
+// hasBoughSettingsHooks reports whether any event carries a
+// bough-installed group in settings.json. The doctor renders the
+// plugin double-fire heads-up only when this is true.
+func (r *DoctorReport) hasBoughSettingsHooks() bool {
+	for _, st := range r.Events {
+		if st.BoughInstalled {
+			return true
+		}
+	}
+	return false
+}
+
 // Render writes a human-friendly report to w. The doctor surface
 // is meant to be read on the terminal; structured output (= JSON
 // for CI consumption) lands in v0.7.x behind a --json flag.
@@ -457,6 +469,22 @@ func (r *DoctorReport) Render(w io.Writer) {
 		for _, e := range st.HandEntries {
 			fmt.Fprintf(w, "    hand cmd:  %s\n", e.Command)
 		}
+	}
+	if r.hasBoughSettingsHooks() {
+		// The bough Claude Code plugin ships the same hook dispatcher in
+		// its own hooks/hooks.json, so a settings.json copy on top of the
+		// installed plugin double-fires every event. bough cannot see
+		// the plugin from here (its registry is Claude Code's, not
+		// bough's), so this renders UNCONDITIONALLY whenever bough hooks
+		// are wired in settings.json - including the more common case of
+		// plain `bough hook install` with no plugin involved at all. The
+		// wording says so explicitly, so it reads as standing guidance
+		// rather than a diagnosed problem for operators who never touch
+		// the plugin.
+		fmt.Fprintln(w, "  fyi: if you ALSO installed the bough Claude Code plugin, these settings.json")
+		fmt.Fprintln(w, "       entries double-fire every event alongside it - run `bough hook uninstall`")
+		fmt.Fprintln(w, "       to keep only the plugin's copy. (bough can't detect the plugin, so this")
+		fmt.Fprintln(w, "       always shows here regardless of whether you use it.)")
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Observer:")

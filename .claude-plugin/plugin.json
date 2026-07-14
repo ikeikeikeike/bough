@@ -1,0 +1,19 @@
+{
+  "name": "bough",
+  "description": "Per-worktree isolated dev environments + continuous-learning instincts, driven from Claude Code. Requires the `bough` binary on PATH (see the repository README for install).",
+  "author": {
+    "name": "ikeikeikeike",
+    "email": "jp.ne.co.jp@gmail.com",
+    "url": "https://github.com/threecorp/bough"
+  },
+  "homepage": "https://github.com/threecorp/bough",
+  "repository": "https://github.com/threecorp/bough",
+  "keywords": [
+    "worktree",
+    "dev-environment",
+    "orchestration",
+    "continuous-learning",
+    "instincts",
+    "claude-code"
+  ]
+}
