@@ -473,13 +473,18 @@ func (r *DoctorReport) Render(w io.Writer) {
 	if r.hasBoughSettingsHooks() {
 		// The bough Claude Code plugin ships the same hook dispatcher in
 		// its own hooks/hooks.json, so a settings.json copy on top of the
-		// installed plugin double-fires every event. We cannot see the
-		// plugin from here (its registry is Claude Code's, not bough's),
-		// so this is a conditional heads-up, not an assertion the plugin
-		// is present.
-		fmt.Fprintln(w, "  note: these bough entries live in settings.json. If you ALSO installed the")
-		fmt.Fprintln(w, "        bough Claude Code plugin (it ships the same hooks), events double-fire —")
-		fmt.Fprintln(w, "        run `bough hook uninstall` to keep only the plugin's copy.")
+		// installed plugin double-fires every event. bough cannot see
+		// the plugin from here (its registry is Claude Code's, not
+		// bough's), so this renders UNCONDITIONALLY whenever bough hooks
+		// are wired in settings.json - including the more common case of
+		// plain `bough hook install` with no plugin involved at all. The
+		// wording says so explicitly, so it reads as standing guidance
+		// rather than a diagnosed problem for operators who never touch
+		// the plugin.
+		fmt.Fprintln(w, "  fyi: if you ALSO installed the bough Claude Code plugin, these settings.json")
+		fmt.Fprintln(w, "       entries double-fire every event alongside it - run `bough hook uninstall`")
+		fmt.Fprintln(w, "       to keep only the plugin's copy. (bough can't detect the plugin, so this")
+		fmt.Fprintln(w, "       always shows here regardless of whether you use it.)")
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Observer:")

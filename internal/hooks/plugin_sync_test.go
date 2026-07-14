@@ -18,13 +18,6 @@ import (
 // the committed plugin manifest must mirror the canonical wiring
 // exactly, in both directions.
 
-// pluginHooksFile mirrors the top-level shape of hooks/hooks.json,
-// which reuses Claude Code's settings.json hook layout: a "hooks" map
-// from event name to an ordered list of matcher groups.
-type pluginHooksFile struct {
-	Hooks map[HookEvent][]HookGroup `json:"hooks"`
-}
-
 // pluginHooksPath resolves <repoRoot>/hooks/hooks.json from this test
 // file's own location, so the test is independent of the working
 // directory `go test` is invoked from.
@@ -39,18 +32,25 @@ func pluginHooksPath(t *testing.T) string {
 	return filepath.Join(repoRoot, "hooks", "hooks.json")
 }
 
-// loadPluginHooks reads + parses the committed plugin hooks.json.
-func loadPluginHooks(t *testing.T) map[HookEvent][]HookGroup {
+// loadPluginHooks reads + parses the committed plugin hooks.json via the
+// same decodeHookSet the production settings.json path uses (Manager's
+// loadSettings/List), so this drift guard exercises the actual decode
+// logic instead of a bespoke parser that could silently diverge from it.
+func loadPluginHooks(t *testing.T) HookSet {
 	t.Helper()
 	data, err := os.ReadFile(pluginHooksPath(t))
 	if err != nil {
 		t.Fatalf("read plugin hooks.json: %v", err)
 	}
-	var f pluginHooksFile
-	if err := json.Unmarshal(data, &f); err != nil {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
 		t.Fatalf("parse plugin hooks.json: %v", err)
 	}
-	return f.Hooks
+	set, err := decodeHookSet(raw)
+	if err != nil {
+		t.Fatalf("decode plugin hooks.json: %v", err)
+	}
+	return set
 }
 
 // diffPluginHooks reports every way `got` (the parsed plugin
