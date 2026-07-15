@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.15.0
+
+Recover a "prunable" worktree (registered in git but with its dir deleted
+out-of-band) on `bough create` instead of no-op'ing on the stale registration,
+which previously left `claude --worktree` sessions half-materialised.
 
 ### Fixed
 
