@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Root `CLAUDE.md` symlinked into each worktree.** `bough create` now links
+  `<worktreeRoot>/CLAUDE.md -> <monorepoRoot>/CLAUDE.md` (absolute) alongside the
+  existing project-skills symlink, so a `claude --worktree` session — which cd's
+  into the worktree, a non-git container whose git walk-up cannot reach the
+  monorepo root — inherits the root guidance instead of starting with no
+  `CLAUDE.md`. Best-effort and only when the monorepo root has a regular-file
+  `CLAUDE.md`; a hand-authored real file already in the worktree is never
+  clobbered (`ensureSymlink`).
+
 ## v0.13.0
 
 Drive bough from inside a Claude Code session (`/bough:*` slash commands +
