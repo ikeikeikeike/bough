@@ -206,7 +206,21 @@ func TestRunner_AddOrAttach_ResumeIsNoOpThroughSymlink(t *testing.T) {
 // re-add, bringing the worktree back on the existing branch.
 func TestRunner_AddOrAttach_RecreatesPrunableWorktree(t *testing.T) {
 	src := initBareRepo(t)
-	dst := filepath.Join(t.TempDir(), "wt")
+	// Resolve the temp root's symlinks up front so the path registered with git
+	// and the literal dst share a resolved prefix. On hosts where t.TempDir()
+	// sits under a symlink (macOS: /var -> /private/var), after os.RemoveAll(dst)
+	// EvalSymlinks(dst) fails, so AddOrAttach's resolvedDst falls back to the
+	// literal path and never matches git's symlink-resolved `worktree list`
+	// entry — the loop would then take the "no match" fall-through and never
+	// exercise the os.Stat recovery guard this test exists to protect (the guard
+	// could be reverted and the test would still pass). Resolving here forces the
+	// intended "match found -> os.Stat fails -> break" path on every OS, the same
+	// discipline TestRunner_AddOrAttach_ResumeIsNoOpThroughSymlink uses.
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(tmp, "wt")
 	r := NewRunner()
 
 	// First materialisation creates the worktree + branch F-Recover.

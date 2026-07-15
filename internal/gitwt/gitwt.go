@@ -152,7 +152,13 @@ func (r *Runner) AddOrAttach(ctx context.Context, repoPath, dst, branch, base st
 				// registered" and never recreated. When the dir is gone,
 				// fall through to the prune + add below so it comes back
 				// (attach path, on the existing branch).
-				if _, statErr := os.Stat(dst); statErr == nil {
+				//
+				// Only genuine non-existence triggers recovery: a stat that
+				// fails for any other reason (EACCES on a parent dir, a
+				// momentarily-stale NFS mount) must keep the old no-op rather
+				// than tear down a worktree that is actually present — the
+				// intent is "the dir was deleted", not "the dir is unreadable".
+				if _, statErr := os.Stat(dst); !errors.Is(statErr, os.ErrNotExist) {
 					return false, base, nil
 				}
 				break
