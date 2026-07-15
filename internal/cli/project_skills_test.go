@@ -85,6 +85,55 @@ func TestDeployProjectSkills(t *testing.T) {
 	}
 }
 
+// TestLinkWorktreeClaudeMd verifies the worktree gets an absolute symlink to the
+// monorepo root's CLAUDE.md, that a missing root CLAUDE.md is a no-op, and that a
+// pre-existing real CLAUDE.md in the worktree is left intact.
+func TestLinkWorktreeClaudeMd(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("# root guidance\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wt := filepath.Join(t.TempDir(), "wt")
+	_ = os.MkdirAll(wt, 0o755)
+
+	linkWorktreeClaudeMd(io.Discard, root, wt)
+
+	link := filepath.Join(wt, "CLAUDE.md")
+	got, err := os.Readlink(link)
+	if err != nil {
+		t.Fatalf("worktree CLAUDE.md symlink not created: %v", err)
+	}
+	want := filepath.Join(root, "CLAUDE.md")
+	if got != want {
+		t.Errorf("link = %q, want %q", got, want)
+	}
+	if !filepath.IsAbs(got) {
+		t.Errorf("link target must be absolute (resolves regardless of CWD): %q", got)
+	}
+
+	// no root CLAUDE.md → no-op: no symlink created, no error
+	emptyRoot := t.TempDir()
+	wt2 := filepath.Join(t.TempDir(), "wt2")
+	_ = os.MkdirAll(wt2, 0o755)
+	linkWorktreeClaudeMd(io.Discard, emptyRoot, wt2)
+	if _, err := os.Lstat(filepath.Join(wt2, "CLAUDE.md")); !os.IsNotExist(err) {
+		t.Errorf("a missing root CLAUDE.md must not create a worktree symlink")
+	}
+
+	// real-file guard: a hand-authored real <wt>/CLAUDE.md must survive intact
+	wt3 := filepath.Join(t.TempDir(), "wt3")
+	_ = os.MkdirAll(wt3, 0o755)
+	realFile := filepath.Join(wt3, "CLAUDE.md")
+	_ = os.WriteFile(realFile, []byte("operator's own\n"), 0o644)
+	linkWorktreeClaudeMd(io.Discard, root, wt3)
+	if fi, _ := os.Lstat(realFile); fi != nil && fi.Mode()&os.ModeSymlink != 0 {
+		t.Errorf("a real worktree CLAUDE.md was clobbered into a symlink")
+	}
+	if b, _ := os.ReadFile(realFile); string(b) != "operator's own\n" {
+		t.Errorf("real worktree CLAUDE.md content was modified")
+	}
+}
+
 // TestLinkWorktreeSkills verifies the worktree gets an absolute symlink to the
 // monorepo's project-scoped skills, and a pre-existing real dir is not clobbered.
 func TestLinkWorktreeSkills(t *testing.T) {

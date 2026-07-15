@@ -180,11 +180,12 @@ func runCreate(ctx context.Context, stderr, stdout io.Writer, cfg *config.Config
 	// data is missing.
 	failedHooks := runPostCreateHooks(ctx, stderr, cfg, worktreeRoot, skipRepo)
 
-	// 5b. Expose the monorepo's project-scoped evolved skills to the worktree
-	// session. `claude --worktree` cd's into <worktreeRoot> — a non-git
-	// container whose git walk-up cannot reach the monorepo root's
-	// .claude/skills — so without an explicit symlink the worktree session
-	// would load no project skills. Best-effort.
+	// 5b. Expose the monorepo's project-scoped context to the worktree session.
+	// `claude --worktree` cd's into <worktreeRoot> — a non-git container whose
+	// git walk-up cannot reach the monorepo root — so without explicit symlinks
+	// the worktree session would load neither the root CLAUDE.md nor the project
+	// skills. Both best-effort.
+	linkWorktreeClaudeMd(stderr, monorepoRoot, worktreeRoot)
 	linkWorktreeSkills(stderr, monorepoRoot, worktreeRoot)
 
 	// 6. stdout — the WorktreeCreate hook contract REQUIRES exactly
@@ -668,6 +669,27 @@ func ensureSymlink(target, linkPath string) error {
 		return fmt.Errorf("mkdir: %w", err)
 	}
 	return os.Symlink(target, linkPath)
+}
+
+// linkWorktreeClaudeMd symlinks <worktreeRoot>/CLAUDE.md ->
+// <monorepoRoot>/CLAUDE.md so the worktree's Claude session inherits the
+// monorepo root's guidance. The session cd's into the worktree — a non-git
+// container whose git walk-up cannot reach the monorepo root — so without the
+// symlink the root CLAUDE.md would not load for that session. Best-effort and
+// only when the monorepo root actually has a regular-file CLAUDE.md; a real
+// (non-symlink) CLAUDE.md already in the worktree is left untouched by
+// ensureSymlink. Mirrors linkWorktreeSkills for the same reason.
+func linkWorktreeClaudeMd(stderr io.Writer, monorepoRoot, worktreeRoot string) {
+	src := filepath.Join(monorepoRoot, "CLAUDE.md")
+	if fi, err := os.Stat(src); err != nil || !fi.Mode().IsRegular() {
+		return // no root CLAUDE.md to expose; nothing to do
+	}
+	dst := filepath.Join(worktreeRoot, "CLAUDE.md")
+	if err := ensureSymlink(src, dst); err != nil {
+		logf(stderr, "[bough] CLAUDE.md: %v", err)
+		return
+	}
+	logf(stderr, "[bough] CLAUDE.md → %s", src)
 }
 
 // linkWorktreeSkills symlinks <worktreeRoot>/.claude/skills ->
