@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.14.0
+
+Expose the monorepo root `CLAUDE.md` to every `claude --worktree` session by
+symlinking it into the worktree root, so worktree sessions inherit the root
+guidance instead of starting with none.
 
 ### Added
 
