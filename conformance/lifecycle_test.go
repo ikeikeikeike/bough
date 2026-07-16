@@ -75,6 +75,41 @@ func TestPickFreePort_ExhaustionFallsBackToLow(t *testing.T) {
 	}
 }
 
+// TestPickFreePort_ExhaustionAvoidsClaimedLow is the regression guard
+// for the review finding: when the scan window exhausts (all busy)
+// AND low is itself already claimed by an earlier role in the same
+// allocateRoles call, the fallback must not blindly return low —
+// doing so hands the caller the identical port already claimed by
+// another role, silently reintroducing the exact cross-role collision
+// pickFreePort's claimed parameter exists to prevent.
+func TestPickFreePort_ExhaustionAvoidsClaimedLow(t *testing.T) {
+	const rangeWidth = 3
+	low, closeLow := seedListener(t)
+	defer closeLow()
+	var closers []func()
+	defer func() {
+		for _, c := range closers {
+			c()
+		}
+	}()
+	// Occupy low+1..low+rangeWidth so the whole [low, low+rangeWidth]
+	// window is busy, same shape as the plain exhaustion test above —
+	// except here low is ALSO claimed (as if an earlier role in this
+	// allocateRoles call already got handed it).
+	for p := low + 1; p <= low+rangeWidth; p++ {
+		l, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(p))
+		if err != nil {
+			t.Skipf("could not seed port %d for exhaustion test: %v", p, err)
+		}
+		closers = append(closers, func() { _ = l.Close() })
+	}
+	claimed := map[int]bool{low: true}
+	got := pickFreePort(low, low+rangeWidth, claimed)
+	if got == low {
+		t.Errorf("pickFreePort exhaustion fallback returned the already-claimed port %d", low)
+	}
+}
+
 func TestPickFreePort_SkipsClaimedPorts(t *testing.T) {
 	free1, close1 := seedListener(t)
 	close1() // release immediately so it is free again, but still claimed

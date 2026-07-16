@@ -411,9 +411,14 @@ const portScanAttempts = 64
 // still detect the backend's "port already allocated" error when the
 // engine actually binds, same caveat as IsPortFree's own doc comment.
 //
-// Falls back to low when no free port is found so the caller still
-// surfaces the (deterministic) failure path through the engine
-// rather than swallowing the contention here.
+// Falls back to the first unclaimed port in [low, high] when no free
+// port is found within the scan window, so the caller still surfaces
+// the (deterministic) failure path through the engine rather than
+// swallowing the contention here. The fallback still avoids `claimed`:
+// returning an already-claimed port here would silently reintroduce
+// the exact cross-role collision this parameter exists to prevent —
+// two roles handed the identical port because the scan for the
+// second one exhausted without finding a free, unclaimed candidate.
 func pickFreePort(low, high int, claimed map[int]bool) int {
 	if high <= low {
 		return low
@@ -427,6 +432,14 @@ func pickFreePort(low, high int, claimed map[int]bool) int {
 			continue
 		}
 		if dockerutil.IsPortFree(p) {
+			return p
+		}
+	}
+	if !claimed[low] {
+		return low
+	}
+	for p := low + 1; p <= high; p++ {
+		if !claimed[p] {
 			return p
 		}
 	}
