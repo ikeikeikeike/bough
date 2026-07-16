@@ -141,7 +141,7 @@ nix run    github:threecorp/bough -- create --stdin-json
 nix profile install github:threecorp/bough
 
 # 4. Homebrew (planned — tap not yet published)
-# brew tap     ikeikeikeike/tap
+# brew tap     threecorp/tap
 # brew install bough
 ```
 
