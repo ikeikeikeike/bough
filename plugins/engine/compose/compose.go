@@ -30,6 +30,17 @@
 //     volumes, which Cleanup's (ctx, datadir, ports) signature has no
 //     way to address, and reaching into an operator-owned compose
 //     project's storage is arguably not this plugin's business anyway.
+//   - ReadyCheck defaults to a plain TCP dial (extras
+//     ["compose.ready_probe"] unset) because a generic wrapper cannot
+//     know the wrapped service's protocol upfront. Set it explicitly
+//     to "redis" / "postgres" / "mysql" / "http" for a real
+//     protocol-level check — this matters most for "mysql": a bare
+//     dial goes ready during the mysql image's --skip-networking
+//     "temporary server" bootstrap phase, the exact race
+//     plugins/engine/mysql/docker.go's dockerReadyCheck already had to
+//     fix for the bundled Docker backend (a host port's forwarding
+//     accepts the TCP handshake from container start, regardless of
+//     whether mysqld is listening yet).
 //
 // Known gap: Down never removes the compose project's own network
 // (`docker network rm`), by design — scoping every operation to the

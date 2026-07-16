@@ -394,8 +394,12 @@ Trade-offs versus the four native plugins, by design:
 - **`ReadyCheck` defaults to a plain TCP dial**, not a protocol-level
   handshake (unlike the native plugins' mysql/redis/postgres/HTTP
   probes). Set `extras: {compose.ready_probe: "redis"}` (or
-  `postgres` / `http`) on the engine entry if you want a real
-  protocol check instead.
+  `postgres` / `mysql` / `http`) on the engine entry if you want a
+  real protocol check instead. **Set this explicitly when wrapping
+  mysql** — a bare TCP dial goes ready during the mysql image's
+  first-run "temporary server" bootstrap phase, the same race the
+  bundled mysql plugin's own Docker backend had to fix; `mysql`
+  reads the server's handshake packet instead of just dialing.
 - **One compose service per `Engine` entry.** Wrapping two services
   from the same compose file needs two separate `kind: compose`
   engine entries pointing at the same `file` with different

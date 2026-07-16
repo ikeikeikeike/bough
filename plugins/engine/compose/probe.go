@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"time"
 )
@@ -60,7 +61,7 @@ func firstListenPort(ports []int) int {
 type unknownProbeError struct{ name string }
 
 func (e *unknownProbeError) Error() string {
-	return fmt.Sprintf("compose: unknown compose.ready_probe %q (want tcp, redis, postgres, or http)", e.name)
+	return fmt.Sprintf("compose: unknown compose.ready_probe %q (want tcp, redis, postgres, mysql, or http)", e.name)
 }
 
 func isUnknownProbe(err error) bool {
@@ -81,6 +82,8 @@ func probeOnce(ctx context.Context, probe string, port int) (bool, error) {
 		return redisProbe(ctx, port)
 	case "postgres":
 		return postgresProbe(ctx, port)
+	case "mysql":
+		return mysqlProbe(ctx, port)
 	case "http":
 		return httpProbe(ctx, port)
 	default:
@@ -144,6 +147,50 @@ func postgresProbe(ctx context.Context, port int) (bool, error) {
 		return false, err
 	}
 	return reply[0] == 'S' || reply[0] == 'N', nil
+}
+
+// mysqlHandshakeProtocolVersion is byte 4 of every MySQL server's
+// Initial Handshake Packet — value 10 (0x0a) since protocol 4.1, so
+// seeing it is a cheap, stdlib-only proof that a real mysqld answered
+// (mirrors plugins/engine/mysql/conformance_test.go's
+// mysqlHandshakeOnce, which the bundled mysql plugin's own regression
+// test relies on for the identical check).
+const mysqlHandshakeProtocolVersion = 0x0a
+
+// mysqlProbe reads the unsolicited handshake packet mysqld sends the
+// instant a client connects (unlike redis/postgres/http, the client
+// never speaks first) and confirms its protocol-version byte.
+//
+// This exists as its own case — rather than callers being told to
+// fall back to "tcp" for a wrapped mysql service — because a bare TCP
+// dial+close is exactly the check this repository already proved
+// insufficient for mysql: the official mysql:8.x image runs a
+// "temporary server" (--skip-networking) during first-run initdb
+// before restarting as the final, network-enabled server, and a
+// Docker host port's forwarding accepts the TCP handshake from the
+// moment the container starts regardless of whether mysqld is
+// listening yet (see plugins/engine/mysql/docker.go's
+// dockerReadyCheck doc for the identical race already fixed there,
+// and its TestDockerReadyCheck_NoRaceWithTemporaryServer regression
+// test). A dial-only probe would report a compose-wrapped mysql
+// service ready during that window, in time for a post-Up caller
+// (e.g. a migration run right after `bough create`) to hit a
+// connection the real server has not started answering yet.
+func mysqlProbe(ctx context.Context, port int) (bool, error) {
+	conn, err := dial(ctx, port)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	var buf [5]byte
+	if _, err := io.ReadFull(conn, buf[:]); err != nil {
+		return false, err
+	}
+	if buf[4] != mysqlHandshakeProtocolVersion {
+		return false, fmt.Errorf("compose: mysqlProbe: handshake protocol = %#x, want %#x (MySQL Initial Handshake)", buf[4], mysqlHandshakeProtocolVersion)
+	}
+	return true, nil
 }
 
 // httpProbe issues a bare HTTP/1.0 GET and accepts any well-formed

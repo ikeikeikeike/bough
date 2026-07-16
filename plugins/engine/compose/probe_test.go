@@ -104,6 +104,46 @@ func TestProbeOnce_Postgres(t *testing.T) {
 	}
 }
 
+func TestProbeOnce_MySQL(t *testing.T) {
+	// mysqld speaks first: an Initial Handshake Packet whose 5th byte
+	// (protocol version) is 0x0a since MySQL 4.1. The remaining bytes
+	// are unchecked filler — mysqlProbe only inspects buf[4].
+	port := fakeServer(t, func(c net.Conn) {
+		defer func() { _ = c.Close() }()
+		_, _ = c.Write([]byte{0x4a, 0x00, 0x00, 0x00, 0x0a, 0x38, 0x2e, 0x34})
+	})
+	ok, err := probeOnce(context.Background(), "mysql", port)
+	if err != nil || !ok {
+		t.Errorf("probeOnce(mysql) against a valid handshake = (%v, %v), want (true, nil)", ok, err)
+	}
+}
+
+func TestProbeOnce_MySQL_WrongProtocolVersion(t *testing.T) {
+	port := fakeServer(t, func(c net.Conn) {
+		defer func() { _ = c.Close() }()
+		_, _ = c.Write([]byte{0x00, 0x00, 0x00, 0x00, 0x09})
+	})
+	ok, err := probeOnce(context.Background(), "mysql", port)
+	if ok || err == nil {
+		t.Errorf("probeOnce(mysql) against a non-mysql protocol byte = (%v, %v), want (false, non-nil)", ok, err)
+	}
+}
+
+// TestProbeOnce_MySQL_AcceptThenClose is the regression guard for the
+// docker-proxy/temporary-server race (see mysqlProbe's doc): a
+// listener that accepts the TCP handshake but closes without ever
+// sending a byte is exactly what a Docker host port looks like the
+// instant a container starts, before mysqld itself is listening. A
+// bare "tcp" probe (dial+close, no read) would call this ready;
+// mysqlProbe must not.
+func TestProbeOnce_MySQL_AcceptThenClose(t *testing.T) {
+	port := fakeServer(t, func(c net.Conn) { _ = c.Close() })
+	ok, err := probeOnce(context.Background(), "mysql", port)
+	if ok || err == nil {
+		t.Errorf("probeOnce(mysql) against an accept-then-close peer = (%v, %v), want (false, non-nil)", ok, err)
+	}
+}
+
 func TestProbeOnce_HTTP(t *testing.T) {
 	port := fakeServer(t, func(c net.Conn) {
 		defer func() { _ = c.Close() }()
