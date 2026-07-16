@@ -378,9 +378,16 @@ type InstinctObserver struct {
 	// autostart posture so an enabled daemon is always visible.
 	Autostart bool `yaml:"autostart"`
 	// IntervalSec is the autostart daemon's minting cadence in seconds
-	// (the operator-tunable knob; 0 = the 10-minute default). The daemon
-	// floors anything below 60s, so the validator matches that floor.
-	IntervalSec int `yaml:"interval_sec" validate:"omitempty,min=60"`
+	// (the operator-tunable knob; 0 = the 10-minute default).
+	// Deliberately NOT struct-tag validated with a min=60: this whole
+	// Config is validated as one unit (config.Config.Validate), so a hard
+	// tag here would reject the ENTIRE .bough.yaml — breaking unrelated
+	// features that share the same config load (e.g. quality gates) —
+	// over a value that internal/cli/hook.go's observerAutostartInterval
+	// already floors gracefully to the 10-minute default at read time. A
+	// low value degrades to the default instead of the whole config
+	// failing to parse.
+	IntervalSec int `yaml:"interval_sec"`
 }
 
 // InstinctFileWatch is the opt-in beta `.jsonl` tail config. The
