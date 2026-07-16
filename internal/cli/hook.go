@@ -537,9 +537,27 @@ func dispatchObserverAutostart(c *cobra.Command) {
 	if err != nil || !cfg.Instinct.Observer.Autostart {
 		return
 	}
-	if _, _, logPath, err := startObserverDaemon(root, observerAutostartInterval(cfg)); err != nil && logPath != "" {
-		appendDaemonLog(logPath, fmt.Sprintf("autostart: %v", err))
+	_, _, logPath, err := startObserverDaemon(root, observerAutostartInterval(cfg))
+	if err == nil {
+		return
 	}
+	// startObserverDaemon returns "" for logPath when it fails before a
+	// project-scoped log path can even be computed (resolveObserverProject
+	// / EnsureProjectDirs erroring — e.g. a permission problem creating
+	// the homunculus project dir, plausible on a fresh opt-in machine).
+	// The doc comment above promises a spawn failure "stays diagnosable
+	// instead of vanishing without a trace", but gating the log write on
+	// logPath != "" silently drops exactly these two earliest failure
+	// modes with zero trace anywhere — the opposite of that promise, and
+	// on every UserPromptSubmit the operator would have no way to learn
+	// autostart is failing short of reading Go source. Fall back to a
+	// project-independent log next to the homunculus root so the failure
+	// is recorded even when the project-scoped path was never resolved.
+	if logPath == "" {
+		logPath = filepath.Join(homunculus.NewLayout().Root, "observer-autostart-errors.log")
+		_ = os.MkdirAll(filepath.Dir(logPath), 0o755)
+	}
+	appendDaemonLog(logPath, fmt.Sprintf("autostart: %v", err))
 }
 
 // observerAutostartInterval is the autostart daemon's minting cadence:
