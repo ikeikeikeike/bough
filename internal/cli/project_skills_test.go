@@ -9,7 +9,7 @@ import (
 )
 
 // TestEnsureSymlink covers the shared idempotent-symlink helper used by the
-// project-scoped skill deploy + the worktree skills link.
+// project-scoped artifact deploy + the worktree artifact link.
 func TestEnsureSymlink(t *testing.T) {
 	tmp := t.TempDir()
 	target := filepath.Join(tmp, "target")
@@ -85,6 +85,63 @@ func TestDeployProjectSkills(t *testing.T) {
 	}
 }
 
+// TestDeployProjectFiles verifies flat-file evolved artifacts (agents,
+// commands) are symlinked into the monorepo's project-scoped .claude/<kind>
+// (a non-.md entry, and a subdirectory, are both skipped).
+func TestDeployProjectFiles(t *testing.T) {
+	tmp := t.TempDir()
+	evolved := filepath.Join(tmp, "homunculus", "evolved", "agents")
+	_ = os.MkdirAll(evolved, 0o755)
+	_ = os.WriteFile(filepath.Join(evolved, "a1.md"), []byte("# a1\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(evolved, "notes.txt"), []byte("x"), 0o644) // not .md → skip
+	_ = os.MkdirAll(filepath.Join(evolved, "a1.md.bak"), 0o755)               // a dir → skip regardless of name
+
+	projectDir := filepath.Join(tmp, "mono", ".claude", "agents")
+	deployProjectFiles(io.Discard, io.Discard, "agent", evolved, projectDir)
+
+	got, err := os.Readlink(filepath.Join(projectDir, "a1.md"))
+	if err != nil || got != filepath.Join(evolved, "a1.md") {
+		t.Errorf("a1.md project link not created: got=%q err=%v", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(projectDir, "notes.txt")); !os.IsNotExist(err) {
+		t.Errorf("a non-.md file must not be linked")
+	}
+	if _, err := os.Lstat(filepath.Join(projectDir, "a1.md.bak")); !os.IsNotExist(err) {
+		t.Errorf("a directory must not be linked even with a .md-like name")
+	}
+}
+
+// TestDeployProjectArtifacts is the regression for #62: before this, only
+// skills were deployed to project scope — every evolved agent/command was
+// written and then orphaned. It verifies all three evolved kinds land under
+// <monorepoRoot>/.claude/{skills,agents,commands}.
+func TestDeployProjectArtifacts(t *testing.T) {
+	tmp := t.TempDir()
+	skillsDir := filepath.Join(tmp, "evolved", "skills")
+	agentsDir := filepath.Join(tmp, "evolved", "agents")
+	commandsDir := filepath.Join(tmp, "evolved", "commands")
+	_ = os.MkdirAll(filepath.Join(skillsDir, "s1"), 0o755)
+	_ = os.WriteFile(filepath.Join(skillsDir, "s1", "SKILL.md"), []byte("# s1\n"), 0o644)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.WriteFile(filepath.Join(agentsDir, "a1.md"), []byte("# a1\n"), 0o644)
+	_ = os.MkdirAll(commandsDir, 0o755)
+	_ = os.WriteFile(filepath.Join(commandsDir, "c1.md"), []byte("# c1\n"), 0o644)
+
+	root := filepath.Join(tmp, "mono")
+	deployProjectArtifacts(io.Discard, io.Discard, skillsDir, agentsDir, commandsDir, root)
+
+	for _, want := range []struct{ kind, name, wantTarget string }{
+		{"skills", "s1", filepath.Join(skillsDir, "s1")},
+		{"agents", "a1.md", filepath.Join(agentsDir, "a1.md")},
+		{"commands", "c1.md", filepath.Join(commandsDir, "c1.md")},
+	} {
+		got, err := os.Readlink(filepath.Join(root, ".claude", want.kind, want.name))
+		if err != nil || got != want.wantTarget {
+			t.Errorf("%s/%s: link = %q, err = %v, want target %q", want.kind, want.name, got, err, want.wantTarget)
+		}
+	}
+}
+
 // TestLinkWorktreeClaudeMd verifies the worktree gets an absolute symlink to the
 // monorepo root's CLAUDE.md, that a missing root CLAUDE.md is a no-op, and that a
 // pre-existing real CLAUDE.md in the worktree is left intact.
@@ -134,33 +191,36 @@ func TestLinkWorktreeClaudeMd(t *testing.T) {
 	}
 }
 
-// TestLinkWorktreeSkills verifies the worktree gets an absolute symlink to the
-// monorepo's project-scoped skills, and a pre-existing real dir is not clobbered.
-func TestLinkWorktreeSkills(t *testing.T) {
+// TestLinkWorktreeArtifacts verifies the worktree gets absolute symlinks to
+// the monorepo's project-scoped skills/agents/commands (#62 extended this
+// from skills-only), and a pre-existing real dir is not clobbered.
+func TestLinkWorktreeArtifacts(t *testing.T) {
 	root := t.TempDir()
 	wt := filepath.Join(t.TempDir(), "wt")
 	_ = os.MkdirAll(wt, 0o755)
 
-	linkWorktreeSkills(io.Discard, root, wt)
+	linkWorktreeArtifacts(io.Discard, root, wt)
 
-	link := filepath.Join(wt, ".claude", "skills")
-	got, err := os.Readlink(link)
-	if err != nil {
-		t.Fatalf("worktree skills symlink not created: %v", err)
-	}
-	want := filepath.Join(root, ".claude", "skills")
-	if got != want {
-		t.Errorf("link = %q, want %q", got, want)
-	}
-	if !isDir(want) {
-		t.Errorf("monorepo .claude/skills was not created at %q", want)
+	for _, kind := range []string{"skills", "agents", "commands"} {
+		link := filepath.Join(wt, ".claude", kind)
+		got, err := os.Readlink(link)
+		if err != nil {
+			t.Fatalf("worktree .claude/%s symlink not created: %v", kind, err)
+		}
+		want := filepath.Join(root, ".claude", kind)
+		if got != want {
+			t.Errorf(".claude/%s: link = %q, want %q", kind, got, want)
+		}
+		if !isDir(want) {
+			t.Errorf("monorepo .claude/%s was not created at %q", kind, want)
+		}
 	}
 
 	// real-dir guard: a pre-existing real <wt>/.claude/skills must survive
 	wt2 := filepath.Join(t.TempDir(), "wt2")
 	realSkills := filepath.Join(wt2, ".claude", "skills")
 	_ = os.MkdirAll(realSkills, 0o755)
-	linkWorktreeSkills(io.Discard, root, wt2)
+	linkWorktreeArtifacts(io.Discard, root, wt2)
 	if fi, _ := os.Lstat(realSkills); fi != nil && fi.Mode()&os.ModeSymlink != 0 {
 		t.Errorf("a real worktree .claude/skills was clobbered into a symlink")
 	}
