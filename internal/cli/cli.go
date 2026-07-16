@@ -50,18 +50,29 @@ func NewRootCmd(version string) *cobra.Command {
 		newBackfillCmd(),
 		newConfigCmd(),
 		newPluginsCmd(),
-		// Hook auto-wire (v0.7+).
-		newHookCmd(),
-		newDoctorCmd(),
+		// Claude Code integration (v0.18+): the one namespace for what bough
+		// installs INTO Claude Code. Kept distinct from `plugins` above, which
+		// means bough's own engine plugin binaries.
+		newClaudeCmd(),
 		// Continuous learning surface (v0.9+).
 		newObserverCmd(),
 		newInstinctCmd(),
 		newEvolveCmd(),
-		newInjectContextCmd(),
-		newSessionEndCmd(),
-		newPreserveInstinctsCmd(),
-		newSessionEvolveClaudeMDCmd(),
 		newEccCmd(),
+
+		// --- Backwards compatibility ---------------------------------------
+		// `bough hook ...` / `bough doctor` predate the `claude` namespace and
+		// are wired into operators' settings.json + scripts. They keep working;
+		// the notice points at the new path.
+		deprecatedAlias(newHookCmd(), "bough claude hook"),
+		deprecatedAlias(newDoctorCmd(), "bough claude doctor"),
+		// The hook dispatcher's internal verbs. hook.go's handle switch calls
+		// their Go functions directly, so these CLI entry points are a manual
+		// debugging escape hatch, not part of the advertised surface.
+		hiddenCmd(newInjectContextCmd()),
+		hiddenCmd(newSessionEndCmd()),
+		hiddenCmd(newPreserveInstinctsCmd()),
+		hiddenCmd(newSessionEvolveClaudeMDCmd()),
 	)
 	return root
 }
