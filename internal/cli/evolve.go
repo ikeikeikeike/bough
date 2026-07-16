@@ -45,9 +45,9 @@ the per-project instinct corpus:
 Default is preview: GATE 1-4 run mechanically, surviving clusters
 are listed, and NO claude --print call is made. Pass --generate to
 run GATE 5 (= one claude --print per gate-passing cluster, inside
-your Claude Code subscription) and write evolved/skills/<slug>/
-SKILL.md (+ <repo>/.claude/skills symlink), evolved/agents/<slug>.md,
-evolved/commands/<slug>.md.`,
+your Claude Code subscription) and write evolved/skills/<slug>/SKILL.md,
+evolved/agents/<slug>.md, evolved/commands/<slug>.md — plus
+<repo>/.claude/{skills,agents,commands} symlinks (project scope).`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			if ctx == nil {
@@ -129,7 +129,7 @@ evolved/commands/<slug>.md.`,
 	cmd.Flags().BoolVar(&generate, "generate", false, "run GATE 5 (claude --print) + write artifacts (default: preview only)")
 	cmd.Flags().StringVar(&judge, "judge", "claude", "GATE 5 backend: claude (= claude --print)")
 	cmd.Flags().StringVar(&model, "model", "", "override the claude model for GATE 5 (default: sonnet — a stronger judge than the observer's haiku)")
-	cmd.Flags().BoolVar(&noSymlink, "no-symlink", false, "do not symlink generated skills into <repo>/.claude/skills (project scope)")
+	cmd.Flags().BoolVar(&noSymlink, "no-symlink", false, "do not symlink generated skills/agents/commands into <repo>/.claude (project scope)")
 	cmd.Flags().IntVar(&maxCalls, "max-calls", 0, "override the per-session GATE 5 call cap")
 	return cmd
 }
@@ -207,18 +207,66 @@ func persistEvolveOutcome(stdout, stderr io.Writer, ident homunculus.ProjectIden
 		return fmt.Errorf("evolve: save cluster-labels: %w", err)
 	}
 
-	// Deploy the evolved skills into the monorepo's PROJECT-scoped .claude/skills
-	// (not the global ~/.claude/skills): a bough-evolved skill is specific to the
-	// repo it was learned from, so global linking would pollute every repo and let
-	// a generic slug from one project silently clobber another's same-named skill.
-	// Homunculus stays the single source of truth (symlinks, no copies).
+	// Deploy the evolved skills/agents/commands into the monorepo's PROJECT-scoped
+	// .claude/{skills,agents,commands} (not the global ~/.claude/*): a
+	// bough-evolved artifact is specific to the repo it was learned from, so
+	// global linking would pollute every repo and let a generic slug from one
+	// project silently clobber another's same-named artifact. Homunculus stays
+	// the single source of truth (symlinks, no copies).
 	if !noSymlink {
-		deployProjectSkills(stdout, stderr, skillsDir, ident.Root)
+		deployProjectArtifacts(stdout, stderr, skillsDir, agentsDir, commandsDir, ident.Root)
 	}
 
 	fmt.Fprintf(stdout, "\nwrote skills=%d agents=%d commands=%d (rejected clusters=%d)\n",
 		skillsWritten, agentsWritten, commandsWritten, len(out.Rejected))
 	return nil
+}
+
+// deployProjectArtifacts symlinks every evolved skill, agent, and command
+// into the monorepo's PROJECT-scoped .claude/{skills,agents,commands} (not
+// the global ~/.claude/*): a bough-evolved artifact is specific to the repo
+// it was learned from. Skills are directories (WriteSkill's
+// <dir>/<slug>/SKILL.md); agents and commands are flat files (WriteAgent /
+// WriteCommand's <dir>/<slug>.md) — deployProjectSkills and
+// deployProjectFiles mirror that same evolved/ layout on the deploy side.
+// Before this, only skills were deployed: every evolved agent/command was
+// written and then orphaned, since no Claude session reads the homunculus
+// tree directly (#62).
+func deployProjectArtifacts(stdout, stderr io.Writer, skillsDir, agentsDir, commandsDir, monorepoRoot string) {
+	deployProjectSkills(stdout, stderr, skillsDir, monorepoRoot)
+	deployProjectFiles(stdout, stderr, "agent", agentsDir, filepath.Join(monorepoRoot, ".claude", "agents"))
+	deployProjectFiles(stdout, stderr, "command", commandsDir, filepath.Join(monorepoRoot, ".claude", "commands"))
+}
+
+// deployProjectFiles symlinks every flat-file evolved artifact (agents,
+// commands — WriteAgent / WriteCommand's <dir>/<slug>.md) found in
+// evolvedDir into projectDir. label is used only for log lines
+// ("agent"/"command"). Homunculus stays the single source of truth — these
+// are symlinks, not copies. Best-effort: never fails the evolve.
+func deployProjectFiles(stdout, stderr io.Writer, label, evolvedDir, projectDir string) {
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		fmt.Fprintf(stderr, "  deploy %ss: mkdir %s: %v\n", label, projectDir, err)
+		return
+	}
+	entries, err := os.ReadDir(evolvedDir)
+	if err != nil {
+		return // no evolved artifacts of this kind yet — nothing to deploy
+	}
+	linked := 0
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".md" {
+			continue
+		}
+		src := filepath.Join(evolvedDir, e.Name())
+		if err := ensureSymlink(src, filepath.Join(projectDir, e.Name())); err != nil {
+			fmt.Fprintf(stderr, "  deploy %s %s: %v\n", label, e.Name(), err)
+			continue
+		}
+		linked++
+	}
+	if linked > 0 {
+		fmt.Fprintf(stdout, "  linked %d %s(s) into %s\n", linked, label, projectDir)
+	}
 }
 
 // deployProjectSkills symlinks every evolved skill in evolvedSkillsDir into the
