@@ -1,4 +1,4 @@
-# bough evolve pipeline (v0.7.1)
+# bough instinct evolve pipeline (v0.7.1)
 
 The evolve pipeline turns raw Claude Code hook observations into
 state=candidate Instinct rows the operator can review + promote.
@@ -138,7 +138,7 @@ cannot collide with the join character.
 
 Every CachedJudge call appends one record. Records are atomic
 (tmp+rename) and idempotent (same input → same output → same file).
-`bough doctor` will surface cumulative cost (= sum of
+`bough claude doctor` will surface cumulative cost (= sum of
 `cost_estimate_usd` across records) once the ClaudeJudgeClient
 lands in v0.7.2.
 
@@ -206,4 +206,4 @@ against a fixed synthetic input set. Refresh:
     UPDATE_GOLDEN=1 go test -run TestGolden ./internal/evolve/...
 
 v0.7.1 is Go-vs-Go regression only. v0.7.2 lands the Python v3
-parity diff via `bough ecc import`.
+parity diff via `bough instinct import`.

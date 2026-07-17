@@ -1,5 +1,82 @@
 # Changelog
 
+## Unreleased
+
+Group everything bough installs into Claude Code under one `bough claude`
+namespace, give skills and commands the CLI path hooks already had, and publish
+`bough-hooks` / `bough-all` plugin variants now that plugin hooks are measured to
+respect project scope.
+
+### Added
+
+- **`bough claude` — one namespace for what bough installs INTO Claude Code**:
+  `bough claude hook|skill|command install|uninstall|list` plus
+  `bough claude doctor`. Two things forced the grouping. `bough plugins` already
+  means bough's own engine binaries, so a `bough plugin ...` verb for the Claude
+  Code kind would have sat one letter from an unrelated command; and the hook
+  dispatcher's internal verbs (`inject-context`, `session-end`,
+  `preserve-instincts`, `session-evolve-claudemd`) sat at root next to
+  `create`/`remove`, mixing what an operator runs with what a hook fires. Root
+  drops from 18 advertised commands to 15. `bough hook` / `bough doctor` keep
+  working as deprecated aliases for the v0.x line, and the dispatcher's verbs are
+  hidden rather than removed — the dispatcher calls their Go functions directly,
+  so they remain a debugging escape hatch.
+- **`bough claude skill|command`** — the CLI can now install the `using-bough`
+  skill and the `/bough:*` commands, not just hooks. The content is embedded in
+  the binary (new root-package `//go:embed`), so the CLI and the plugin ship
+  byte-identical artifacts from one tree, and the installed copy always matches
+  the bough version you are running. `uninstall` removes only the entries bough
+  ships; anything you authored alongside them is left alone. Note that
+  CLI-installed commands are flat (`/create`), not namespaced like the plugin's
+  (`/bough:create`).
+- **`bough instinct` is the namespace for continuous learning.** `observer`,
+  `evolve` and `ecc` sat at the root next to `create` and `remove`, as if
+  minting an instinct were a peer of bootstrapping a worktree. `.bough.yaml`
+  never agreed — it has always nested the whole domain under one `instinct:`
+  key, down to `instinct.observer.autostart`. The CLI now mirrors the config
+  the operator already writes: `bough instinct observer|evolve|import`, with
+  `list`/`show`/`status`/`promote` keeping their spelling. Root drops from 18
+  advertised commands to 12, and a test pins that bound so the next feature has
+  to choose a namespace rather than defaulting to the root.
+- **`bough-hooks` and `bough-all` plugin variants.** The marketplace now
+  publishes three plugins from one tree: `bough` (commands + skill, inert until
+  invoked, safe at any scope), `bough-hooks` (the hook loop alone), and
+  `bough-all` (both, for a one-line install). `bough-all` symlinks the root
+  `commands/`/`skills/` and `bough-hooks`' `hooks/`, so every artifact has
+  exactly one copy; tests assert the symlinks so a copy cannot silently ship
+  stale content under a shared version.
+
+### Fixed
+
+- **`nix build` / `nix profile install github:threecorp/bough` works again.**
+  Broken since v0.10.0's spinner change trimmed 12 requires out of `go.mod`
+  without re-deriving the `vendorHash` beside it, leaving the flake pinned to a
+  vendor tree that no longer matches. `nix flake check` only evaluates
+  `packages.default` and never builds it, so CI stayed green while the install
+  route was dead. Unrelated to the rest of this release; it surfaced while
+  chasing a CI failure and was reproduced on the previous tag before fixing.
+
+### Changed
+
+- **`hooks/hooks.json` is back** (as `claude-plugins/bough-hooks/hooks/`), with
+  its drift guard. v0.17.0 removed it on the belief that plugin hooks could only
+  land at user scope and would therefore observe every repo on the machine. That
+  belief was wrong, and this release measured it: with an isolated
+  `CLAUDE_CONFIG_DIR`, `claude plugin install -s project` wrote `enabledPlugins`
+  into that repo's own `.claude/settings.json`, and the plugin's
+  `UserPromptSubmit` hook fired only in that repo — a second repo on the same
+  machine got zero hits. Scope is the operator's choice, so hooks can ship in a
+  plugin again.
+- **`bough claude doctor` detects the double-fire instead of describing it.**
+  settings.json and the hook-bearing plugins wire the same dispatcher, so having
+  both fires every event twice. It turns out bough can see both halves: Claude
+  Code records an enabled plugin as `enabledPlugins` in the very settings.json
+  bough already manages. The doctor now reads it and states the conflict, naming
+  the plugin and both ways out — and equally, says when the plugin is the only
+  wiring, so "not wired" is not misread as "not observing" and answered with an
+  install that causes the double-fire. Where it cannot see (a plugin enabled at
+  the other scope) it says so rather than implying all-clear.
+
 ## v0.17.0
 
 Make the Claude Code plugin safe to install anywhere: it now ships commands +

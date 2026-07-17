@@ -27,6 +27,17 @@ jobs:
       - name: nix flake check
         run: nix flake check --no-build --show-trace
 
+      # --no-build above means the flake check only EVALUATES packages.default,
+      # so a vendorHash that no longer matches go.mod evaluates clean and fails
+      # only for whoever runs `nix profile install github:threecorp/bough`.
+      # That is exactly how v0.10.0 shipped a broken flake install and stayed
+      # green until v0.18. The `build smoke` step below does not cover it
+      # either — it builds inside the dev shell with go, never through nix's
+      # vendored deps. This is the only step that exercises the install path
+      # the README documents.
+      - name: nix build (guards vendorHash against go.mod)
+        run: nix build .#default --no-link --show-trace
+
       - name: go vet + test
         run: nix develop .#ci -c go test ./... -race
 

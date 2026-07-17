@@ -14,23 +14,45 @@ import (
 	"github.com/ikeikeikeike/bough/internal/homunculus"
 )
 
-// newInstinctCmd wires `bough instinct` — the read-side counterpart
-// to `bough observer run-once`. v0.9.0 ships status / list / show so
-// an operator can see what the observer wrote without grepping the
-// homunculus tree directly. v0.9.13 adds promote (project → global
-// corpus, ECC auto-promotion parity); mint stays out because the
-// canonical mint path is via `bough observer run-once`.
+// newInstinctCmd is the namespace for bough's continuous-learning surface —
+// everything that fills, reads, or spends the instinct corpus.
+//
+// The grouping is not invented here: `.bough.yaml` already nests this domain
+// under one `instinct:` key, down to `instinct.observer.autostart`. Only the
+// CLI disagreed, spreading `observer` / `evolve` / `ecc` across the root next
+// to `create` and `remove` as if they were peers of the worktree lifecycle.
+// Mirroring the config the operator already writes means the two vocabularies
+// cannot drift, and it costs the root four entries.
+//
+// The reading verbs keep their spelling (`bough instinct list` was already
+// right); only the three that lived at root moved under it.
 func newInstinctCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "instinct",
-		Short: "Inspect the instinct corpus the bough observer has captured",
-		Long: `bough instinct surfaces the homunculus on stdout so an
-operator can audit what the observer extracted without digging into
-~/.local/share/bough-homunculus/projects/<hash>/instincts/personal/.
-status prints the per-project totals, list enumerates ids /
-triggers / confidence, show prints one file verbatim.`,
+		Short: "The continuous-learning corpus: observe, inspect, evolve, import",
+		Long: `bough instinct is the whole continuous-learning surface, named
+after the instinct: block in .bough.yaml.
+
+  observer   mint instincts from what the hooks recorded
+  status     per-project totals + confidence histogram
+  list/show  audit the corpus without digging into
+             ~/.local/share/bough-homunculus/projects/<hash>/
+  promote    lift cross-project instincts into the global corpus
+  evolve     cluster the corpus into skills / agents / commands
+  import     migrate an existing everything-claude-code corpus in
+
+What costs money: observer and evolve --generate spawn claude --print
+on your subscription. Nothing here spawns one unless you run it — the
+only automatic path is the observer daemon, and only when
+instinct.observer.autostart is set. Reading the corpus (status, list,
+show) makes no call at all.`,
 	}
-	cmd.AddCommand(newInstinctStatusCmd(), newInstinctListCmd(), newInstinctShowCmd(), newInstinctPromoteCmd())
+	cmd.AddCommand(
+		// Reading the corpus.
+		newInstinctStatusCmd(), newInstinctListCmd(), newInstinctShowCmd(), newInstinctPromoteCmd(),
+		// Filling it, spending it, seeding it from elsewhere.
+		newObserverCmd(), newEvolveCmd(), newEccImportCmd(),
+	)
 	return cmd
 }
 
