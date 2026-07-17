@@ -136,17 +136,24 @@ Two notes on the CLI path:
 
 `bough claude hook install` and the `bough-hooks` / `bough-all` plugins wire the
 **same dispatcher** by two different routes. Both at once fires every event
-twice: doubled observations, a doubled instinct block. bough cannot read the
-Claude Code plugin registry, so it cannot detect the conflict for you —
-`bough claude doctor` prints a note whenever settings.json carries bough hooks,
-and `claude plugin list` shows the other half.
+twice: doubled observations, a doubled instinct block.
 
-Keep whichever you prefer and drop the other:
+`bough claude doctor` detects it. Claude Code records an enabled plugin as
+`enabledPlugins` in the same `settings.json` bough already manages, so when both
+halves are in that file the doctor says so outright:
 
 ```text
-bough claude hook uninstall     # keep the plugin's wiring
-# ...or remove the plugin and keep settings.json
+  WARNING: bough's hooks are wired twice — here, and by bough-all@bough.
+           Every event fires both: observations double, the instinct block
+           is injected twice. Keep one —
+             bough claude hook uninstall            (keep the plugin's wiring)
+             claude plugin uninstall bough-all@bough (keep these entries)
 ```
+
+One limit worth knowing: the doctor reads the `settings.json` for the scope it
+was asked about. A plugin enabled at the *other* scope (user vs project) is
+outside what it can see, so it says that rather than implying all-clear —
+`claude plugin list` shows the rest.
 
 ## The binary is a prerequisite, not bundled
 

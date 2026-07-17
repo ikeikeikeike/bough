@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -400,11 +401,14 @@ func TestDoctorRender_DoubleFireNote(t *testing.T) {
 	if !strings.Contains(withHooks.String(), "double-fire") {
 		t.Errorf("expected the double-fire note when bough hooks are wired:\n%s", withHooks.String())
 	}
-	// A note that only says "something might be wrong" wastes the operator's
-	// time: it must name both plugins that conflict and the way out.
-	for _, want := range []string{"bough-hooks", "bough-all", "bough claude hook uninstall"} {
+	// With no plugin enabled here, bough must not claim a conflict it cannot
+	// see — it points at the command that shows the other scope instead.
+	if strings.Contains(withHooks.String(), "WARNING") {
+		t.Errorf("doctor warns of a double-fire with no plugin enabled:\n%s", withHooks.String())
+	}
+	for _, want := range []string{"bough-hooks", "bough-all", "claude plugin list"} {
 		if !strings.Contains(withHooks.String(), want) {
-			t.Errorf("double-fire note does not mention %q:\n%s", want, withHooks.String())
+			t.Errorf("note does not mention %q:\n%s", want, withHooks.String())
 		}
 	}
 	// The v0.17.0 wording claimed bough's hooks live ONLY in settings.json.
@@ -461,5 +465,124 @@ func TestManager_List_ParsesExistingHandEdited(t *testing.T) {
 	}
 	if groups[1].Matcher != "" {
 		t.Errorf("second group matcher: got %q want empty", groups[1].Matcher)
+	}
+}
+
+// TestEnabledHookPlugins covers the read side: which enabledPlugins entries
+// count as a hook-bearing bough variant. `bough` must not — it ships commands
+// and a skill only, so flagging it would cry wolf on the one variant that is
+// safe to install anywhere.
+func TestEnabledHookPlugins(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		json string
+		want []string
+	}{
+		{"no enabledPlugins key", `{}`, nil},
+		{"hook-bearing variant", `{"enabledPlugins":{"bough-all@bough":true}}`, []string{"bough-all@bough"}},
+		{"both variants, sorted", `{"enabledPlugins":{"bough-hooks@mp":true,"bough-all@bough":true}}`,
+			[]string{"bough-all@bough", "bough-hooks@mp"}},
+		{"commands-only variant is not a conflict", `{"enabledPlugins":{"bough@bough":true}}`, nil},
+		{"unrelated plugins ignored", `{"enabledPlugins":{"something@else":true}}`, nil},
+		{"disabled entry ignored", `{"enabledPlugins":{"bough-all@bough":false}}`, nil},
+		{"marketplace half is whatever the operator named it",
+			`{"enabledPlugins":{"bough-all@my-fork":true}}`, []string{"bough-all@my-fork"}},
+		{"a shape bough does not recognise is not bough's to report on",
+			`{"enabledPlugins":["bough-all@bough"]}`, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(tc.json), &raw); err != nil {
+				t.Fatal(err)
+			}
+			got := enabledHookPlugins(raw)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("enabledHookPlugins() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDoctorRender_PluginConflictIsDetected is the payoff: with both wirings
+// present in one settings.json, doctor stops hedging and states the conflict.
+// This is the case the prose could only ask the operator to check by hand.
+func TestDoctorRender_PluginConflictIsDetected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".claude", "settings.json")
+	m := New(path)
+	if err := m.Install(context.Background(), "bough hook handle"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	// Enable the plugin the way `claude plugin install -s project` does.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatal(err)
+	}
+	settings["enabledPlugins"] = json.RawMessage(`{"bough-all@bough":true}`)
+	out, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := m.Doctor(context.Background(), "")
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	if !slices.Equal(report.HookPlugins, []string{"bough-all@bough"}) {
+		t.Fatalf("HookPlugins = %v, want [bough-all@bough]", report.HookPlugins)
+	}
+
+	var sb strings.Builder
+	report.Render(&sb)
+	got := sb.String()
+	if !strings.Contains(got, "WARNING") {
+		t.Errorf("both wirings present but no warning:\n%s", got)
+	}
+	// The warning has to name the offender and both ways out, or the operator
+	// still has to go figure out what to do.
+	for _, want := range []string{"bough-all@bough", "bough claude hook uninstall", "claude plugin uninstall"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("warning does not mention %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestDoctorRender_PluginOnlyIsNotAConflict covers the third branch: the plugin
+// supplies the hooks and settings.json is empty. That is a correct setup, so it
+// must not warn — but silence would read as "bough is not observing me" and
+// invite the install that WOULD double-fire.
+func TestDoctorRender_PluginOnlyIsNotAConflict(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"enabledPlugins":{"bough-hooks@bough":true}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := New(path).Doctor(context.Background(), "")
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	var sb strings.Builder
+	report.Render(&sb)
+	got := sb.String()
+
+	if strings.Contains(got, "WARNING") {
+		t.Errorf("plugin-only wiring is correct; it must not warn:\n%s", got)
+	}
+	if !strings.Contains(got, "bough-hooks@bough") {
+		t.Errorf("report does not say where the hooks come from:\n%s", got)
+	}
+	if !strings.Contains(got, "hook install") {
+		t.Errorf("report does not warn against adding the second wiring:\n%s", got)
 	}
 }

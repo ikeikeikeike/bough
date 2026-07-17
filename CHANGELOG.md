@@ -67,11 +67,15 @@ respect project scope.
   `UserPromptSubmit` hook fired only in that repo — a second repo on the same
   machine got zero hits. Scope is the operator's choice, so hooks can ship in a
   plugin again.
-- **`bough claude doctor`'s double-fire note names the real conflict again.**
+- **`bough claude doctor` detects the double-fire instead of describing it.**
   settings.json and the hook-bearing plugins wire the same dispatcher, so having
-  both fires every event twice. bough cannot read the plugin registry, so the
-  note tells the operator which two to compare (`claude plugin list`) and how to
-  drop one.
+  both fires every event twice. It turns out bough can see both halves: Claude
+  Code records an enabled plugin as `enabledPlugins` in the very settings.json
+  bough already manages. The doctor now reads it and states the conflict, naming
+  the plugin and both ways out — and equally, says when the plugin is the only
+  wiring, so "not wired" is not misread as "not observing" and answered with an
+  install that causes the double-fire. Where it cannot see (a plugin enabled at
+  the other scope) it says so rather than implying all-clear.
 
 ## v0.17.0
 

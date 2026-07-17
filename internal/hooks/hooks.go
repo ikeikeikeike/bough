@@ -33,6 +33,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 )
 
@@ -348,6 +350,50 @@ type DoctorReport struct {
 	Events       []EventStatus
 	Observer     ObserverStatus
 	Cost         CostStatus
+	// HookPlugins names the bough plugin variants that carry hooks and are
+	// enabled somewhere Claude Code will honour them. Empty is the common case;
+	// non-empty alongside wired settings.json entries is a real double-fire,
+	// not a possibility to warn about in the abstract.
+	HookPlugins []string
+}
+
+// hookBearingPlugins are the published variants whose hooks/hooks.json wires
+// the same dispatcher `Install` writes into settings.json. `bough` is absent on
+// purpose: it ships commands + skill only, so it cannot double-fire anything.
+var hookBearingPlugins = []string{"bough-hooks", "bough-all"}
+
+// enabledHookPlugins reads Claude Code's enabledPlugins map — the same
+// settings.json this Manager already owns — and returns the bough variants that
+// carry hooks. Keys are "<plugin>@<marketplace>"; the marketplace half is
+// whatever the operator named it when adding the source, so only the plugin
+// half is matched.
+//
+// enabledPlugins is used rather than plugins/installed_plugins.json because it
+// is the surface Claude Code documents and the file bough already parses. The
+// registry file carries more (install scope, project path) but is internal,
+// versioned ("version": 2), and would put bough's doctor at the mercy of a
+// format bough has no claim on.
+func enabledHookPlugins(raw map[string]json.RawMessage) []string {
+	blob, ok := raw["enabledPlugins"]
+	if !ok {
+		return nil
+	}
+	var enabled map[string]bool
+	if err := json.Unmarshal(blob, &enabled); err != nil {
+		return nil // a shape bough does not recognise is not bough's to report on
+	}
+	var found []string
+	for key, on := range enabled {
+		if !on {
+			continue
+		}
+		name, _, _ := strings.Cut(key, "@")
+		if slices.Contains(hookBearingPlugins, name) {
+			found = append(found, key)
+		}
+	}
+	sort.Strings(found)
+	return found
 }
 
 // EventStatus summarises one event's wiring posture. Both flags can
@@ -396,6 +442,11 @@ func (m *Manager) Doctor(ctx context.Context, obsPath string) (*DoctorReport, er
 		return nil, err
 	}
 	report := &DoctorReport{SettingsPath: m.SettingsPath}
+	// Best-effort: a settings.json bough cannot parse is already reported by
+	// List above, and an unreadable one means there are no plugins to find.
+	if raw, err := m.loadSettings(); err == nil {
+		report.HookPlugins = enabledHookPlugins(raw)
+	}
 	for _, event := range AllEvents() {
 		st := EventStatus{Event: event}
 		for _, g := range set[event] {
@@ -470,16 +521,31 @@ func (r *DoctorReport) Render(w io.Writer) {
 			fmt.Fprintf(w, "    hand cmd:  %s\n", e.Command)
 		}
 	}
-	if r.hasBoughSettingsHooks() {
-		// bough cannot see the Claude Code plugin registry from here, so this
-		// prints whenever bough hooks are wired in settings.json rather than on
-		// a detected conflict. The bough-hooks / bough-all plugins wire the same
-		// dispatcher through their own manifest, so having either installed on
-		// top of these entries fires every event twice — the operator is the
-		// only one who can see both sides, so name the check for them.
-		fmt.Fprintln(w, "  note: these settings.json entries are one of two ways bough's hooks get wired.")
-		fmt.Fprintln(w, "        If the bough-hooks or bough-all plugin is also installed (claude plugin list),")
-		fmt.Fprintln(w, "        events double-fire — keep one: `bough claude hook uninstall` or remove the plugin.")
+	switch {
+	case r.hasBoughSettingsHooks() && len(r.HookPlugins) > 0:
+		// Both halves are in this one file, so this is not a heads-up about
+		// something that might be true: the events above ARE wired twice, and
+		// every session is paying for it.
+		fmt.Fprintf(w, "  WARNING: bough's hooks are wired twice — here, and by %s.\n",
+			strings.Join(r.HookPlugins, " + "))
+		fmt.Fprintln(w, "           Every event fires both: observations double, the instinct block")
+		fmt.Fprintln(w, "           is injected twice. Keep one —")
+		fmt.Fprintln(w, "             bough claude hook uninstall            (keep the plugin's wiring)")
+		fmt.Fprintf(w, "             claude plugin uninstall %-14s (keep these entries)\n", r.HookPlugins[0])
+	case len(r.HookPlugins) > 0:
+		// The plugin owns the wiring. Say so, or "not wired" above reads as
+		// "bough is not observing me" and invites an install that double-fires.
+		fmt.Fprintf(w, "  note: nothing is wired here, but %s supplies the same hooks.\n",
+			strings.Join(r.HookPlugins, " + "))
+		fmt.Fprintln(w, "        Do not also run `bough claude hook install` — that is the double-fire.")
+	case r.hasBoughSettingsHooks():
+		// enabledPlugins is read from THIS settings.json, so a plugin enabled
+		// at the other scope (user vs project) is outside what this report can
+		// see. Point at the one command that shows the rest rather than claim
+		// there is no conflict.
+		fmt.Fprintln(w, "  note: no hook-bearing bough plugin is enabled in this settings.json, so these")
+		fmt.Fprintln(w, "        entries are the only wiring bough can see. If bough-hooks or bough-all is")
+		fmt.Fprintln(w, "        enabled at another scope (claude plugin list), events double-fire.")
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Observer:")
