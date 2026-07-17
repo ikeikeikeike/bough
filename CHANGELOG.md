@@ -37,6 +37,16 @@ respect project scope.
   exactly one copy; tests assert the symlinks so a copy cannot silently ship
   stale content under a shared version.
 
+### Fixed
+
+- **`nix build` / `nix profile install github:threecorp/bough` works again.**
+  Broken since v0.10.0's spinner change trimmed 12 requires out of `go.mod`
+  without re-deriving the `vendorHash` beside it, leaving the flake pinned to a
+  vendor tree that no longer matches. `nix flake check` only evaluates
+  `packages.default` and never builds it, so CI stayed green while the install
+  route was dead. Unrelated to the rest of this release; it surfaced while
+  chasing a CI failure and was reproduced on the previous tag before fixing.
+
 ### Changed
 
 - **`hooks/hooks.json` is back** (as `claude-plugins/bough-hooks/hooks/`), with
