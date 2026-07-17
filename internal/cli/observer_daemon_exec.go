@@ -24,7 +24,7 @@ func makeDetachedCmd(exe string, args []string) *exec.Cmd {
 }
 
 // runObserverOnceQuiet runs a single extraction pass by spawning
-// `bough observer run-once --root <root>` as a subprocess. We spawn
+// `bough instinct observer run-once --root <root>` as a subprocess. We spawn
 // rather than call in-process so each tick gets a fresh provider /
 // limiter lifecycle identical to a manual run, and a panic in one
 // pass cannot kill the daemon loop. It returns the subprocess exit

@@ -450,11 +450,11 @@ bough claude skill install | uninstall | list    # the using-bough skill
 bough claude command install | uninstall | list  # the /bough:* commands
 bough claude doctor                              # hook wiring + observer capture + cost posture
 
-# Continuous learning (opt-in; instinct.enabled: true)
-bough instinct observer run-once | start         # mint instincts via claude --print
-bough instinct list | show <id>         # inspect the captured corpus
-bough instinct evolve --generate                 # cluster instincts → skills / agents / commands
-bough instinct import                        # interop with an everything-claude-code corpus
+# Continuous learning (you run these; the daemon needs instinct.observer.autostart)
+bough instinct observer run-once | start        # mint instincts via claude --print
+bough instinct list | show <id>                 # inspect the captured corpus
+bough instinct evolve --generate                # cluster instincts → skills / agents / commands
+bough instinct import                           # interop with an everything-claude-code corpus
 ```
 
 The hook dispatcher's own verbs (`inject-context`, `session-end`,

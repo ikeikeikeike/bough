@@ -436,17 +436,20 @@ type CostStatus struct {
 // hook auto-wire is the moment "silent" failure modes become
 // possible; doctor is the operator's first stop when something
 // feels off.
-func (m *Manager) Doctor(ctx context.Context, obsPath string) (*DoctorReport, error) {
-	set, err := m.List(ctx)
+func (m *Manager) Doctor(_ context.Context, obsPath string) (*DoctorReport, error) {
+	// One read, two views. Both halves of the report — the wired hooks and the
+	// enabled plugins — come out of the same settings.json, so reading it twice
+	// (List does its own load) would let the file change underneath and report a
+	// conflict, or miss one, that never existed at any single instant.
+	raw, err := m.loadSettings()
 	if err != nil {
 		return nil, err
 	}
-	report := &DoctorReport{SettingsPath: m.SettingsPath}
-	// Best-effort: a settings.json bough cannot parse is already reported by
-	// List above, and an unreadable one means there are no plugins to find.
-	if raw, err := m.loadSettings(); err == nil {
-		report.HookPlugins = enabledHookPlugins(raw)
+	set, err := decodeHookSet(raw)
+	if err != nil {
+		return nil, err
 	}
+	report := &DoctorReport{SettingsPath: m.SettingsPath, HookPlugins: enabledHookPlugins(raw)}
 	for _, event := range AllEvents() {
 		st := EventStatus{Event: event}
 		for _, g := range set[event] {
@@ -530,8 +533,12 @@ func (r *DoctorReport) Render(w io.Writer) {
 			strings.Join(r.HookPlugins, " + "))
 		fmt.Fprintln(w, "           Every event fires both: observations double, the instinct block")
 		fmt.Fprintln(w, "           is injected twice. Keep one —")
-		fmt.Fprintln(w, "             bough claude hook uninstall            (keep the plugin's wiring)")
-		fmt.Fprintf(w, "             claude plugin uninstall %-14s (keep these entries)\n", r.HookPlugins[0])
+		fmt.Fprintln(w, "             bough claude hook uninstall     (keep the plugin's wiring)")
+		fmt.Fprintln(w, "           ...or drop the plugin side, which means ALL of these — uninstalling")
+		fmt.Fprintln(w, "           one of two leaves the other still firing:")
+		for _, p := range r.HookPlugins {
+			fmt.Fprintf(w, "             claude plugin uninstall %s\n", p)
+		}
 	case len(r.HookPlugins) > 0:
 		// The plugin owns the wiring. Say so, or "not wired" above reads as
 		// "bough is not observing me" and invites an install that double-fires.

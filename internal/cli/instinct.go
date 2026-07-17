@@ -14,12 +14,6 @@ import (
 	"github.com/ikeikeikeike/bough/internal/homunculus"
 )
 
-// newInstinctCmd wires `bough instinct` — the read-side counterpart
-// to `bough observer run-once`. v0.9.0 ships status / list / show so
-// an operator can see what the observer wrote without grepping the
-// homunculus tree directly. v0.9.13 adds promote (project → global
-// corpus, ECC auto-promotion parity); mint stays out because the
-// canonical mint path is via `bough observer run-once`.
 // newInstinctCmd is the namespace for bough's continuous-learning surface —
 // everything that fills, reads, or spends the instinct corpus.
 //
@@ -36,11 +30,10 @@ func newInstinctCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "instinct",
 		Short: "The continuous-learning corpus: observe, inspect, evolve, import",
-		Long: `bough instinct is the whole continuous-learning surface, matching
-the instinct: block in .bough.yaml that configures it.
+		Long: `bough instinct is the whole continuous-learning surface, named
+after the instinct: block in .bough.yaml.
 
-  observer   mint instincts from what the hooks recorded (opt-in;
-             each pass is a claude --print on your subscription)
+  observer   mint instincts from what the hooks recorded
   status     per-project totals + confidence histogram
   list/show  audit the corpus without digging into
              ~/.local/share/bough-homunculus/projects/<hash>/
@@ -48,7 +41,11 @@ the instinct: block in .bough.yaml that configures it.
   evolve     cluster the corpus into skills / agents / commands
   import     migrate an existing everything-claude-code corpus in
 
-Nothing here runs unless instinct.enabled is true in .bough.yaml.`,
+What costs money: observer and evolve --generate spawn claude --print
+on your subscription. Nothing here spawns one unless you run it — the
+only automatic path is the observer daemon, and only when
+instinct.observer.autostart is set. Reading the corpus (status, list,
+show) makes no call at all.`,
 	}
 	cmd.AddCommand(
 		// Reading the corpus.

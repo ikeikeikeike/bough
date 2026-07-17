@@ -554,6 +554,50 @@ func TestDoctorRender_PluginConflictIsDetected(t *testing.T) {
 	}
 }
 
+// TestDoctorRender_ConflictListsEveryPlugin is the follow-on to the warning
+// above: when two hook-bearing plugins are enabled at once, the fix has to name
+// both. Printing only the first tells the operator to run a command that leaves
+// the other still firing, and the doctor said the conflict was resolved.
+func TestDoctorRender_ConflictListsEveryPlugin(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".claude", "settings.json")
+	m := New(path)
+	if err := m.Install(context.Background(), "bough hook handle"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatal(err)
+	}
+	settings["enabledPlugins"] = json.RawMessage(`{"bough-all@bough":true,"bough-hooks@bough":true}`)
+	out, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := m.Doctor(context.Background(), "")
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	var sb strings.Builder
+	report.Render(&sb)
+	got := sb.String()
+
+	// Every offender needs its own uninstall line — not just the headline.
+	for _, p := range []string{"bough-all@bough", "bough-hooks@bough"} {
+		if !strings.Contains(got, "claude plugin uninstall "+p) {
+			t.Errorf("no uninstall line for %q; following the fix as printed would leave it firing:\n%s", p, got)
+		}
+	}
+}
+
 // TestDoctorRender_PluginOnlyIsNotAConflict covers the third branch: the plugin
 // supplies the hooks and settings.json is empty. That is a correct setup, so it
 // must not warn — but silence would read as "bough is not observing me" and
