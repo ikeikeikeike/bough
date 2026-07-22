@@ -11,6 +11,7 @@ import (
 	"github.com/ikeikeikeike/bough/internal/homunculus"
 	"github.com/ikeikeikeike/bough/internal/observe"
 	"github.com/ikeikeikeike/bough/internal/provider/claudecli"
+	"github.com/ikeikeikeike/bough/internal/termio"
 )
 
 // newDoctorCmd wires the top-level `bough doctor` alias for
@@ -48,52 +49,84 @@ func newDoctorCmd() *cobra.Command {
 //     refuse to do on their behalf)
 //  5. Homunculus root (= where the corpus lives on disk)
 func renderContinuousLearningPosture(w io.Writer) {
-	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "Continuous learning (v0.9):")
+	fmt.Fprintln(w) // blank line between the hook/observer/cost block and this one
+	st := termio.NewStyler(w)
 
-	if bin, err := exec.LookPath("claude"); err == nil {
-		fmt.Fprintf(w, "  claude CLI       ✓ %s\n", bin)
-	} else {
-		fmt.Fprintln(w, "  claude CLI       ✗ not on PATH — `bough observer run-once` will refuse to spawn until you install Claude Code")
-	}
+	// Each line reports its own status; the section header takes the worst so
+	// a missing claude CLI (the one hard error here) paints the whole block
+	// [✗], while an exported API key paints it [!].
+	claudeStatus, claudeLine := claudeCLILine()
+	envStatus, envLines := anthropicEnvLines()
+	autostart, running := observerAutostartState()
+	daemonStatus, daemonLine := observerAutostartLine(autostart, running)
 
-	apiVars := observe.DetectAnthropicAPIVars(os.Environ())
-	if len(apiVars) == 0 {
-		fmt.Fprintln(w, "  Anthropic env    ✓ no API key vars exported (subscription auth path is clean)")
-	} else {
-		fmt.Fprintln(w, "  Anthropic env    ⚠ exported API key vars detected — bough strips these from the subprocess env, but the operator's interactive `claude` session may still flip to API billing:")
-		for _, v := range apiVars {
-			fmt.Fprintf(w, "                     • %s\n", v)
+	fmt.Fprintf(w, "%s Continuous learning (v0.9):\n",
+		st.Section(termio.Worst(claudeStatus, envStatus, daemonStatus)))
+
+	fmt.Fprintf(w, "    %s claude CLI        %s\n", st.Mark(claudeStatus), claudeLine)
+	for i, line := range envLines {
+		// The first env line carries the mark; continuation lines (the named
+		// vars, the unset hint) are indented plainly under it.
+		if i == 0 {
+			fmt.Fprintf(w, "    %s Anthropic env     %s\n", st.Mark(envStatus), line)
+			continue
 		}
-		fmt.Fprintln(w, "                     run `unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN` to clear")
+		fmt.Fprintf(w, "        %s\n", line)
 	}
-
-	fmt.Fprintf(w, "  Self-DoS caps    %d calls/session, %d calls/hour, %d failure breaker, %s cooldown\n",
+	fmt.Fprintf(w, "    %s Self-DoS caps     %d calls/session, %d calls/hour, %d failure breaker, %s cooldown\n",
+		st.Mark(termio.StatusNeutral),
 		claudecli.DefaultMaxCallsPerSession,
 		claudecli.DefaultMaxCallsPerHour,
 		claudecli.DefaultCircuitBreakerN,
 		claudecli.DefaultCircuitCooldown,
 	)
+	rootStatus, rootLine := homunculusRootLine()
+	fmt.Fprintf(w, "    %s homunculus root   %s\n", st.Mark(rootStatus), rootLine)
+	fmt.Fprintf(w, "    %s observer daemon   %s\n", st.Mark(daemonStatus), daemonLine)
+}
 
+// claudeCLILine reports whether the claude binary bough shells out to is on
+// PATH. Absent is a hard error — the observer cannot mint without it.
+func claudeCLILine() (termio.Status, string) {
+	if bin, err := exec.LookPath("claude"); err == nil {
+		return termio.StatusOK, bin
+	}
+	return termio.StatusError, "not on PATH — `bough observer run-once` will refuse to spawn until you install Claude Code"
+}
+
+// anthropicEnvLines returns the API-key-scrub posture. A clean env is one OK
+// line; exported vars are a warning plus one line per offending var and the
+// unset hint. bough strips these from the subprocess, so it is a warning about
+// the operator's OWN interactive session, not a bough fault.
+func anthropicEnvLines() (termio.Status, []string) {
+	apiVars := observe.DetectAnthropicAPIVars(os.Environ())
+	if len(apiVars) == 0 {
+		return termio.StatusOK, []string{"no API key vars exported (subscription auth path is clean)"}
+	}
+	lines := []string{"exported API key vars detected — bough strips these from the subprocess env, but the operator's interactive `claude` session may still flip to API billing:"}
+	for _, v := range apiVars {
+		lines = append(lines, "• "+v)
+	}
+	return termio.StatusWarn, append(lines, "run `unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN` to clear")
+}
+
+// homunculusRootLine reports whether the corpus root exists yet. Missing is
+// neutral, not an error — it is created on the first mint.
+func homunculusRootLine() (termio.Status, string) {
 	layout := homunculus.NewLayout()
 	if _, err := os.Stat(layout.Root); err == nil {
-		fmt.Fprintf(w, "  homunculus root  ✓ %s\n", layout.Root)
-	} else {
-		fmt.Fprintf(w, "  homunculus root  · %s (will be created on first `bough observer run-once`)\n", layout.Root)
+		return termio.StatusOK, layout.Root
 	}
+	return termio.StatusNeutral, layout.Root + " (will be created on first `bough observer run-once`)"
+}
 
-	// Observer autostart posture: whether this monorepo opts into
-	// auto-running the minting daemon, and whether it is up right now.
-	// This keeps the "is bough minting in the background?" answer explicit
-	// even when autostart is on. Best-effort: no config / no project just
-	// reports the OFF line. Resolves the config file via resolveConfigPath
-	// (the same canonical .bough.yaml → legacy .worktree-isolation.yaml
-	// fallback every other bough command uses) rather than an ad hoc join,
-	// so a monorepo that has not renamed its legacy config still gets an
-	// accurate line instead of a false "autostart OFF" (observerDaemonRunning
-	// below is a pure process check and would otherwise disagree with it).
-	autostart := false
-	running := false
+// observerAutostartState resolves whether this monorepo opts into the minting
+// daemon and whether one is up right now. Best-effort: no config / no project
+// reports (false, false). Resolves the config via resolveConfigPath (the same
+// canonical .bough.yaml → legacy .worktree-isolation.yaml fallback every other
+// bough command uses) so a monorepo that has not renamed its legacy config
+// still gets an accurate answer rather than a false OFF.
+func observerAutostartState() (autostart, running bool) {
 	if cwd, err := os.Getwd(); err == nil {
 		root := resolveMonorepoRoot(cwd)
 		if cfg, err := loadConfigQuiet(resolveConfigPath(&cobra.Command{}, root)); err == nil {
@@ -101,20 +134,22 @@ func renderContinuousLearningPosture(w io.Writer) {
 		}
 		running = observerDaemonRunning(root)
 	}
-	fmt.Fprintln(w, observerAutostartLine(autostart, running))
+	return autostart, running
 }
 
-// observerAutostartLine renders the doctor's observer-autostart line so
-// the posture (off / on+running / on+idle) is unit-testable without a
-// real daemon or an on-disk config. An OFF autostart never claims the
-// daemon is running even if one happens to be up from a manual start.
-func observerAutostartLine(autostart, running bool) string {
+// observerAutostartLine renders the observer-autostart posture (off /
+// on+running / on+idle) as a status + message, unit-testable without a real
+// daemon or an on-disk config. An OFF autostart never claims the daemon is
+// running even if one happens to be up from a manual start. On+running is the
+// only OK state; both other states are neutral (a correct, deliberate choice
+// either way, not a fault).
+func observerAutostartLine(autostart, running bool) (termio.Status, string) {
 	switch {
 	case autostart && running:
-		return "  observer daemon  ✓ autostart ON — daemon running (minting instincts each interval via claude --print)"
+		return termio.StatusOK, "autostart ON — daemon running (minting instincts each interval via claude --print)"
 	case autostart:
-		return "  observer daemon  · autostart ON — not running yet (starts on the next UserPromptSubmit)"
+		return termio.StatusNeutral, "autostart ON — not running yet (starts on the next UserPromptSubmit)"
 	default:
-		return "  observer daemon  · autostart OFF — LLM minting is manual (`bough observer start` or .bough.yaml instinct.observer.autostart)"
+		return termio.StatusNeutral, "autostart OFF — LLM minting is manual (`bough observer start` or .bough.yaml instinct.observer.autostart)"
 	}
 }
