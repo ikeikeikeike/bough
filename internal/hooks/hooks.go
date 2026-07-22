@@ -36,6 +36,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/ikeikeikeike/bough/internal/termio"
 )
 
 // HookEvent is the Claude Code event name a hook handler listens
@@ -505,69 +507,127 @@ func (r *DoctorReport) hasBoughSettingsHooks() bool {
 // is meant to be read on the terminal; structured output (= JSON
 // for CI consumption) lands in v0.7.x behind a --json flag.
 func (r *DoctorReport) Render(w io.Writer) {
-	fmt.Fprintf(w, "Hook wiring (settings.json: %s)\n", r.SettingsPath)
-	for _, st := range r.Events {
-		mark := "  not wired"
-		switch {
-		case st.BoughInstalled && st.HandEdited:
-			mark = "✓ bough + hand-edited"
-		case st.BoughInstalled:
-			mark = "✓ bough installed"
-		case st.HandEdited:
-			mark = "✓ hand-edited only"
-		}
-		fmt.Fprintf(w, "  %-18s %s\n", st.Event, mark)
-		if st.BoughCommand != "" {
-			fmt.Fprintf(w, "    bough cmd: %s\n", st.BoughCommand)
-		}
-		for _, e := range st.HandEntries {
-			fmt.Fprintf(w, "    hand cmd:  %s\n", e.Command)
+	st := termio.NewStyler(w)
+	r.renderHookWiring(w, st)
+	fmt.Fprintln(w)
+	r.renderObserver(w, st)
+	fmt.Fprintln(w)
+	r.renderCostMeter(w, st)
+}
+
+// renderHookWiring is the [ ] Hook wiring section. Its header status is the
+// worst of the wiring line and the plugin-conflict line, so a real double-fire
+// paints the section [✗] while a clean single wiring paints it [✓].
+func (r *DoctorReport) renderHookWiring(w io.Writer, st termio.Styler) {
+	wired, total := 0, len(r.Events)
+	for _, e := range r.Events {
+		if e.BoughInstalled || e.HandEdited {
+			wired++
 		}
 	}
+
+	// Only a double-fire happening RIGHT NOW is a problem. The cross-scope
+	// caveat (wired here, a plugin MIGHT be on elsewhere) is a heads-up, not a
+	// fault — folding it into the rollup would paint every correctly-wired
+	// repo red, exactly the nagging-yellow flutter-doctor avoids.
+	conflict := termio.StatusOK
+	if r.hasBoughSettingsHooks() && len(r.HookPlugins) > 0 {
+		conflict = termio.StatusError // wired twice, right now, in this file
+	}
+	// A full wiring is OK; nothing wired is neutral (bough is simply not set
+	// up here — a choice, not a fault); a partial wiring is genuinely odd.
+	wiringStatus := termio.StatusOK
 	switch {
-	case r.hasBoughSettingsHooks() && len(r.HookPlugins) > 0:
-		// Both halves are in this one file, so this is not a heads-up about
-		// something that might be true: the events above ARE wired twice, and
-		// every session is paying for it.
-		fmt.Fprintf(w, "  WARNING: bough's hooks are wired twice — here, and by %s.\n",
-			strings.Join(r.HookPlugins, " + "))
-		fmt.Fprintln(w, "           Every event fires both: observations double, the instinct block")
-		fmt.Fprintln(w, "           is injected twice. Keep one —")
-		fmt.Fprintln(w, "             bough claude hook uninstall     (keep the plugin's wiring)")
-		fmt.Fprintln(w, "           ...or drop the plugin side, which means ALL of these — uninstalling")
-		fmt.Fprintln(w, "           one of two leaves the other still firing:")
-		for _, p := range r.HookPlugins {
-			fmt.Fprintf(w, "             claude plugin uninstall %s\n", p)
+	case wired == 0:
+		wiringStatus = termio.StatusNeutral
+	case wired < total:
+		wiringStatus = termio.StatusWarn
+	}
+
+	fmt.Fprintf(w, "%s Hook wiring · settings.json: %s   (%d/%d wired)\n",
+		st.Section(termio.Worst(wiringStatus, conflict)), r.SettingsPath, wired, total)
+
+	// One line per event, mark first so the column of ✓ / · scans vertically.
+	// The dispatcher command is identical for every bough-installed event, so
+	// it is summarised once below instead of repeated eight times.
+	for _, e := range r.Events {
+		mark, label := termio.StatusNeutral, "not wired"
+		switch {
+		case e.BoughInstalled && e.HandEdited:
+			mark, label = termio.StatusOK, "bough + hand-edited"
+		case e.BoughInstalled:
+			mark, label = termio.StatusOK, "bough"
+		case e.HandEdited:
+			mark, label = termio.StatusOK, "hand-edited"
 		}
-	case len(r.HookPlugins) > 0:
-		// The plugin owns the wiring. Say so, or "not wired" above reads as
-		// "bough is not observing me" and invites an install that double-fires.
-		fmt.Fprintf(w, "  note: nothing is wired here, but %s supplies the same hooks.\n",
-			strings.Join(r.HookPlugins, " + "))
-		fmt.Fprintln(w, "        Do not also run `bough claude hook install` — that is the double-fire.")
-	case r.hasBoughSettingsHooks():
-		// enabledPlugins is read from THIS settings.json, so a plugin enabled
-		// at the other scope (user vs project) is outside what this report can
-		// see. Point at the one command that shows the rest rather than claim
-		// there is no conflict.
-		fmt.Fprintln(w, "  note: no hook-bearing bough plugin is enabled in this settings.json, so these")
-		fmt.Fprintln(w, "        entries are the only wiring bough can see. If bough-hooks or bough-all is")
-		fmt.Fprintln(w, "        enabled at another scope (claude plugin list), events double-fire.")
+		fmt.Fprintf(w, "    %s %-18s %s\n", st.Mark(mark), e.Event, label)
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Observer:")
+	if wired > 0 {
+		fmt.Fprintln(w, "    • all bough events run: bough hook handle --event <Event>")
+	}
+	for _, e := range r.Events {
+		for _, h := range e.HandEntries {
+			fmt.Fprintf(w, "    • hand-edited %s: %s\n", e.Event, h.Command)
+		}
+	}
+
+	// The conflict note keeps the exact wording (and the WARNING token) the
+	// operator and the tests rely on; only the leading mark is coloured.
+	switch conflict {
+	case termio.StatusError:
+		fmt.Fprintf(w, "    %s WARNING: bough's hooks are wired twice — here, and by %s.\n",
+			st.Mark(termio.StatusError), strings.Join(r.HookPlugins, " + "))
+		fmt.Fprintln(w, "      Every event fires both: observations double, the instinct block")
+		fmt.Fprintln(w, "      is injected twice. Keep one —")
+		fmt.Fprintln(w, "        bough claude hook uninstall     (keep the plugin's wiring)")
+		fmt.Fprintln(w, "      ...or drop the plugin side, which means ALL of these — uninstalling")
+		fmt.Fprintln(w, "      one of two leaves the other still firing:")
+		for _, p := range r.HookPlugins {
+			fmt.Fprintf(w, "        claude plugin uninstall %s\n", p)
+		}
+	default:
+		switch {
+		case len(r.HookPlugins) > 0:
+			// Plugin owns the wiring and nothing is wired here — a correct
+			// setup, so [✓], but say where the hooks come from or "not wired"
+			// reads as "not observing" and invites the install that doubles.
+			fmt.Fprintf(w, "    %s nothing is wired here, but %s supplies the same hooks.\n",
+				st.Mark(termio.StatusOK), strings.Join(r.HookPlugins, " + "))
+			fmt.Fprintln(w, "      Do not also run `bough claude hook install` — that is the double-fire.")
+		case r.hasBoughSettingsHooks():
+			// The common, correct state: wired here, no plugin here. The
+			// cross-scope caveat is informational (•), so it never downgrades
+			// the section below [✓].
+			fmt.Fprintf(w, "    %s no hook-bearing bough plugin is enabled in this settings.json, so these\n",
+				st.Mark(termio.StatusNeutral))
+			fmt.Fprintln(w, "      entries are the only wiring bough can see. If bough-hooks or bough-all is")
+			fmt.Fprintln(w, "      enabled at another scope (claude plugin list), events double-fire.")
+		}
+	}
+}
+
+func (r *DoctorReport) renderObserver(w io.Writer, st termio.Styler) {
 	if r.Observer.Configured {
-		fmt.Fprintf(w, "  observations: %s (%d lines)\n", r.Observer.Path, r.Observer.LineCount)
-	} else {
-		fmt.Fprintln(w, "  observations: not yet capturing (no observations.jsonl recorded yet for this project)")
+		fmt.Fprintf(w, "%s Observer\n", st.Section(termio.StatusOK))
+		fmt.Fprintf(w, "    %s observations: %s (%d lines)\n",
+			st.Mark(termio.StatusOK), r.Observer.Path, r.Observer.LineCount)
+		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Cost meter:")
+	// Not capturing yet is not a fault — it is the pre-first-run state.
+	fmt.Fprintf(w, "%s Observer\n", st.Section(termio.StatusNeutral))
+	fmt.Fprintf(w, "    %s not yet capturing (no observations.jsonl recorded yet for this project)\n",
+		st.Mark(termio.StatusNeutral))
+}
+
+func (r *DoctorReport) renderCostMeter(w io.Writer, st termio.Styler) {
 	if r.Cost.DataAvailable {
-		fmt.Fprintf(w, "  tokens=%d est=$%.4f last=%s\n", r.Cost.Tokens, r.Cost.USDEst, r.Cost.LastSampleAt)
-	} else {
-		fmt.Fprintf(w, "  %s\n", r.Cost.Message)
+		fmt.Fprintf(w, "%s Cost meter\n", st.Section(termio.StatusOK))
+		fmt.Fprintf(w, "    %s tokens=%d est=$%.4f last=%s\n",
+			st.Mark(termio.StatusOK), r.Cost.Tokens, r.Cost.USDEst, r.Cost.LastSampleAt)
+		return
 	}
+	fmt.Fprintf(w, "%s Cost meter\n", st.Section(termio.StatusNeutral))
+	fmt.Fprintf(w, "    %s %s\n", st.Mark(termio.StatusNeutral), r.Cost.Message)
 }
 
 // loadSettings reads the settings.json file into a top-level

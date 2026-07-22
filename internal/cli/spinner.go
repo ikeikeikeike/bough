@@ -3,11 +3,8 @@ package cli
 import (
 	"fmt"
 	"io"
-	"os"
 	"sync"
 	"time"
-
-	"github.com/mattn/go-isatty"
 
 	"github.com/ikeikeikeike/bough/internal/termio"
 )
@@ -93,17 +90,9 @@ func (s *spinner) Stop() {
 }
 
 // isInteractive reports whether w is a terminal bough may animate on. A
-// termio.SyncWriter is unwrapped first — TTY-ness belongs to the fd
-// underneath, not the mutex wrapper. A non-*os.File writer (a
-// bytes.Buffer in tests, a pipe from the hook) can never be a TTY, so
-// it is treated as non-interactive.
+// The SyncWriter-unwrap + *os.File + isatty logic lives in termio.IsTTY now
+// that the doctor's colouriser needs the same check; isInteractive is kept as
+// the spinner's name for it so this file's call sites read naturally.
 func isInteractive(w io.Writer) bool {
-	if sw, ok := w.(*termio.SyncWriter); ok {
-		w = sw.Unwrap()
-	}
-	f, ok := w.(*os.File)
-	if !ok {
-		return false
-	}
-	return isatty.IsTerminal(f.Fd()) || isatty.IsCygwinTerminal(f.Fd())
+	return termio.IsTTY(w)
 }

@@ -630,3 +630,40 @@ func TestDoctorRender_PluginOnlyIsNotAConflict(t *testing.T) {
 		t.Errorf("report does not warn against adding the second wiring:\n%s", got)
 	}
 }
+
+// TestDoctorRender_SectionRollup pins the flutter-doctor rollup: a correctly
+// wired repo with no conflict is [✓], a real double-fire is [✗]. The cross-
+// scope caveat must NOT downgrade a correct setup — that was the nagging-yellow
+// the redesign set out to avoid.
+func TestDoctorRender_SectionRollup(t *testing.T) {
+	// Clean single wiring, no plugin: section [✓], caveat present but neutral.
+	clean := New(filepath.Join(t.TempDir(), ".claude", "settings.json"))
+	if err := clean.Install(context.Background(), "bough hook handle"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	report, err := clean.Doctor(context.Background(), "")
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	var sb strings.Builder
+	report.Render(&sb)
+	got := sb.String()
+	if !strings.Contains(got, "[✓] Hook wiring") {
+		t.Errorf("clean wiring should roll up to [✓]:\n%s", got)
+	}
+	if strings.Contains(got, "[✗] Hook wiring") || strings.Contains(got, "[!] Hook wiring") {
+		t.Errorf("clean wiring must not show an alarm marker:\n%s", got)
+	}
+	// The Observer/Cost sections carry their own markers too.
+	if !strings.Contains(got, "] Observer") || !strings.Contains(got, "] Cost meter") {
+		t.Errorf("Observer/Cost sections lost their [x] headers:\n%s", got)
+	}
+
+	// Add a hook-bearing plugin on top → real double-fire → [✗].
+	report.HookPlugins = []string{"bough-all@bough"}
+	var conflict strings.Builder
+	report.Render(&conflict)
+	if !strings.Contains(conflict.String(), "[✗] Hook wiring") {
+		t.Errorf("a live double-fire should roll up to [✗]:\n%s", conflict.String())
+	}
+}

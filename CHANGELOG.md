@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **`bough claude doctor` reads like `flutter doctor` now.** The old report was
+  one undifferentiated colour with a `✓` on nearly every line, so "what needs me"
+  did not jump out. Each section now carries a `[✓]` / `[!]` / `[✗]` / `[·]`
+  header that rolls up the worst status inside it, and detail lines lead with the
+  matching glyph. On a real terminal two colours paint the markers — green for
+  OK, red for anything wanting attention — while neutral/informational lines stay
+  uncoloured. Colour is on only when stdout is a TTY, `NO_COLOR` is unset, and
+  `TERM` is not `dumb`; a pipe, a redirect, a CI log, or a `NO_COLOR` user gets
+  the exact same layout in plain glyphs, so nothing is lost where colour would
+  not render. A correctly-wired repo rolls up to `[✓]` — the cross-scope
+  double-fire caveat is a `•` heads-up, not a `[!]` that nags every run; only a
+  double-fire happening right now paints the section `[✗]`. The TTY/colour
+  detection is shared with the spinner (`termio.IsTTY`), not a second copy.
+
 ## v0.18.0
 
 Group everything bough installs into Claude Code under one `bough claude`

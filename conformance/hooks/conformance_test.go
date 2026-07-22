@@ -111,10 +111,13 @@ func TestHooks_EndToEnd_InstallHandleBootstrapDoctorUninstall(t *testing.T) {
 		t.Errorf("observer run-once output missing expected marker: %s", stdout)
 	}
 
-	// doctor reports the wired state + observer line count
+	// doctor reports the wired state + observer line count. The flutter-doctor
+	// redesign moved the per-event label from "bough installed" to a "[✓] Hook
+	// wiring … (N/N wired)" header plus a "✓ <Event> bough" line; assert the
+	// header's wired count, which is the same "bough wired these" claim.
 	stdout, _ = run(t, "doctor", "", "doctor")
-	if !strings.Contains(stdout, "bough installed") {
-		t.Errorf("doctor missing 'bough installed' marker: %s", stdout)
+	if !strings.Contains(stdout, "Hook wiring") || !strings.Contains(stdout, "8/8 wired") {
+		t.Errorf("doctor missing the wired-state header: %s", stdout)
 	}
 	if !strings.Contains(stdout, "observations.jsonl") {
 		t.Errorf("doctor missing observations.jsonl reference: %s", stdout)
